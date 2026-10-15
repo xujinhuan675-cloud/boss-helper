@@ -35,6 +35,10 @@ export class ContentCounter implements BackgroundCounter {
     return this.background.request(...args)
   }
 
+  async fetchText(...args: Parameters<BackgroundCounter['fetchText']>) {
+    return this.background.fetchText(...args)
+  }
+
   async notify(...args: Parameters<BackgroundCounter['notify']>) {
     return this.background.notify(...args)
   }

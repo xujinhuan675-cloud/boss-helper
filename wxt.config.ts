@@ -23,6 +23,16 @@ export default defineConfig({
     },
     define: {
       __APP_VERSION__: JSON.stringify(version),
+      // The extension bundles content scripts as IIFE; this keeps devlog-ui's optional Vite env probe warning-free there.
+      'import.meta': '{}',
+    },
+    build: {
+      rollupOptions: {
+        onwarn(warning, warn) {
+          if (warning.code === 'INVALID_ANNOTATION') return
+          warn(warning)
+        },
+      },
     },
     ssr: {
       noExternal: [

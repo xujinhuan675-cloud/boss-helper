@@ -30,7 +30,12 @@ const configItems = helper.getConfigItems()
         },
       }"
     >
-      <Alert v-for="(items, index) in configItems[0]" :key="index" v-bind="items" />
+      <Alert
+        v-for="(items, index) in configItems[0]"
+        :key="index"
+        v-bind="items"
+        :id="items.id ?? `config-alert-${index}`"
+      />
       <UForm :disabled="helper.workflowRunning.value || conf.isLoading.value">
         <UAccordion
           type="single"

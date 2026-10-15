@@ -4,10 +4,34 @@ import { computed, onMounted, ref } from 'vue'
 import Alert from '@/components/Alert.vue'
 import { useConf } from '@/composables/conf'
 import { useHelper } from '@/composables/useHelper'
+import type { FunnelStage } from '@/entrypoints/boss/jobStore'
+import type { BossHelperCtx } from '@/entrypoints/boss/runtime'
 
 const helper = useHelper()
+const collectionBusy = computed(
+  () =>
+    'gatheringBusy' in helper &&
+    ((helper as typeof helper & { gatheringBusy: { value: boolean } }).gatheringBusy.value ||
+      ('savedAnalyzer' in helper &&
+        (helper as typeof helper & { savedAnalyzer: { busy: { value: boolean } } }).savedAnalyzer
+          .busy.value)),
+)
 
 const { todayData, statisticsData } = helper.statistics
+const bossHelper = computed(() => (helper.key === 'boss' ? (helper as BossHelperCtx) : null))
+const jobFunnel = computed(() => bossHelper.value?.jobLibrarySummary.value?.funnel ?? null)
+const funnelStages = [
+  { key: 'collected', label: '采集' },
+  { key: 'matched', label: '匹配' },
+  { key: 'applied', label: '投递' },
+  { key: 'replied', label: '回复' },
+  { key: 'interview', label: '面试' },
+  { key: 'offer', label: 'Offer' },
+] as const satisfies ReadonlyArray<{ key: FunnelStage; label: string }>
+
+function openFunnelStage(stage: FunnelStage) {
+  bossHelper.value?.openJobLibrary(stage)
+}
 
 // const { next, page } = usePager()
 const conf = useConf()
@@ -53,6 +77,7 @@ const cycle = computed(() => {
 
 onMounted(() => {
   void helper.statistics.updateStatistics()
+  void bossHelper.value?.refreshJobLibrarySummary()
 })
 </script>
 
@@ -117,18 +142,69 @@ onMounted(() => {
         </div>
       </div>
     </div>
+    <section
+      v-if="jobFunnel"
+      class="border-t border-default pt-4"
+      aria-labelledby="job-funnel-title"
+    >
+      <div class="flex items-center justify-between gap-2 mb-3">
+        <h3 id="job-funnel-title" class="text-sm font-semibold">岗位漏斗</h3>
+        <span class="text-xs text-muted">本地岗位库</span>
+      </div>
+      <ol class="grid grid-cols-2 md:grid-cols-6 gap-3" aria-label="岗位处理漏斗">
+        <li v-for="stage in funnelStages" :key="stage.key" class="min-w-0">
+          <button
+            type="button"
+            class="w-full text-left rounded-sm p-1 -m-1 hover:bg-elevated focus-visible:outline-2 focus-visible:outline-primary"
+            :aria-label="`查看${stage.label}阶段岗位，共${jobFunnel[stage.key]}条`"
+            @click="openFunnelStage(stage.key)"
+          >
+            <div class="text-xs text-muted">
+              {{ stage.label }}
+              <span
+                v-if="stage.key === 'collected' && jobFunnel.collectedToday"
+                class="text-primary"
+              >
+                +{{ jobFunnel.collectedToday }}
+              </span>
+              <span
+                v-else-if="stage.key === 'matched' && jobFunnel.matchedToday"
+                class="text-primary"
+              >
+                +{{ jobFunnel.matchedToday }}
+              </span>
+            </div>
+            <div class="text-xl font-semibold tabular-nums">{{ jobFunnel[stage.key] }}</div>
+            <UProgress
+              :model-value="
+                jobFunnel.collected ? (jobFunnel[stage.key] / jobFunnel.collected) * 100 : 0
+              "
+              size="xs"
+              color="primary"
+              :aria-label="`${stage.label} ${jobFunnel[stage.key]}`"
+            />
+          </button>
+        </li>
+      </ol>
+      <p class="text-xs text-muted mt-3">
+        点击阶段可打开对应岗位列表；回复默认复用 BOSS 的“已沟通”状态，面试和 Offer
+        可在岗位库详情中手动设置。
+      </p>
+    </section>
     <div class="flex flex-row gap-2 items-center justify-center">
       <UFieldGroup>
         <UButton
           color="primary"
-          data-help="点击开始就会开始投递"
+          data-help="点击开始投递就会开始投递"
           :loading="helper.workflow?.status.value === 'running'"
+          :disabled="collectionBusy"
           @click="helper.start()"
         >
-          {{ helper.workflow?.status.value === 'stop' ? '继续' : '开始' }}
+          {{ helper.workflow?.status.value === 'stop' ? '继续' : '开始投递' }}
         </UButton>
         <UButton
           v-if="helper.workflow?.status.value === 'stop'"
+          :disabled="collectionBusy"
           color="warning"
           data-help="重置已被筛选的岗位，开始将重新处理"
           @click="helper.reset()"

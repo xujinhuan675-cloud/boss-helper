@@ -35,6 +35,8 @@ export interface FormData {
   aiGreeting: FormDataAi
   aiFiltering: FormDataAi & { score: number }
   aiReply: FormDataAi
+  /** Full resume text shared by AI filtering and greeting prompts. */
+  resumeText: string
   amap: {
     key: string
     origins: string
@@ -51,6 +53,10 @@ export interface FormData {
   delayDeliveryInterval: number
   delayDeliveryPageNext: number
   delayMessageSending: number
+  delayCollectionScrollMin: number
+  delayCollectionScrollMax: number
+  delayCollectionDetailMin: number
+  delayCollectionDetailMax: number
   version: string
 
   [key: string]: any

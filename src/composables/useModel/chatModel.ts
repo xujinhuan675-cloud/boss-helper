@@ -12,8 +12,10 @@ import {
 } from 'ai'
 import type { ShallowReactive } from 'vue'
 
+import { counter } from '@/message'
 import type { FormDataAi } from '@/types/formData'
 import { renderTemplate } from '@/utils/ai'
+import { jsonClone } from '@/utils/deepmerge'
 
 import type { ModelConf } from '.'
 import type { WorkflowData } from '../useApplying/type'
@@ -88,7 +90,10 @@ export class ChatModel {
   agents: Map<MessageRole, [ToolLoopAgent, ModelConf, FormDataAi]> = new Map()
   generateId: { [key in MessageRole]: () => string }
 
-  constructor(public ctx: HelperContext<any, any, any>) {
+  constructor(
+    public ctx: HelperContext<any, any, any>,
+    private readonly resumeSnapshot?: string,
+  ) {
     this.generateId = role.reduce(
       (acc, agentName) => {
         acc[agentName] = createIdGenerator({
@@ -108,25 +113,54 @@ export class ChatModel {
       json?: boolean
     },
   ): boolean {
-    const conf = this.ctx.models.modelData.value.find((m) => m.key === model.model)
-    if (!conf || !model.model) {
+    const modelKey =
+      this.ctx.models.getDefaultModelKey?.() ??
+      model.model ??
+      this.ctx.models.modelData.value.find(
+        (item) =>
+          typeof item.data?.api_key === 'string' &&
+          !!item.data.api_key.trim() &&
+          typeof item.data?.base_url === 'string' &&
+          !!item.data.base_url.trim() &&
+          typeof item.data?.model === 'string' &&
+          !!item.data.model.trim(),
+      )?.key
+    const conf = this.ctx.models.modelData.value.find((m) => m.key === modelKey)
+    if (!conf || !modelKey) {
       return false
     }
-    let provider = this.providers.get(model.model)
+    let provider = this.providers.get(modelKey)
     if (!provider) {
+      const requestTimeout = conf.data?.other?.timeout ?? 60000
       provider = createOpenAI({
         baseURL: conf.data?.base_url,
         apiKey: conf.data?.api_key,
+        fetch: async (input, init) => {
+          const headers = new Headers(init?.headers)
+          const { signal: _signal, ...data } = init ?? {}
+          const result = await counter.fetchText({
+            url: String(input),
+            data: {
+              ...data,
+              headers: Object.fromEntries(headers.entries()),
+            },
+            timeout: requestTimeout,
+          })
+          return new Response(result.text, {
+            status: result.status,
+            headers: result.contentType ? { 'content-type': result.contentType } : undefined,
+          })
+        },
       })
     }
-    this.providers.set(model.model, provider)
+    this.providers.set(modelKey, provider)
 
     const agent = new ToolLoopAgent({
       model: provider.chat(conf.data?.model || 'gpt-4o'),
       output: opt?.json ? Output.json() : Output.text(),
       allowSystemInMessages: true,
     })
-    this.agents.set(name, [agent, conf, model])
+    this.agents.set(name, [agent, jsonClone(conf), { ...jsonClone(model), model: modelKey }])
     return true
   }
 
@@ -154,10 +188,20 @@ export class ChatModel {
     } else {
       messages = jsonClone(model.prompt)
     }
-    for (const msg of messages) {
-      if (typeof msg.content === 'string') {
-        msg.content = renderTemplate(msg.content, data)
+    for (const i in messages) {
+      if (typeof messages[i].content === 'string') {
+        messages[i].content = renderTemplate(messages[i].content, data)
       }
+    }
+    const resumeText =
+      this.resumeSnapshot !== undefined
+        ? this.resumeSnapshot.trim()
+        : this.ctx.resumes.currentResume.value?.content.trim()
+    if ((agentName === 'filtering' || agentName === 'greetings') && resumeText) {
+      messages.push({
+        role: 'user',
+        content: `## 求职者完整简历\n${resumeText}`,
+      })
     }
     let state: VueChatState<Message>
     if (!this.states.has(data.jobData.key)) {
@@ -270,7 +314,7 @@ ${data.jobData.jobDescription}`,
             return err.message
           }
           logger.error('Unknown error during chat streaming', err)
-          return `Unknown error: ${err instanceof Error ? err.message : String(err)}`
+          return `Unknown error: ${err}`
         },
       })) {
         let part: (typeof msg.parts)[number] | null = null
@@ -284,7 +328,7 @@ ${data.jobData.jobDescription}`,
             }
             break
           case 'reasoning-end':
-            if (lastPart && isReasoningUIPart(lastPart)) {
+            if (isReasoningUIPart(lastPart)) {
               lastPart.state = 'done'
             }
             break
@@ -296,7 +340,7 @@ ${data.jobData.jobDescription}`,
             }
             break
           case 'text-end':
-            if (lastPart && isTextUIPart(lastPart)) {
+            if (isTextUIPart(lastPart)) {
               lastPart.state = 'done'
             }
             break

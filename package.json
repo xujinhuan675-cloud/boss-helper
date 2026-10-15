@@ -14,6 +14,7 @@
     "dev:firefox": "wxt -b firefox --mv3",
     "postinstall": "wxt prepare",
     "check": "vue-tsc --noEmit",
+    "test:prepare": "node --test scripts/prepare.test.mjs",
     "build": "run-p build:chrome build:firefox build:edge",
     "build:chrome": "wxt build -b chrome",
     "build:firefox": "wxt build -b firefox --mv3",

@@ -2,7 +2,7 @@
 import { formInfoData, useConf } from '@/composables/conf'
 import { useHelper } from '@/composables/useHelper'
 import { counter } from '@/message'
-import { CustomGreetingItem } from '@/types/formData'
+import type { CustomGreetingItem } from '@/types/formData'
 
 const conf = useConf()
 const helper = useHelper()

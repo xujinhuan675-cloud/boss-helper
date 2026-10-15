@@ -1,18 +1,21 @@
 <script lang="ts" setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import LLMModelManage from '@/components/AI/LLMModelManage.vue'
 import LLMPromptEdit from '@/components/AI/LLMPromptEdit.vue'
 import FormSwitch from '@/components/Tabs/ConfigItem/Form/FormSwitch.vue'
 import { formInfoData, useConf } from '@/composables/conf'
 import { useHelper } from '@/composables/useHelper'
+import type { BossHelperCtx } from '@/entrypoints/boss/runtime'
 import type { FormDataAi } from '@/types/formData'
 
 const helper = useHelper()
 const conf = useConf()
 const aiBoxShow = ref(false)
-const aiConfBoxShow = ref(false)
 const aiBox = ref<'aiGreeting' | 'aiFiltering' | 'aiReply' | 'record'>('aiGreeting')
+const analysisBusy = computed(
+  () => helper.key === 'boss' && (helper as BossHelperCtx).savedAnalyzer.busy.value,
+)
 
 function change(v: Partial<FormDataAi>) {
   v.enable = !v.enable
@@ -27,7 +30,8 @@ function change(v: Partial<FormDataAi>) {
         :label="formInfoData.aiGreeting.label"
         :data-help="formInfoData.aiGreeting['data-help']"
         :data="conf.formData.aiGreeting"
-        :lock="helper.workflow?.status.value === 'running'"
+        :disabled="analysisBusy"
+        :lock="helper.workflow?.status.value === 'running' || analysisBusy"
         @show="
           () => {
             aiBox = 'aiGreeting'
@@ -40,7 +44,8 @@ function change(v: Partial<FormDataAi>) {
         :label="formInfoData.aiFiltering.label"
         :data-help="formInfoData.aiFiltering['data-help']"
         :data="conf.formData.aiFiltering"
-        :lock="helper.workflow?.status.value === 'running'"
+        :disabled="analysisBusy"
+        :lock="helper.workflow?.status.value === 'running' || analysisBusy"
         @show="
           () => {
             aiBox = 'aiFiltering'
@@ -75,13 +80,10 @@ function change(v: Partial<FormDataAi>) {
     <div>
       <LLMModelManage>
         <UButton
+          icon="i-lucide-settings-2"
           color="primary"
+          :disabled="analysisBusy"
           data-help="配置需要使用的LLM大模型"
-          @click="
-            () => {
-              aiConfBoxShow = true
-            }
-          "
         >
           模型配置
         </UButton>

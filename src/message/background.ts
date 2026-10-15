@@ -21,6 +21,21 @@ async function initDB() {
 }
 
 export class BackgroundCounter {
+  async fetchText(args: { url: string; data: RequestInit; timeout: number }) {
+    const signal = AbortSignal.timeout(args.timeout)
+    const res = await fetch(args.url, {
+      ...args.data,
+      signal,
+      mode: 'cors',
+      credentials: 'omit',
+    })
+    return {
+      status: res.status,
+      contentType: res.headers.get('content-type') ?? '',
+      text: await res.text(),
+    }
+  }
+
   async request(args: {
     url: string
     data: RequestInit

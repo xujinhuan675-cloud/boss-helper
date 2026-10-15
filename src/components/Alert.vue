@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AlertProps } from '@nuxt/ui/components/Alert.vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, useAttrs } from 'vue'
 
 import { counter } from '@/message'
 
@@ -9,25 +9,46 @@ export interface ExtendedAlertProps extends /* @vue-ignore */ AlertProps {
   showIcon?: boolean
 }
 
-const props = defineProps<ExtendedAlertProps>()
+defineOptions({ inheritAttrs: false })
+const declaredProps = withDefaults(defineProps<ExtendedAlertProps>(), { showIcon: true })
+const attrs = useAttrs()
+const props = computed(() => ({ ...attrs, ...declaredProps }) as ExtendedAlertProps)
 
-const storageKey = computed(() => `local:alert:${props.id}`)
+const storageKey = computed(() => (props.value.id ? `local:alert:${props.value.id}` : ''))
 const isVisible = ref(true)
+const dismissed = ref(false)
 
 onMounted(async () => {
-  const shouldHide = await counter.storageGet(storageKey.value, false)
-  isVisible.value = !shouldHide
+  if (!storageKey.value) return
+  try {
+    const shouldHide = await counter.storageGet(storageKey.value, false)
+    if (!dismissed.value) isVisible.value = !shouldHide
+  } catch {
+    // A failed read should not prevent the alert from rendering.
+  }
 })
 
-const handleClose = async () => {
-  await counter.storageSet(storageKey.value, true)
+const closeProp = computed(() =>
+  props.value.close !== undefined ? props.value.close : props.value.id ? true : undefined,
+)
+
+const handleOpenChange = async (open: boolean) => {
+  if (open) return
+  dismissed.value = true
   isVisible.value = false
+  if (storageKey.value) {
+    try {
+      await counter.storageSet(storageKey.value, true)
+    } catch {
+      // Dismissal remains local when persistence is unavailable.
+    }
+  }
 }
 
 const icon = computed(() => {
-  if (props.icon) return props.icon
-  if (props.showIcon === false) return null
-  switch (props.color) {
+  if (props.value.icon) return props.value.icon
+  if (props.value.showIcon === false) return null
+  switch (props.value.color) {
     case 'success':
       return 'solar:check-circle-outline'
     case 'error':
@@ -44,8 +65,8 @@ const icon = computed(() => {
   <UAlert
     v-if="isVisible"
     v-bind="props"
-    @close="handleClose"
-    :close="props.close ? props.close : props.id ? true : undefined"
+    :close="closeProp"
+    @update:open="handleOpenChange"
     :icon="icon"
     :color="props.color ?? 'info'"
     :variant="props.variant ?? 'subtle'"

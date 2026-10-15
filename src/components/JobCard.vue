@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
-import { JobStatus } from '@/composables/useApplying/type'
-import { JobData, useHelper } from '@/composables/useHelper'
+import type { JobStatus } from '@/composables/useApplying/type'
+import type { JobData } from '@/composables/useHelper'
+import { useHelper } from '@/composables/useHelper'
+import type { BossHelperCtx } from '@/entrypoints/boss/runtime'
 
 const helper = useHelper()
 
 const props = defineProps<{
   job: JobData
   hover?: boolean
+  quickActions?: boolean
 }>()
+
+const bossHelper = helper as BossHelperCtx
+const quickActionBusy = ref('')
+const actionMessage = ref('')
+const savedGreeting = ref('')
+const jobId = computed(() => props.job.key.replace(/^boss::/, ''))
 
 const jobResult = computed(() => {
   return helper.jobResultMaps.get(props.job.key)
@@ -51,6 +60,77 @@ async function showDescriptionHandler() {
     showDescriptionMessage.value = e instanceof Error ? e.message : String(e)
   } finally {
     showDescriptionLoading.value = false
+  }
+}
+
+async function readSavedRecord() {
+  return (await bossHelper.getJobLibrary()).find((record) => record.encryptJobId === jobId.value)
+}
+
+async function prepareSavedJob() {
+  let record = await readSavedRecord()
+  if (!record) {
+    record = await bossHelper.captureJobSnapshot(props.job.key)
+  }
+  if (record.detailStatus !== 'complete' || !record.detail?.jobInfo?.postDescription?.trim()) {
+    record = await bossHelper.ensureSavedJobDetails(jobId.value)
+  }
+  if (record.detailStatus !== 'complete' || !record.detail?.jobInfo?.postDescription?.trim()) {
+    throw new Error('岗位详情尚未补全')
+  }
+  return record
+}
+
+async function analyzeJob() {
+  if (quickActionBusy.value) return
+  quickActionBusy.value = 'analyze'
+  actionMessage.value = ''
+  try {
+    await prepareSavedJob()
+    const result = await bossHelper.savedAnalyzer.analyzeOne(jobId.value)
+    const record = await readSavedRecord()
+    savedGreeting.value = record?.finalGreeting?.trim() ?? ''
+    actionMessage.value = result.status === 'failed' ? result.error || '分析失败' : '分析完成'
+    if (result.status !== 'failed') bossHelper.openJobLibrary(null, jobId.value)
+  } catch (error) {
+    actionMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    quickActionBusy.value = ''
+  }
+}
+
+async function copyGreeting() {
+  if (quickActionBusy.value) return
+  quickActionBusy.value = 'copy'
+  actionMessage.value = ''
+  try {
+    const record = await readSavedRecord()
+    savedGreeting.value = record?.finalGreeting?.trim() ?? savedGreeting.value
+    if (!savedGreeting.value) throw new Error('该岗位暂无已保存招呼语')
+    if (!navigator.clipboard?.writeText) throw new Error('当前环境不支持剪贴板')
+    await navigator.clipboard.writeText(savedGreeting.value)
+    actionMessage.value = '已复制招呼语'
+  } catch (error) {
+    actionMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    quickActionBusy.value = ''
+  }
+}
+
+async function sendGreeting() {
+  if (quickActionBusy.value) return
+  quickActionBusy.value = 'send'
+  actionMessage.value = ''
+  try {
+    const record = await readSavedRecord()
+    savedGreeting.value = record?.finalGreeting?.trim() ?? savedGreeting.value
+    if (!savedGreeting.value) throw new Error('该岗位暂无已保存招呼语')
+    await bossHelper.sendSavedGreeting(jobId.value)
+    actionMessage.value = '已发送招呼语'
+  } catch (error) {
+    actionMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    quickActionBusy.value = ''
   }
 }
 
@@ -142,6 +222,48 @@ function getActiveTimeType(job: JobData): 'success' | 'warning' | 'error' {
         <!-- <h4>{{ job.cityName }}/{{ job.areaDistrict }}/{{ job.businessDistrict }}</h4> -->
         <h4>{{ job.address }}</h4>
       </div>
+    </div>
+    <div
+      v-if="quickActions"
+      class="flex flex-wrap items-center justify-center gap-1 px-2 pb-2"
+      @click.stop
+    >
+      <UButton
+        icon="i-lucide-scan-search"
+        size="xs"
+        color="primary"
+        variant="soft"
+        :loading="quickActionBusy === 'analyze'"
+        :disabled="!!quickActionBusy"
+        @click.stop="void analyzeJob()"
+      >
+        开始分析
+      </UButton>
+      <UButton
+        icon="i-lucide-copy"
+        size="xs"
+        color="neutral"
+        variant="outline"
+        :loading="quickActionBusy === 'copy'"
+        :disabled="!!quickActionBusy"
+        @click.stop="void copyGreeting()"
+      >
+        复制招呼语
+      </UButton>
+      <UButton
+        icon="i-lucide-send"
+        size="xs"
+        color="success"
+        variant="soft"
+        :loading="quickActionBusy === 'send'"
+        :disabled="!!quickActionBusy"
+        @click.stop="void sendGreeting()"
+      >
+        发送招呼语
+      </UButton>
+      <span v-if="actionMessage" class="w-full text-center text-xs text-muted break-words">
+        {{ actionMessage }}
+      </span>
     </div>
     <div
       class="card-status flex-row gap-2 justify-center items-center"

@@ -1,8 +1,8 @@
 import { TaskRegistry, taskResult } from '@/composables/useApplying/handles'
 import { defineTaskHandler, defineTaskWorkflow } from '@/composables/useApplying/type'
 
-import type { BossHelperCtx } from '.'
 import { getBossData, sendPublishReq } from './requests'
+import type { BossHelperCtx } from './runtime'
 import type { BossZpJobItemData, BossZpDetailData, BossZpBossData } from './types'
 
 export type BoosJobData = {

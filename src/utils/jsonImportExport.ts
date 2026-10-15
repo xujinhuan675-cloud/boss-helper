@@ -3,9 +3,14 @@ export function exportJson(data: object, name: string) {
     type: 'application/json',
   })
   const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
+  const url = URL.createObjectURL(blob)
+  link.href = url
   link.download = `${name}.json`
-  link.click()
+  try {
+    link.click()
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
 }
 
 export async function importJson<T = any>(): Promise<T> {

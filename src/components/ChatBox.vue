@@ -1,11 +1,13 @@
 <script lang="ts" setup>
 import { isPartStreaming, isToolStreaming } from '@nuxt/ui/utils/ai'
-import { getToolName, isReasoningUIPart, isTextUIPart, isToolUIPart, UIMessage } from 'ai'
+import type { UIMessage } from 'ai'
+import { getToolName, isReasoningUIPart, isTextUIPart, isToolUIPart } from 'ai'
 
 import { appearanceConf } from '@/composables/conf'
 import { parseFiltering } from '@/composables/useApplying/utils'
 import { useHelper } from '@/composables/useHelper'
-import { VueChatState, Message } from '@/composables/useModel'
+import type { Message } from '@/composables/useModel'
+import { VueChatState } from '@/composables/useModel'
 
 const open = defineModel('open', { default: false })
 const following = ref(true)

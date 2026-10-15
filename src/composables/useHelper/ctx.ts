@@ -10,6 +10,7 @@ import type { BossHelperError } from '@/composables/useApplying/deliverError'
 import type { TaskResult, WorkflowData } from '@/composables/useApplying/type'
 import { useModel } from '@/composables/useModel'
 import { ChatModel } from '@/composables/useModel'
+import { useResumes } from '@/composables/useResume'
 import type { FormDataInput } from '@/types/formData'
 
 import type { NetConf } from './netConf'
@@ -21,6 +22,7 @@ export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
   netConfTimer: NodeJS.Timeout | null = null
   conf: ReturnType<typeof useConf>
   models: ReturnType<typeof useModel>
+  resumes: ReturnType<typeof useResumes>
   statistics: ReturnType<typeof useStatistics>
 
   chatModel: ChatModel
@@ -44,6 +46,7 @@ export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
     this.pendingMessages = ref()
     this.conf = useConf()
     this.models = useModel()
+    this.resumes = useResumes()
     this.statistics = useStatistics()
     this.currentJob = ref(null)
     this._logs = ref([])
@@ -96,13 +99,13 @@ export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
   abstract get label(): string
 
   initNetConf() {
-    void initNetConf().then((data) => {
+    initNetConf().then((data) => {
       this.netConf.value = data
     })
     if (!this.netConfTimer) {
       this.netConfTimer = setInterval(
         () => {
-          void initNetConf().then((data) => {
+          initNetConf().then((data) => {
             this.netConf.value = data
           })
         },

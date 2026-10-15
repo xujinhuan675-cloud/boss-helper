@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { DropdownMenuItem } from '@nuxt/ui'
+import type { DropdownMenuItem } from '@nuxt/ui'
 import type { ComponentPublicInstance } from 'vue'
 import { ref } from 'vue'
 
@@ -127,6 +127,7 @@ watch(
         :key="job.key"
         :job="job"
         hover
+        quick-actions
       />
     </div>
     <div class="flex gap-2 absolute bottom-6 left-2">

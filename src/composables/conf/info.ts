@@ -1,6 +1,47 @@
-import type { FormData } from '@/types/formData'
+import type { FormData, Prompt } from '@/types/formData'
 
 // TODO: 移除info, 忘记当初为啥要维护这一坨了, 还是直接写组件里面好看
+
+export const defaultAiGreetingPrompt: Prompt = [
+  {
+    role: 'system',
+    content: `## 角色
+你是负责 BOSS 招聘初聊的 AI 产品求职助理。
+
+## 任务
+根据岗位信息和求职者完整简历，生成一条与岗位高度相关的中文开场白。必须按以下顺序判断：
+1. 先识别岗位的业务方向，例如海外产品、交易产品、企业软件、AI 应用、用户产品或产品运营。
+2. 提取 JD 中最值得回应的一个要求或加分项。
+3. 从简历中找一个真实、直接对应的经历或项目证据；只写最强匹配点，不罗列完整履历。
+4. 如果岗位明确提到海外、交易、ToB、AI 应用、快速原型等方向，只有简历中确有对应经历时才点名，不得猜测或补写。
+
+## 输出要求
+- 只输出招呼语正文，不加标题、引号、项目符号或解释。
+- 使用 2 到 3 句中文，简洁、自然、适合 BOSS 初次沟通。
+- 语气像 BOSS 初次聊天开场白，直接进入岗位匹配，不使用书信格式、称呼前缀或泛泛的自我介绍。
+- 结构为：问候并指出岗位方向 + 说明一个匹配点及简历依据 + 简历沟通钩子。
+- 结尾必须使用：我把简历发您看一下，您看岗位是否适合进一步聊聊。
+- 不写姓名、工作年限、毕业年份、经验门槛、硬门槛、放宽条件或个人短板。
+- 不堆叠相关术语；同一件事用一个完整能力表达，不拆成多个技术名词或流程环节。
+- 不编造行业经验、客户资源、生产落地、模型评测或简历中没有的成果。`,
+  },
+  {
+    role: 'user',
+    content: `### 待处理的岗位信息:\`\`\`
+<岗位信息>
+岗位名: {{ jobData.jobName }}
+薪资: {{ jobData.salary }}
+学历要求: {{ jobData.degreeName }}
+经验要求: {{ jobData.experienceName }}
+技能要求: {{ jobData.skills }}
+岗位标签: {{ jobData.jobLabels }}
+<岗位描述>
+{{ jobData.jobDescription }}
+</岗位描述>
+</岗位信息>
+\`\`\``,
+  },
+]
 
 export const formInfoData: Record<string, any> = {
   configLevel: {
@@ -83,7 +124,7 @@ export const formInfoData: Record<string, any> = {
   aiGreeting: {
     label: 'AI招呼语',
     'data-help':
-      '即使前面招呼语开了也不会发送，只会发送AI生成的招呼语，让gpt来打招呼真是太棒了，毕竟开场白很重要。',
+      '根据岗位方向、JD要求和简历中的对应经历生成匹配式招呼语，只保留一个最强匹配点，并以发送简历继续沟通作为结尾。',
   },
   aiFiltering: {
     label: 'AI过滤',
@@ -219,38 +260,7 @@ export const defaultFormData: FormData = {
   },
   aiGreeting: {
     enable: false,
-    prompt: [
-      {
-        role: 'system',
-        content: `## 角色
-  求职小能手
-  
-  ## input：
-  1 **求职者信息**
-  \`\`\`
-  1. ....
-  2. ....
-  3. ....
-  \`\`\`
-  
-  ## outputformat
-  招呼语字符串，无书信格式和前缀，和聊天开场白一样的介绍求职者`,
-      },
-      {
-        role: 'user',
-        content: `### 待处理的岗位信息:\`\`\`
-  <岗位信息>
-  岗位名:{{ jobData.jobName }}   薪资: {{ jobData.salary }}
-  学历要求: {{ jobData.degreeName }}
-  技能要求: {{ jobData.skills }}
-  岗位标签:{{ jobData.jobLabels }}
-    <岗位描述>
-    {{ jobData.jobDescription }}
-    <岗位描述/>
-  </岗位信息>
-  \`\`\``,
-      },
-    ],
+    prompt: defaultAiGreetingPrompt,
   },
   aiFiltering: {
     enable: false,
@@ -298,6 +308,7 @@ export const defaultFormData: FormData = {
     enable: false,
     prompt: [{ role: 'user', content: '帮我写一个回复的提示' }],
   },
+  resumeText: '',
   amap: {
     key: '',
     origins: '',
@@ -314,6 +325,10 @@ export const defaultFormData: FormData = {
   delayDeliveryStarts: 3,
   delayDeliveryInterval: 5,
   delayDeliveryPageNext: 60,
+  delayCollectionScrollMin: 1,
+  delayCollectionScrollMax: 2,
+  delayCollectionDetailMin: 2,
+  delayCollectionDetailMax: 5,
   delayMessageSending: 2,
-  version: '20260718',
+  version: '20261015',
 }

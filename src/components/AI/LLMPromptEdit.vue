@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import type { SelectMenuItem, TableColumn } from '@nuxt/ui'
+import type { TableColumn } from '@nuxt/ui'
 import UBadge from '@nuxt/ui/components/Badge.vue'
 import UButton from '@nuxt/ui/components/Button.vue'
 import UPopover from '@nuxt/ui/components/Popover.vue'
@@ -8,9 +8,8 @@ import { h, reactive, ref } from 'vue'
 import JobCard from '@/components/JobCard.vue'
 import { formInfoData, defaultFormData, useConf } from '@/composables/conf'
 import { parseFiltering } from '@/composables/useApplying/utils'
-import { useHelper } from '@/composables/useHelper'
 import type { JobData } from '@/composables/useHelper'
-import { useModel } from '@/composables/useModel'
+import { useHelper } from '@/composables/useHelper'
 import type { Prompt } from '@/types/formData'
 import { logger } from '@/utils/logger'
 
@@ -20,17 +19,7 @@ const props = defineProps<{
 const toast = useToast()
 const helper = useHelper()
 const conf = useConf()
-const model = useModel()
 const show = defineModel<boolean>({ required: true })
-const currentModel = ref(conf.formData[props.data].model)
-const currentModelData = computed(() =>
-  model.modelData.value.find((v) => v.key === currentModel.value),
-)
-const modelItems = computed(() =>
-  model.modelData.value.map(
-    (v) => ({ ...v, avatar: { src: v.data?.avatar ?? '', loading: 'lazy' } }) as SelectMenuItem,
-  ),
-)
 
 const score = ref(props.data === 'aiFiltering' ? (conf.formData[props.data].score ?? 10) : 10)
 
@@ -168,14 +157,6 @@ async function testJob() {
     testJobStop.value = true
     return
   }
-  const md = model.modelData.value.find((v) => currentModel.value === v.key)
-  if (!currentModel.value || !md) {
-    toast.add({
-      title: '请在上级弹窗右上角选择模型',
-      color: 'warning',
-    })
-    return
-  }
   testJobLoading.value = true
   testJobStop.value = false
   try {
@@ -183,8 +164,8 @@ async function testJob() {
       !helper.chatModel.createAgent(
         {
           prompt: message.value,
-          model: currentModel.value,
           enable: true,
+          model: conf.formData[props.data].model,
         },
         props.data === 'aiFiltering' ? 'filtering' : 'greetings',
         {
@@ -212,21 +193,20 @@ async function testJob() {
               disableMessages: true,
             },
           )
-          .then((r) => Promise.all([r.text, r.finalStep.then((x) => x.reasoningText)]))
+          .then((r) => Promise.all([r.text, r.reasoningText]))
         if (props.data === 'aiFiltering' && content[0]) {
           const { message } = parseFiltering(content[0])
           content[0] = message ?? content[0]
         }
-        testDataContent[item.key]?.push({
+        testDataContent[item.key].push({
           time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
           reasoning_content: content[1],
           content: content[0],
         })
-      } catch (err) {
-        const errMsg = errorHandle(err)
+      } catch (err: any) {
         logger.error('TestJobError', err)
         toast.add({
-          title: errMsg,
+          title: err.message,
           color: 'error',
         })
       } finally {
@@ -251,14 +231,6 @@ async function testJob() {
 }
 
 async function savePrompt() {
-  if (currentModel.value == null) {
-    toast.add({
-      title: '请在右上角选择模型',
-      color: 'warning',
-    })
-    return
-  }
-  conf.formData[props.data].model = currentModel.value
   conf.formData[props.data].prompt = message.value
 
   if (props.data === 'aiFiltering') {
@@ -268,7 +240,6 @@ async function savePrompt() {
   show.value = false
 }
 
-const promptModelRef = useTemplateRef('promptModel')
 const testModelRef = useTemplateRef('testModel')
 </script>
 
@@ -276,7 +247,11 @@ const testModelRef = useTemplateRef('testModel')
   <UModal
     v-model:open="show"
     :title="formInfoData[data].label"
-    :ui="{ content: 'sm:max-w-[70%]', body: 'flex flex-col gap-4' }"
+    :ui="{
+      overlay: 'z-[10006]',
+      content: 'sm:max-w-[70%] z-[10007]',
+      body: 'flex flex-col gap-4',
+    }"
     :dismissible="false"
   >
     <template #body>
@@ -285,26 +260,13 @@ const testModelRef = useTemplateRef('testModel')
           <UInputNumber v-model="score" :min="-100" :max="100" size="sm" placeholder="请输入分数" />
         </UFormField>
       </div>
-      <div class="w-full flex items-center justify-between" ref="promptModel">
+      <div class="w-full flex items-center justify-between">
         <div class="flex gap-2">
           <UButton color="neutral"> 多对话模式 </UButton>
           <UButton color="primary" @click="addMessage"> 添加消息 </UButton>
         </div>
         <div class="flex gap-2">
           <UButton color="info" @click="inputExample"> 填入示例值 </UButton>
-          <USelectMenu
-            v-model="currentModel"
-            :items="modelItems"
-            labelKey="name"
-            valueKey="key"
-            placeholder="选择模型"
-            :portal="promptModelRef?.parentElement ?? false"
-            :avatar="{
-              src: currentModelData?.data?.avatar,
-              loading: 'lazy',
-            }"
-          >
-          </USelectMenu>
         </div>
       </div>
       <div v-pre>
@@ -328,7 +290,7 @@ const testModelRef = useTemplateRef('testModel')
             <USelectMenu
               v-model="item.role"
               :items="role"
-              :portal="promptModelRef?.parentElement ?? false"
+              :portal="false"
               :content="{ side: 'right' }"
             />
             <UButton
@@ -371,7 +333,11 @@ const testModelRef = useTemplateRef('testModel')
       <UButton color="primary" @click="savePrompt"> 保存 </UButton>
     </template>
   </UModal>
-  <USlideover v-model:open="testDialog" title="Prompt 测试" :ui="{ content: 'max-w-lg' }">
+  <USlideover
+    v-model:open="testDialog"
+    title="Prompt 测试"
+    :ui="{ overlay: 'z-[10008]', content: 'max-w-lg z-[10009]' }"
+  >
     <template #body>
       <div class="flex gap-2 mb-4" ref="testModel">
         <UButton :loading="testJobLoading" @click="addTestJob(1)" color="neutral">

@@ -55,7 +55,7 @@ function gotoAmapDevSetting() {
     </Alert>
     <Alert
       id="config-amap-ai"
-      :closable="false"
+      :close="false"
       type="info"
       title="AI Prompt 参考如下语法(仅筛选可用):"
     >

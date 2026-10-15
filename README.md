@@ -15,6 +15,28 @@ Boss直聘助手, 皆在减少投递简历的麻烦, 和提高投递简历的效
 
 > 本项目处于积极维护状态, 一直很忙所以拖了比较久才开源，抱歉了~
 
+## 本地二开版本
+
+源码及 Git 仓库位于 `F:\AnchorOS\6-项目仓库\boss-helper`。Chrome 的“加载已解压的扩展程序”固定选择仓库内的 `.output\chrome-mv3`：
+
+```text
+F:\AnchorOS\6-项目仓库\boss-helper\.output\chrome-mv3
+```
+
+在仓库根目录执行：
+
+```powershell
+git submodule update --init --recursive
+bun install --frozen-lockfile
+bun run build:chrome
+```
+
+`build:chrome` 直接更新 `.output/chrome-mv3`，无需额外复制或同步。以后修改源码后执行同一构建命令，Chrome 继续使用同一加载目录；构建成功后重载扩展，再刷新已打开的 BOSS 页面。源码不放进构建输出目录。
+
+原来的可加载扩展包完整保留在 `local/original-chrome`，仅用于回退。若本机 Bun 的依赖安装停在安装脚本，可用 `bun install --frozen-lockfile --ignore-scripts` 完成安装，再运行 `bun run postinstall` 准备 WXT。
+
+工程入口见 [项目目录结构索引](docs/项目目录结构索引.md)。当前目录整理和构建入口不代表滚动采集、事前投或定时发送已经实现。
+
 ## 相关链接
 
 唯一交流群:

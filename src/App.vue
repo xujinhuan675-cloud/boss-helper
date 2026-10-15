@@ -1,25 +1,27 @@
 <script lang="ts" setup>
 import type { TabsItem } from '@nuxt/ui'
-import { useRafFn } from '@vueuse/core'
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import ChatBox from '@/components/ChatBox.vue'
+import CollectionControls from '@/components/CollectionControls.vue'
 import JobCards from '@/components/JobCards.vue'
 import Version from '@/components/Menu/Version.vue'
-import About from '@/components/Tabs/About.vue'
 import Ai from '@/components/Tabs/AI.vue'
 import Config from '@/components/Tabs/Config.vue'
 import Filter from '@/components/Tabs/Filter.vue'
 import Logs from '@/components/Tabs/Logs.vue'
+import ResumeManager from '@/components/Tabs/ResumeManager.vue'
 import Statistics from '@/components/Tabs/Statistics.vue'
 import { useConf, appearanceConf } from '@/composables/conf'
 import { useModel } from '@/composables/useModel'
+import type { BossHelperCtx } from '@/entrypoints/boss/runtime'
 
 import { useHelper, VITE_VERSION } from './composables/useHelper'
 
 const model = useModel()
 
 const helper = useHelper()
+const bossHelper = helper as BossHelperCtx
 const { todayData } = helper.statistics
 const conf = useConf()
 
@@ -29,93 +31,23 @@ const items = computed<TabsItem[]>(() => {
     { slot: 'filter', label: '筛选' },
     { slot: 'config', label: '配置', help: '好好看，好好学' },
     { slot: 'ai', label: 'AI', help: 'AI时代，脚本怎么能落伍!' },
+    { slot: 'resume', label: '简历' },
     { slot: 'logs', label: '日志', help: '反正你也不看' },
-    { slot: 'about', label: '关于&赞赏', help: '项目是写不完美的,但总要去追求完美' },
   ] satisfies (TabsItem | boolean | null | undefined | '')[]
 
   return configs.filter((item) => !!item) as TabsItem[]
 })
 
-// const externalFilter = ref<HTMLElement>()
 const container = ref<HTMLElement>()
-const isFeatureEnabled = ref(false)
-const helpContent = ref('鼠标移到对应元素查看提示')
-const anchor = ref({ x: 0, y: 0 })
-const isHovering = ref(false)
-const helpVisible = computed(() => isFeatureEnabled.value && isHovering.value)
-let lastElement: HTMLElement | null = null
-let lastRect = { left: 0, top: 0, width: 0, height: 0 }
-let root: ShadowRoot | Document = document
-const boxStyles = shallowRef({
-  display: 'none',
-  width: '0px',
-  height: '0px',
-  transform: 'translate(0, 0)',
-})
-
-watch(helpVisible, (visible) => {
-  if (visible) {
-    resume()
-  } else {
-    pause()
-    lastElement = null
-    boxStyles.value = { ...boxStyles.value, display: 'none' }
-  }
-})
-
-const reference = computed(() => ({
-  getBoundingClientRect: () =>
-    ({
-      width: 0,
-      height: 0,
-      left: anchor.value.x,
-      right: anchor.value.x,
-      top: anchor.value.y,
-      bottom: anchor.value.y,
-    }) as DOMRect,
-}))
-
-const updateOverlay = () => {
-  const target = root.elementFromPoint(anchor.value.x, anchor.value.y) as HTMLElement | null
-  const el = target?.closest('[data-help]') as HTMLElement | null
-  const help = el?.dataset.help || ''
-  if (!el || help === 'no-help') {
-    if (boxStyles.value.display !== 'none') {
-      boxStyles.value = { ...boxStyles.value, display: 'none' }
-      lastElement = null
-    }
-    return
-  }
-
-  const rect = el.getBoundingClientRect()
-  const hasMoved =
-    Math.abs(rect.left - lastRect.left) > 0.5 ||
-    Math.abs(rect.top - lastRect.top) > 0.5 ||
-    rect.width !== lastRect.width
-
-  if (el === lastElement && !hasMoved) return
-
-  lastElement = el
-  lastRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-  helpContent.value = help
-
-  boxStyles.value = {
-    display: 'block',
-    width: `${rect.width}px`,
-    height: `${rect.height}px`,
-    transform: `translate(${rect.left}px, ${rect.top}px)`,
-  }
-}
-
-const { pause, resume } = useRafFn(updateOverlay, { immediate: false })
-
 const chatOpen = ref(appearanceConf.value.defaultShowChatBox)
 
 onMounted(() => {
-  root = (container.value?.getRootNode() as ShadowRoot) ?? document
-  void conf.confInit()
-  void model.initModel()
-  chatOpen.value = appearanceConf.value.defaultShowChatBox
+  void (async () => {
+    await conf.confInit()
+    await helper.resumes.init(conf.formData.resumeText)
+    await model.initModel()
+    chatOpen.value = appearanceConf.value.defaultShowChatBox
+  })()
 })
 
 function tagOpen(url: string) {
@@ -135,14 +67,6 @@ function openStore() {
     })
     .open()
 }
-
-function onPointerMove(ev: PointerEvent) {
-  if (!helpVisible.value) {
-    return
-  }
-  anchor.value.x = ev.clientX
-  anchor.value.y = ev.clientY
-}
 </script>
 
 <template>
@@ -161,27 +85,7 @@ function onPointerMove(ev: PointerEvent) {
     ref="container"
   >
     <UApp :portal="container" :toaster="{ position: 'top-right', ui: { viewport: 'z-100000' } }">
-      <div class="overlay-box" :style="boxStyles" />
-      <UTooltip
-        :open="helpVisible"
-        :reference="reference"
-        :content="{
-          side: 'top',
-          sideOffset: 20,
-          updatePositionStrategy: 'always',
-        }"
-        :text="helpContent"
-        :ui="{
-          content:
-            'z-1000 flex items-center gap-1 bg-default text-highlighte shadow-xl rounded-md ring-1 ring-default h-auto px-3 py-2 text-[17px] leading-snug select-none pointer-events-auto backdrop-blur-none opacity-100 wrap-break-word',
-          text: 'whitespace-normal',
-        }"
-      />
-      <div
-        @pointermove.passive="onPointerMove"
-        @mouseenter="isHovering = true"
-        @mouseleave="isHovering = false"
-      >
+      <div>
         <div class="rounded-xl pt-3 pb-6 px-4 bg-default flex flex-col">
           <div class="flex gap-2 items-center">
             <span class="text-xl">{{ !appearanceConf.hideHeader ? 'Boss-Helper' : 'Helper' }}</span>
@@ -223,8 +127,8 @@ function onPointerMove(ev: PointerEvent) {
             </template>
             <template #config><Config /></template>
             <template #ai><Ai /></template>
+            <template #resume><ResumeManager /></template>
             <template #logs><Logs /></template>
-            <template #about><About /></template>
             <template #list-trailing>
               <UButton
                 class="ml-2"
@@ -250,11 +154,13 @@ function onPointerMove(ev: PointerEvent) {
                 反馈
               </UButton>
               <UCheckbox
+                v-if="helper.key === 'boss'"
                 class="ml-2"
                 size="md"
                 color="neutral"
-                v-model="isFeatureEnabled"
-                label="帮助"
+                :model-value="bossHelper.autoCaptureEnabled.value"
+                label="自动采集"
+                @update:model-value="(value) => bossHelper.setAutoCaptureEnabled(value === true)"
               />
             </template>
           </UTabs>
@@ -262,6 +168,7 @@ function onPointerMove(ev: PointerEvent) {
       </div>
       <JobCards />
       <ChatBox v-model:open="chatOpen" />
+      <CollectionControls />
     </UApp>
   </div>
 </template>

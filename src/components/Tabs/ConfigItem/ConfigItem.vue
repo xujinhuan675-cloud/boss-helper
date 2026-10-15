@@ -9,7 +9,7 @@ import Address from './Address.vue'
 import Appearance from './Appearance.vue'
 import CustomGreeting from './CustomGreeting.vue'
 import FormRange from './Form/FormRange.vue'
-import SalaryRange from './SalaryRange.vue'
+import SalaryRange from './SalaryRangeFilter.vue'
 
 const props = defineProps<{
   item: ConfigItem
