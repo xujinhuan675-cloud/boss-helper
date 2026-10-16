@@ -11,10 +11,9 @@ import {
   Table,
 } from '@heroui/react'
 import {
-  Database,
   ArrowUpRight,
+  ChevronRight,
   ExternalLink,
-  FileText,
   ListRestart,
   Pause,
   Play,
@@ -31,7 +30,7 @@ import { getJobFunnel } from '@/entrypoints/boss/jobStore'
 import { ConfirmDialog, IconButton, SelectField, act } from './components'
 import type { ExecutorCommand } from './protocol'
 import { statisticsHistory } from './statistics'
-import { command, openWorkbench } from './store'
+import { command } from './store'
 import { useWorkbench } from './useWorkbench'
 
 export const statusNames: Record<string, string> = {
@@ -172,26 +171,6 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
             </Button>
           )}
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            isDisabled={startDisabled}
-            onPress={() => execute('collectAnalyze')}
-          >
-            <WandSparkles size={16} />
-            采集并分析
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            isDisabled={startDisabled}
-            onPress={() => execute('completeDetails')}
-          >
-            <FileText size={16} />
-            补全详情
-          </Button>
-        </div>
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
           <span>
             今日投递 {state.today?.success ?? 0} / {state.config.deliveryLimit.value}
@@ -211,6 +190,20 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
             </Button>
           )}
         </div>
+        <Switch
+          isSelected={runtime?.autoCaptureEnabled ?? false}
+          isDisabled={disabled || busy}
+          onChange={(enabled) => {
+            void act(() => command({ type: 'setAutoCapture', enabled }))
+          }}
+        >
+          <Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+            <Label>浏览时自动采集岗位</Label>
+          </Switch.Content>
+        </Switch>
         {rotation && (
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
             <span className="min-w-0 break-words">
@@ -346,62 +339,42 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
       </div>
       <div className="space-y-3 border-t border-border pt-5">
         <h2 className="text-base font-semibold">当前配置</h2>
-        <dl className="space-y-2 text-sm">
-          <div className="flex justify-between gap-4">
-            <dt className="shrink-0 text-muted">简历</dt>
-            <dd className="min-w-0 text-right break-words">
-              {state.resumes.resumes.find((resume) => resume.id === state.resumes.currentResumeId)
-                ?.name || '未选择'}
-            </dd>
-          </div>
-          <div className="flex justify-between gap-4">
-            <dt className="shrink-0 text-muted">模型</dt>
-            <dd className="min-w-0 text-right break-words">
-              {state.models.find(
-                (model) =>
-                  model.data?.api_key?.trim() &&
-                  model.data.base_url?.trim() &&
-                  model.data.model?.trim(),
-              )?.name || '未配置'}
-            </dd>
-          </div>
-        </dl>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="secondary"
-            onPress={() => {
-              void openWorkbench('jobs')
-            }}
+        <nav aria-label="当前配置" className="-mx-2 space-y-1 text-sm">
+          <Link
+            href="./workbench.html#resumes"
+            target={compact ? '_blank' : undefined}
+            rel={compact ? 'noreferrer' : undefined}
+            className="flex w-full items-center justify-between gap-4 rounded-lg p-2 text-foreground no-underline transition-colors hover:bg-default/50"
           >
-            <Database size={15} />
-            岗位库
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onPress={() => {
-              void openWorkbench('resumes')
-            }}
+            <span className="shrink-0 text-muted">简历</span>
+            <span className="flex min-w-0 items-center justify-end gap-2">
+              <span className="min-w-0 text-right break-words">
+                {state.resumes.resumes.find((resume) => resume.id === state.resumes.currentResumeId)
+                  ?.name || '未选择'}
+              </span>
+              <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
+            </span>
+          </Link>
+          <Link
+            href="./workbench.html#models"
+            target={compact ? '_blank' : undefined}
+            rel={compact ? 'noreferrer' : undefined}
+            className="flex w-full items-center justify-between gap-4 rounded-lg p-2 text-foreground no-underline transition-colors hover:bg-default/50"
           >
-            <ExternalLink size={15} />
-            简历与关键词
-          </Button>
-        </div>
-        <Switch
-          isSelected={runtime?.autoCaptureEnabled ?? false}
-          isDisabled={disabled || busy}
-          onChange={(enabled) => {
-            void act(() => command({ type: 'setAutoCapture', enabled }))
-          }}
-        >
-          <Switch.Content>
-            <Switch.Control>
-              <Switch.Thumb />
-            </Switch.Control>
-            <Label>自动保存当前列表</Label>
-          </Switch.Content>
-        </Switch>
+            <span className="shrink-0 text-muted">模型与提示词</span>
+            <span className="flex min-w-0 items-center justify-end gap-2">
+              <span className="min-w-0 text-right break-words">
+                {state.models.find(
+                  (model) =>
+                    model.data?.api_key?.trim() &&
+                    model.data.base_url?.trim() &&
+                    model.data.model?.trim(),
+                )?.name || '未配置'}
+              </span>
+              <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
+            </span>
+          </Link>
+        </nav>
       </div>
       {!compact && runtime && (
         <div className="space-y-3 border-t border-border pt-5">

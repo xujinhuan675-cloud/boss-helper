@@ -91,19 +91,20 @@ describe('executor message boundary', () => {
 
 describe('headless executor bridge', () => {
   it.each(['collectAnalyze', 'completeDetails'])(
-    'keeps the existing %s task available through the new interface',
+    'rejects the removed %s task at both executor boundaries',
     async (type) => {
       const ctx = context()
-      const calls = []
-      ctx.savedAnalyzer.start = async (options) => calls.push(['analysis', options])
-      ctx.completeCollectedDetails = async () => calls.push(['details'])
       const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
-      expect(isExecutorCommand({ type })).toBe(true)
-      expect(await bridge.command({ type })).toEqual({ accepted: true })
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(calls).toEqual(
-        type === 'collectAnalyze' ? [['analysis', { collectNew: true }]] : [['details']],
-      )
+      expect(isExecutorCommand({ type })).toBe(false)
+      await expect(bridge.command({ type })).rejects.toThrow('Invalid executor command')
+      expect(
+        await handleExecutorMessage(
+          { type: 'boss-helper:executor', command: { type } },
+          { id: 'own' },
+          'own',
+          bridge,
+        ),
+      ).toEqual({ ok: false, error: 'Invalid executor command' })
     },
   )
 

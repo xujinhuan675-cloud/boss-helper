@@ -14,13 +14,11 @@ export type ExecutorCommand =
   | {
       type:
         | 'collect'
-        | 'collectAnalyze'
         | 'rotate'
         | 'stopRotation'
         | 'pauseGathering'
         | 'resumeGathering'
         | 'stopGathering'
-        | 'completeDetails'
         | 'stopAnalysis'
         | 'startDelivery'
         | 'stopDelivery'
@@ -144,13 +142,11 @@ export function isExecutorCommand(value: unknown): value is ExecutorCommand {
     case 'setPendingMessage':
       return keys(value, ['type', 'value']) && typeof value.value === 'string'
     case 'collect':
-    case 'collectAnalyze':
     case 'rotate':
     case 'stopRotation':
     case 'pauseGathering':
     case 'resumeGathering':
     case 'stopGathering':
-    case 'completeDetails':
     case 'stopAnalysis':
     case 'startDelivery':
     case 'stopDelivery':

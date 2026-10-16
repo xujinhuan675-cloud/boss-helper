@@ -83,8 +83,6 @@ export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): 
         switch (command.type) {
           case 'collect':
             return start(() => ctx.collectOnly())
-          case 'collectAnalyze':
-            return start(() => ctx.savedAnalyzer.start({ collectNew: true }))
           case 'rotate':
             return start(() => ctx.startKeywordRotation(ctx.keywordRotationKeywords.value))
           case 'stopRotation':
@@ -95,8 +93,6 @@ export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): 
             return ctx.resumeGathering()
           case 'stopGathering':
             return ctx.stopGathering()
-          case 'completeDetails':
-            return start(() => ctx.completeCollectedDetails())
           case 'analyze':
             return start(() => ctx.savedAnalyzer.start({ limit: command.limit }))
           case 'analyzeOne':

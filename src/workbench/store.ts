@@ -215,9 +215,7 @@ export async function command(command: ExecutorCommand) {
   if (
     [
       'collect',
-      'collectAnalyze',
       'rotate',
-      'completeDetails',
       'analyze',
       'analyzeOne',
       'startDelivery',
