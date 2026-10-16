@@ -38,8 +38,17 @@ mock.module('@/composables/useModel/chatModel', () => ({
 const { isSavedJobEligible, SavedJobAnalyzer } = await import('./savedAnalysis')
 
 const filtering = JSON.stringify({
-  positive: [{ score: 20, reason: '符合既有筛选标准' }],
-  negative: [],
+  dimensions: [
+    { key: 'responsibilities', score: 24, reason: '职责匹配' },
+    { key: 'skills', score: 20, reason: '技能匹配' },
+    { key: 'experience', score: 18, reason: '项目匹配' },
+    { key: 'industry', score: 6, reason: '行业相关' },
+    { key: 'preferences', score: 8, reason: '偏好匹配' },
+  ],
+  strengths: ['具备核心技能'],
+  gaps: ['行业经验有差距'],
+  hardRequirements: [],
+  uncertainties: [],
 })
 const forbidden = () => {
   throw new Error('must not access BOSS or send messages')
@@ -73,7 +82,8 @@ function fixture(count = 2) {
         aiFiltering: {
           enable: false,
           model: 'original-filter',
-          score: 10,
+          score: 70,
+          scoringVersion: 'weighted-v1',
           prompt: [{ role: 'system', content: '真实筛选标准与简历摘要' }],
         },
         aiGreeting: {
@@ -153,6 +163,8 @@ describe('local batch analysis interface', () => {
     '../../components/AI/BatchAnalysis.vue',
     '../../components/Tabs/AI.vue',
     '../../components/CollectionControls.vue',
+    '../../components/AI/LLMPromptEdit.vue',
+    '../../components/ChatBox.vue',
   ])('compiles the Vue script and template for %s', (relativePath) => {
     const componentPath = fileURLToPath(new URL(relativePath, import.meta.url))
     const { descriptor } = parse(readFileSync(componentPath, 'utf8'))
@@ -168,6 +180,45 @@ describe('local batch analysis interface', () => {
 })
 
 describe('saved job analysis', () => {
+  it.each(['unmet', 'unknown'])(
+    'saves a high score with %s hard requirements without generating a greeting',
+    async (status) => {
+      const { analyzer, records } = fixture(1)
+      const value = JSON.parse(filtering)
+      value.hardRequirements = [{ requirement: '硕士学历', status, reason: '学历依据' }]
+      respond = async () => JSON.stringify(value)
+      const run = await analyzer.start({ modelKey: 'selected', limit: 1 })
+      expect(run.completed).toBe(1)
+      expect(records[0].analysis).toMatchObject({
+        rating: 76,
+        maxScore: 100,
+        scoringVersion: 'weighted-v1',
+        passed: status === 'unmet' ? false : null,
+      })
+      expect(requests.map((request) => request.role)).toEqual(['filtering'])
+    },
+  )
+
+  it('keeps a high provisional score pending when evidence needs confirmation', async () => {
+    const { analyzer, records } = fixture(1)
+    const value = JSON.parse(filtering)
+    value.uncertainties = ['工作制需要确认']
+    respond = async () => JSON.stringify(value)
+    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    expect(records[0].analysis).toMatchObject({ rating: 76, passed: null, needsConfirmation: true })
+    expect(requests).toHaveLength(1)
+  })
+
+  it.each([-1, 101, 70.5])(
+    'rejects an invalid percentage threshold %s before model requests',
+    async (score) => {
+      const { analyzer, host } = fixture(1)
+      host.conf.formData.aiFiltering.score = score
+      await expect(analyzer.start({ modelKey: 'selected', limit: 1 })).rejects.toThrow()
+      expect(requests).toEqual([])
+    },
+  )
+
   it('skips excluded jobs in batch analysis', async () => {
     const { analyzer, records } = fixture(2)
     records[0].processingStatus = 'excluded'
@@ -234,7 +285,7 @@ describe('saved job analysis', () => {
     expect(run.status).toBe('failed')
     expect(run.error).toContain('访问限制')
     expect(requests.map((request) => request.role)).toEqual(['filtering'])
-    expect(records[0].analysis.rating).toBe(20)
+    expect(records[0].analysis.rating).toBe(76)
     expect(records[1].analysisStatus).toBe('pending')
   })
 
@@ -256,7 +307,7 @@ describe('saved job analysis', () => {
     expect(run).toMatchObject({ status: 'completed', total: 20, completed: 20, failed: 0 })
     expect(records.filter((record) => record.analysisStatus === 'ready')).toHaveLength(20)
     expect(records[0]).toMatchObject({
-      analysis: { rating: 20, passed: true },
+      analysis: { rating: 76, passed: true },
       finalGreeting: '招呼语草稿',
       reviewStatus: 'pending',
       sendStatus: 'pending',
@@ -320,12 +371,13 @@ describe('saved job analysis', () => {
 
   it('keeps below-threshold decisions ready without generating a greeting', async () => {
     const { analyzer, records } = fixture(1)
-    respond = async () =>
-      JSON.stringify({ positive: [], negative: [{ score: 5, reason: '不符合原规则' }] })
+    const low = JSON.parse(filtering)
+    low.dimensions[0].score = 4
+    respond = async () => JSON.stringify(low)
     await analyzer.start({ modelKey: 'selected', limit: 1 })
     expect(records[0]).toMatchObject({
       analysisStatus: 'ready',
-      analysis: { rating: -5, passed: false },
+      analysis: { rating: 56, passed: false },
     })
     expect(requests.map((request) => request.role)).toEqual(['filtering'])
   })
@@ -369,7 +421,7 @@ describe('saved job analysis', () => {
     await analyzer.start({ modelKey: 'selected', limit: 1 })
     expect(records[0]).toMatchObject({
       analysisStatus: 'failed',
-      analysis: { rating: 20 },
+      analysis: { rating: 76 },
       analysisFailureReason: 'temporary model failure',
     })
     respond = async (role) => (role === 'filtering' ? filtering : '重试成功的草稿')
@@ -401,7 +453,7 @@ describe('saved job analysis', () => {
     release(filtering)
     const run = await pending
     expect(run).toMatchObject({ status: 'stopped', failed: 0, completed: 0, skipped: 1 })
-    expect(records[0].analysis.rating).toBe(20)
+    expect(records[0].analysis.rating).toBe(76)
     expect(records[0].analysisStatus).toBe('pending')
     expect(records[0].analysisFailureReason).toBeUndefined()
     expect(isSavedJobEligible(records[0])).toBe(true)
@@ -557,7 +609,7 @@ describe('saved job analysis', () => {
     expect(records[0].analysisStatus).toBe('pending')
     expect(records[1]).toMatchObject({
       analysisStatus: 'ready',
-      analysis: { resumeId: 'resume-a', resumeName: '主简历', rating: 20, passed: true },
+      analysis: { resumeId: 'resume-a', resumeName: '主简历', rating: 76, passed: true },
       finalGreeting: '已有提示词生成的招呼语',
     })
     expect(records[2].analysisStatus).toBe('pending')

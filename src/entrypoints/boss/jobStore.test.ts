@@ -220,6 +220,7 @@ describe('job library', () => {
       ],
       'AI产品经理',
       'run-1',
+      '2026-10-15T12:00:00.000Z',
     ).records
     records[0].analysis = { passed: true }
     records[0].sendStatus = 'sent'

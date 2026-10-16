@@ -10,6 +10,7 @@ import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
 import { parseGptJson } from '../../utils/ai'
 import deepmerge, { jsonClone } from '../../utils/deepmerge'
 import { COLLECTION_RUN_STORAGE_KEY, JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
+import { KEYWORD_ROTATION_STORAGE_KEY } from './keywordRotation'
 import type { BossZpJobItemData } from './types'
 
 const conf = { formData: { salaryRange: { value: '10-15K' } } }
@@ -64,10 +65,20 @@ mock.module('./requests', () => ({
   },
 }))
 let modelRequests: string[] = []
-let modelRespond = async (role: string) =>
-  role === 'filtering'
-    ? JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
-    : '招呼语草稿'
+const filteringResponse = JSON.stringify({
+  dimensions: [
+    { key: 'responsibilities', score: 24, reason: '职责匹配' },
+    { key: 'skills', score: 20, reason: '技能匹配' },
+    { key: 'experience', score: 18, reason: '项目匹配' },
+    { key: 'industry', score: 6, reason: '行业相关' },
+    { key: 'preferences', score: 8, reason: '偏好匹配' },
+  ],
+  strengths: ['技能匹配'],
+  gaps: [],
+  hardRequirements: [],
+  uncertainties: [],
+})
+let modelRespond = async (role: string) => (role === 'filtering' ? filteringResponse : '招呼语草稿')
 mock.module('@/composables/useModel/chatModel', () => ({
   ChatModel: class {
     createAgent() {
@@ -76,6 +87,10 @@ mock.module('@/composables/useModel/chatModel', () => ({
     async chat(role, job) {
       modelRequests.push(`${role}:${job.rawData.encryptJobId}`)
       return { text: await modelRespond(role) }
+    }
+    async generate(role) {
+      modelRequests.push(role)
+      return modelRespond(role)
     }
   },
 }))
@@ -109,10 +124,7 @@ beforeEach(() => {
   visualDelayCalls = 0
   modelRequests = []
   bossDataRequests = []
-  modelRespond = async (role) =>
-    role === 'filtering'
-      ? JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
-      : '招呼语草稿'
+  modelRespond = async (role) => (role === 'filtering' ? filteringResponse : '招呼语草稿')
   for (const key of Object.keys(conf.formData)) {
     if (key.startsWith('delayCollection')) delete conf.formData[key]
   }
@@ -149,6 +161,157 @@ beforeEach(() => {
 })
 
 describe('read-only saved job library', () => {
+  it('clears obsolete analysis and drafts once while retaining jobs, details and delivery history', async () => {
+    const records = mergeJobRecords(
+      [],
+      [item('old'), item('current'), item('sent')],
+      'AI',
+      'batch',
+    ).records
+    for (const record of records) {
+      Object.assign(record, {
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: '保存的完整 JD' } },
+        analysisStatus: 'ready',
+        analysis: { rating: 200, res: { positive: [], negative: [] } },
+        finalGreeting: '旧草稿',
+        matchedAt: '2026-10-15T00:00:00Z',
+        analysisFailureReason: '旧分析错误',
+        reviewStatus: 'approved',
+      })
+    }
+    records[1].analysis = { rating: 76, scoringVersion: 'weighted-v1', passed: true }
+    records[2].sendStatus = 'sent'
+    const currentBefore = jsonClone(records[1])
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    let writes = 0
+    setStored = async (key, value) => {
+      writes++
+      data.set(key, jsonClone(value))
+    }
+    const ctx = context()
+    const library = await ctx.getJobLibrary()
+    expect(library).toHaveLength(3)
+    expect(library[0]).toMatchObject({
+      detailStatus: 'complete',
+      detail: { jobInfo: { postDescription: '保存的完整 JD' } },
+      analysisStatus: 'pending',
+      reviewStatus: 'pending',
+      sendStatus: 'pending',
+      sourceKeywords: ['AI'],
+      batches: ['batch'],
+    })
+    for (const field of ['analysis', 'finalGreeting', 'analysisFailureReason', 'matchedAt']) {
+      expect(library[0][field]).toBeUndefined()
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0][field]).toBeUndefined()
+    }
+    expect(library[1]).toEqual(currentBefore)
+    expect(library[2]).toMatchObject({
+      sendStatus: 'sent',
+      reviewStatus: 'approved',
+      analysisStatus: 'pending',
+    })
+    expect(library[2].analysis).toBeUndefined()
+    await ctx.getJobLibrary()
+    expect(writes).toBe(1)
+    expect(modelRequests).toEqual([])
+  })
+
+  it('preserves original data if obsolete-analysis cleanup cannot be saved and allows retry', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    Object.assign(records[0], {
+      analysisStatus: 'ready',
+      analysis: { rating: 200 },
+      finalGreeting: '旧草稿',
+    })
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    const before = jsonClone(records)
+    setStored = async () => {
+      throw new Error('清理保存失败')
+    }
+    const ctx = context()
+    await expect(ctx.getJobLibrary()).rejects.toThrow('清理保存失败')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(before)
+    setStored = async (key, value) => data.set(key, jsonClone(value))
+    expect((await ctx.getJobLibrary())[0].analysisStatus).toBe('pending')
+  })
+
+  it('shares an obsolete-analysis cleanup between concurrent library reads', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    records[0].analysis = { rating: 200 }
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    let release
+    let writing
+    const started = new Promise((resolve) => {
+      writing = resolve
+    })
+    const ack = new Promise((resolve) => {
+      release = resolve
+    })
+    let writes = 0
+    setStored = async (key, value) => {
+      writes++
+      writing()
+      await ack
+      data.set(key, jsonClone(value))
+    }
+    const ctx = context()
+    const first = ctx.getJobLibrary()
+    const second = ctx.getJobLibrary()
+    try {
+      await started
+      expect(ctx.hasPendingCollectionStorage).toBe(true)
+      expect(records[0].analysis.rating).toBe(200)
+    } finally {
+      release()
+    }
+    expect((await first)[0].analysis).toBeUndefined()
+    expect((await second)[0].analysis).toBeUndefined()
+    expect(writes).toBe(1)
+    expect(ctx.hasPendingCollectionStorage).toBe(false)
+  })
+
+  it('reanalyzes an obsolete reviewed result from saved details under the current rubric', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    Object.assign(records[0], {
+      detailStatus: 'complete',
+      detail: { jobInfo: { postDescription: '已保存的完整 JD' } },
+      analysisStatus: 'ready',
+      analysis: { rating: 200 },
+      reviewStatus: 'rejected',
+      finalGreeting: '旧草稿',
+    })
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    const ctx = context()
+    ctx.conf = {
+      formData: jsonClone(defaultFormData),
+    }
+    ctx.conf.formData.aiFiltering.enable = true
+    Object.assign(ctx, {
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'test', api_key: 'key', base_url: 'url' } },
+        ]),
+        getDefaultModelKey: () => 'active',
+      },
+      resumes: { currentResume: ref({ id: 'resume', name: '主简历', content: '完整简历' }) },
+      onJobCardClick: () => {
+        throw new Error('must use saved details')
+      },
+    })
+    const run = await ctx.savedAnalyzer.analyzeOne('old')
+    expect(run).toMatchObject({ status: 'completed', completed: 1 })
+    const saved = (await ctx.getJobLibrary())[0]
+    expect(saved.analysis).toMatchObject({
+      scoringVersion: 'weighted-v1',
+      rating: 76,
+      passed: true,
+    })
+    expect(saved.reviewStatus).toBe('pending')
+    expect(saved.finalGreeting).toBe('招呼语草稿')
+    expect(modelRequests).toEqual(['filtering:old', 'greetings:old'])
+  })
+
   it.each([
     null,
     { encryptJobId: '' },
@@ -190,7 +353,7 @@ describe('read-only saved job library', () => {
     Object.assign(records[0], {
       detailStatus: 'complete',
       detail: { jobInfo: { postDescription: 'Saved JD' }, bossInfo: { name: 'Alice' } },
-      analysis: { category: 'P', reasons: ['matches'] },
+      analysis: { scoringVersion: 'weighted-v1', category: 'P', reasons: ['matches'] },
       reviewStatus: 'approved',
       sendStatus: 'sent',
       finalGreeting: 'Reviewed greeting',
@@ -373,7 +536,11 @@ describe('collection with immediate analysis', () => {
     ctx.conf = {
       formData: {
         ...conf.formData,
-        aiFiltering: { score: 10, prompt: [{ role: 'user', content: '筛选' }] },
+        aiFiltering: {
+          score: 70,
+          scoringVersion: 'weighted-v1',
+          prompt: [{ role: 'user', content: '筛选' }],
+        },
         aiGreeting: { prompt: [{ role: 'user', content: '招呼语' }] },
       },
     }
@@ -405,6 +572,110 @@ describe('collection with immediate analysis', () => {
     return ctx
   }
 
+  it('prepares a newly captured card for analysis without starting competing background details', async () => {
+    const ctx = pipelineContext()
+    data.set(JOB_LIBRARY_STORAGE_KEY, [])
+    ctx['mounted'] = true
+    ctx.jobMaps.set('boss::single', {
+      rawData: {
+        jobitem: item('single'),
+        detail: { jobInfo: { postDescription: '完整 JD' } },
+      },
+    })
+    try {
+      await ctx.captureJobSnapshot('boss::single')
+      await ctx.ensureSavedJobDetails('single')
+      const run = await ctx.savedAnalyzer.analyzeOne('single')
+      expect(run).toMatchObject({ status: 'completed', completed: 1 })
+      expect((await ctx.getJobLibrary())[0]).toMatchObject({
+        analysisStatus: 'ready',
+        analysis: { rating: 76, passed: true },
+        finalGreeting: '招呼语草稿',
+      })
+    } finally {
+      ctx['mounted'] = false
+      await ctx['detailPromise']
+    }
+  })
+
+  it('fills editable keywords from a resume draft without persisting or starting collection', async () => {
+    const ctx = pipelineContext()
+    modelRespond = async () => '{"keywords":["产品经理"," AI产品经理 ","产品经理"]}'
+    await ctx.extractKeywordRotationFromResume('待保存的简历正文')
+    expect(ctx.keywordRotationKeywords.value).toBe('产品经理\nAI产品经理')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+    expect(ctx.keywordRotation.value).toBeNull()
+    expect(data.has(KEYWORD_ROTATION_STORAGE_KEY)).toBe(false)
+    expect(modelRequests).toEqual(['keywords'])
+  })
+
+  it('preserves edited keywords when the AI response is invalid and allows retry', async () => {
+    const ctx = pipelineContext()
+    ctx.keywordRotationKeywords.value = '金融产品经理'
+    modelRespond = async () => '{"keywords":[]}'
+    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('岗位关键词')
+    expect(ctx.keywordRotationKeywords.value).toBe('金融产品经理')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+    modelRespond = async () => '{"keywords":["数据产品经理"]}'
+    await ctx.extractKeywordRotationFromResume()
+    expect(ctx.keywordRotationKeywords.value).toBe('数据产品经理')
+  })
+
+  it('rejects empty resumes and incomplete models before requesting extraction', async () => {
+    const ctx = pipelineContext()
+    await expect(ctx.extractKeywordRotationFromResume(' ')).rejects.toThrow('简历')
+    ctx.models.modelData.value[0].data.api_key = ''
+    await expect(ctx.extractKeywordRotationFromResume('简历')).rejects.toThrow('模型')
+    expect(modelRequests).toEqual([])
+  })
+
+  it('blocks duplicate extraction and releases the busy flag after a request fails', async () => {
+    const ctx = pipelineContext()
+    let reject
+    modelRespond = () =>
+      new Promise((_, fail) => {
+        reject = fail
+      })
+    const pending = ctx.extractKeywordRotationFromResume()
+    expect(ctx.keywordExtractionBusy.value).toBe(true)
+    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('提取')
+    await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('提取')
+    await expect(ctx.startKeywordRotation()).rejects.toThrow('提取')
+    reject(new Error('模型请求失败'))
+    await expect(pending).rejects.toThrow('模型请求失败')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+  })
+
+  it('loads built-in keywords only when no saved rotation exists', async () => {
+    const ctx = pipelineContext()
+    await ctx.loadKeywordRotation()
+    expect(ctx.keywordRotationKeywords.value).toContain('产品经理')
+    await ctx.saveKeywordRotationKeywords('自定义岗位\nAI产品经理')
+    ctx.keywordRotationKeywords.value = '临时修改'
+    await ctx.loadKeywordRotation()
+    expect(ctx.keywordRotationKeywords.value).toBe('自定义岗位\nAI产品经理')
+  })
+
+  it('waits for keyword persistence before allowing a rotation or another extraction', async () => {
+    const ctx = pipelineContext()
+    let release
+    const ack = new Promise((resolve) => {
+      release = resolve
+    })
+    setStored = async () => ack
+    const task = ctx.saveKeywordRotationKeywords('数据产品经理')
+    try {
+      expect(ctx.keywordRotationSaving.value).toBe(true)
+      await expect(ctx.startKeywordRotation()).rejects.toThrow('保存')
+      await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('保存')
+      await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('保存')
+    } finally {
+      release()
+      await task
+    }
+    expect(ctx.keywordRotationSaving.value).toBe(false)
+  })
+
   it('resumes current pending jobs and persists score, greeting and resume identity before collection continues', async () => {
     const ctx = pipelineContext()
     Object.assign(ctx, {
@@ -433,14 +704,14 @@ describe('collection with immediate analysis', () => {
       })),
     ).toEqual([
       {
-        rating: 20,
+        rating: 76,
         resumeId: 'resume',
         greeting: '招呼语草稿',
         review: 'pending',
         send: 'pending',
       },
       {
-        rating: 20,
+        rating: 76,
         resumeId: 'resume',
         greeting: '招呼语草稿',
         review: 'pending',
@@ -460,7 +731,7 @@ describe('collection with immediate analysis', () => {
     modelRespond = async () => {
       ctx.pauseGathering()
       entered()
-      return JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
+      return filteringResponse
     }
     let scrolls = 0
     ctx.scrollDown = () => {
@@ -475,7 +746,7 @@ describe('collection with immediate analysis', () => {
     expect(run.status).toBe('stopped')
     expect(modelRequests).toEqual(['filtering:new'])
     expect(scrolls).toBe(0)
-    expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(20)
+    expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(76)
     expect(ctx.savedAnalyzer.busy.value).toBe(false)
     expect(ctx.gatheringBusy.value).toBe(false)
   })
@@ -488,7 +759,7 @@ describe('collection with immediate analysis', () => {
       Object.assign(ctx, { waitForGathering: (_ms, run) => wait(0, run) })
       modelRespond = async () => {
         document.body.innerText = message
-        return JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
+        return filteringResponse
       }
       let scrolls = 0
       ctx.scrollDown = () => {
@@ -498,7 +769,7 @@ describe('collection with immediate analysis', () => {
       expect(run.status).toBe('failed')
       expect(modelRequests).toEqual(['filtering:new'])
       expect(scrolls).toBe(0)
-      expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(20)
+      expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(76)
       expect(ctx.savedAnalyzer.busy.value).toBe(false)
     },
   )
@@ -520,7 +791,7 @@ describe('collection with immediate analysis', () => {
       'old',
     ).records
     records[0].analysisStatus = 'ready'
-    records[0].analysis = { rating: 90 }
+    records[0].analysis = { scoringVersion: 'weighted-v1', rating: 90 }
     records[1].sendStatus = 'sent'
     records[2].sendStatus = 'unknown'
     records[3].reviewStatus = 'approved'
@@ -556,7 +827,7 @@ describe('collection with immediate analysis', () => {
       events.push(`analyze:${record.encryptJobId}`)
       await ctx.saveJobAnalysis(record.encryptJobId, {
         analysisStatus: 'ready',
-        analysis: { rating: 20 },
+        analysis: { scoringVersion: 'weighted-v1', rating: 20 },
         finalGreeting: '草稿',
       })
     })
@@ -776,11 +1047,12 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     records[0].matchedAt = '2026-10-14T10:00:00.000Z'
+    records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
 
     await ctx.saveJobAnalysis('a', {
       analysisStatus: 'pending',
-      analysis: { passed: true },
+      analysis: { scoringVersion: 'weighted-v1', passed: true },
     })
 
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].matchedAt).toBe('2026-10-14T10:00:00.000Z')
@@ -798,7 +1070,7 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     Object.assign(records[0], state, {
-      analysis: { category: 'Reviewed' },
+      analysis: { scoringVersion: 'weighted-v1', category: 'Reviewed' },
       finalGreeting: 'Protected greeting',
     })
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
@@ -820,6 +1092,7 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     records[0].failureReason = 'Detail unavailable'
+    records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
     records[0].finalGreeting = 'Existing draft'
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
     expect(
@@ -1062,6 +1335,7 @@ it('sends a saved greeting through the existing BOSS chat sender', async () => {
   record.detailStatus = 'complete'
   record.detail = { jobInfo: { postDescription: 'JD' }, bossInfo: { bossSource: 7 } }
   record.finalGreeting = '您好，想和您沟通岗位细节。'
+  record.analysis = { scoringVersion: 'weighted-v1', passed: true }
   data.set(JOB_LIBRARY_STORAGE_KEY, [record])
   ctx.jobMaps.set('boss::new', {
     jobData: { key: 'boss::new' },
@@ -1583,6 +1857,7 @@ describe('slow collected detail batches', () => {
         records[0].reviewStatus = 'approved'
         records[0].sendStatus = 'sent'
         records[0].finalGreeting = 'approved text'
+        records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
       },
     })
     const task = ctx.completeCollectedDetails()
@@ -1728,5 +2003,65 @@ describe('slow collected detail batches', () => {
     ctx.resumeGathering()
     expect((await task).status).toBe('completed')
     expect(ctx.gatheringBusy.value).toBe(false)
+  })
+
+  it('runs each keyword in order and persists a completed rotation', async () => {
+    const ctx = context()
+    const analyzed: string[] = []
+    ctx.rootVue = {
+      $router: {
+        push: async ({ query }) => {
+          const url = new URL(location.href)
+          url.search = new URLSearchParams(query).toString()
+          location.href = url.toString()
+        },
+      },
+    }
+    Object.assign(ctx, {
+      savedAnalyzer: {
+        start: async () => {
+          analyzed.push(new URL(location.href).searchParams.get('query') ?? '')
+          return { status: 'completed' }
+        },
+      },
+    })
+
+    const result = await ctx.startKeywordRotation('产品经理\nAI产品经理\n产品经理')
+
+    expect(analyzed).toEqual(['产品经理', 'AI产品经理'])
+    expect(result.status).toBe('completed')
+    expect(result.cursor).toBe(2)
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toMatchObject({
+      status: 'completed',
+      items: [
+        { keyword: '产品经理', status: 'completed' },
+        { keyword: 'AI产品经理', status: 'completed' },
+      ],
+    })
+  })
+
+  it('keeps the failed keyword as the rotation cursor', async () => {
+    const ctx = context()
+    ctx.rootVue = {
+      $router: {
+        push: async ({ query }) => {
+          const url = new URL(location.href)
+          url.search = new URLSearchParams(query).toString()
+          location.href = url.toString()
+        },
+      },
+    }
+    Object.assign(ctx, {
+      savedAnalyzer: {
+        start: async () => ({ status: 'failed', error: '模型请求失败' }),
+      },
+    })
+
+    const result = await ctx.startKeywordRotation('产品经理\nAI产品经理')
+
+    expect(result.status).toBe('failed')
+    expect(result.cursor).toBe(0)
+    expect(result.items[0]).toMatchObject({ keyword: '产品经理', status: 'failed' })
+    expect(result.items[1]).toMatchObject({ keyword: 'AI产品经理', status: 'pending' })
   })
 })

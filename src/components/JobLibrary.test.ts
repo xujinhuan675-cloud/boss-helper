@@ -41,6 +41,9 @@ const built = await Bun.build({
         build.onResolve({ filter: /^@\/entrypoints\/boss\/jobStore$/ }, () => ({
           path: fileURLToPath(new URL('../entrypoints/boss/jobStore.ts', import.meta.url)),
         }))
+        build.onResolve({ filter: /^@\/composables\/useApplying\/scoring$/ }, () => ({
+          path: fileURLToPath(new URL('../composables/useApplying/scoring.ts', import.meta.url)),
+        }))
         build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({
           contents:
             path === 'helper'
@@ -112,11 +115,24 @@ beforeEach(() => {
   saved[30].detail = { jobInfo: { postDescription: 'Unique saved JD' } }
   saved[30].detailStatus = 'complete'
   saved[30].analysis = {
+    scoringVersion: 'weighted-v1',
     retainedField: true,
     rating: 88,
     message: '分析建议',
     passed: true,
-    res: { positive: [{ score: 1, reason: 'JD 完整' }], negative: [] },
+    res: {
+      dimensions: [
+        { key: 'responsibilities', score: 28, reason: '职责一致' },
+        { key: 'skills', score: 23, reason: '技能匹配' },
+        { key: 'experience', score: 22, reason: '经历相关' },
+        { key: 'industry', score: 7, reason: '行业相关' },
+        { key: 'preferences', score: 8, reason: '偏好匹配' },
+      ],
+      strengths: ['JD 完整'],
+      gaps: [],
+      hardRequirements: [],
+      uncertainties: [],
+    },
   }
   saved[30].finalGreeting = '您好，想和您交流岗位细节。'
   saved[30].analysisFailureReason = undefined
@@ -153,6 +169,57 @@ afterEach(() => {
 })
 
 describe('offline job library modal', () => {
+  it('shows fixed dimension evidence and provisional percentage scores', async () => {
+    saved[0].analysis = {
+      rating: 76,
+      scoringVersion: 'weighted-v1',
+      passed: null,
+      needsConfirmation: true,
+      res: {
+        dimensions: [
+          { key: 'responsibilities', score: 24, reason: '职责依据' },
+          { key: 'skills', score: 20, reason: '技能依据' },
+          { key: 'experience', score: 18, reason: '项目依据' },
+          { key: 'industry', score: 6, reason: '行业依据' },
+          { key: 'preferences', score: 8, reason: '偏好依据' },
+        ],
+        strengths: ['核心技能相关'],
+        gaps: ['经验不足'],
+        hardRequirements: [{ requirement: '必须双休', status: 'unknown', reason: '岗位未披露' }],
+        uncertainties: ['确认工作制'],
+      },
+    }
+    const state = mount(true)
+    await settled()
+    expect(state.formatMatchScore(saved[0].analysis)).toBe('暂定 76/100')
+    expect(state.analysisResultLabel(saved[0])).toBe('待确认')
+    state.selectedId = 'job-0'
+    await settled()
+    expect(state.selectedScoring.res.dimensions[0]).toEqual({
+      key: 'responsibilities',
+      score: 24,
+      reason: '职责依据',
+    })
+    expect(state.selectedScoring.res.hardRequirements[0].reason).toBe('岗位未披露')
+    expect(state.formatMatchScore(saved[30].analysis)).toBe('88/100')
+    state.selectedId = 'job-30'
+    await settled()
+    expect(state.selectedScoring.rating).toBe(88)
+  })
+
+  it('keeps malformed saved scoring readable without throwing on library open', async () => {
+    saved[30].analysis = {
+      rating: 76,
+      scoringVersion: 'weighted-v1',
+      res: { dimensions: null },
+      message: '原始结果',
+    }
+    const state = mount(true)
+    await settled()
+    expect(state.selectedScoring).toBeNull()
+    expect(state.selected.analysis.message).toBe('原始结果')
+  })
+
   it('reads newly saved analysis and reranks open results without reopening the library', async () => {
     const state = mount(true)
     await settled()

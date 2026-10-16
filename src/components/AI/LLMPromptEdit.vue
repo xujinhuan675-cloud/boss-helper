@@ -7,6 +7,11 @@ import { h, reactive, ref } from 'vue'
 
 import JobCard from '@/components/JobCard.vue'
 import { formInfoData, defaultFormData, useConf } from '@/composables/conf'
+import {
+  DEFAULT_MATCH_THRESHOLD,
+  MATCH_SCORING_VERSION,
+  validateMatchThreshold,
+} from '@/composables/useApplying/scoring'
 import { parseFiltering } from '@/composables/useApplying/utils'
 import type { JobData } from '@/composables/useHelper'
 import { useHelper } from '@/composables/useHelper'
@@ -21,7 +26,11 @@ const helper = useHelper()
 const conf = useConf()
 const show = defineModel<boolean>({ required: true })
 
-const score = ref(props.data === 'aiFiltering' ? (conf.formData[props.data].score ?? 10) : 10)
+const score = ref(
+  props.data === 'aiFiltering'
+    ? (conf.formData[props.data].score ?? DEFAULT_MATCH_THRESHOLD)
+    : DEFAULT_MATCH_THRESHOLD,
+)
 
 const role = ['system', 'user', 'assistant']
 
@@ -231,10 +240,19 @@ async function testJob() {
 }
 
 async function savePrompt() {
+  if (props.data === 'aiFiltering') {
+    try {
+      validateMatchThreshold(score.value)
+    } catch (error) {
+      toast.add({ title: String(error), color: 'error' })
+      return
+    }
+  }
   conf.formData[props.data].prompt = message.value
 
   if (props.data === 'aiFiltering') {
     conf.formData[props.data].score = score.value
+    conf.formData[props.data].scoringVersion = MATCH_SCORING_VERSION
   }
   await conf.confSaving()
   show.value = false
@@ -256,8 +274,8 @@ const testModelRef = useTemplateRef('testModel')
   >
     <template #body>
       <div v-if="data === 'aiFiltering'">
-        <UFormField label="过滤分数">
-          <UInputNumber v-model="score" :min="-100" :max="100" size="sm" placeholder="请输入分数" />
+        <UFormField label="通过分数（满分 100）">
+          <UInputNumber v-model="score" :min="0" :max="100" :step="1" size="sm" placeholder="70" />
         </UFormField>
       </div>
       <div class="w-full flex items-center justify-between">

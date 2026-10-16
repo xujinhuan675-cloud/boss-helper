@@ -2,6 +2,7 @@ import { renderTemplate } from '@/utils/ai'
 import type { HelperContext } from '~/composables/useHelper'
 
 import { sameCompanyKey, sameHrKey } from '../../entrypoints/boss/requests'
+import { DEFAULT_MATCH_THRESHOLD, getFilteringDecision, validateMatchThreshold } from './scoring'
 import type { JobStatus, TaskContext, TaskResult } from './type'
 import { defineTaskHandler } from './type'
 import { loadSet, parseFiltering, rangeMatch, rangeMatchFormat, saveSet } from './utils'
@@ -327,6 +328,8 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
       if (!ctx.helper.conf.formData.aiFiltering.enable) {
         return
       }
+      const threshold = ctx.helper.conf.formData.aiFiltering.score ?? DEFAULT_MATCH_THRESHOLD
+      validateMatchThreshold(threshold)
       if (
         !ctx.helper.chatModel.createAgent(ctx.helper.conf.formData.aiFiltering, 'filtering', {
           json: true,
@@ -336,9 +339,9 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
       }
       return async (ctx, data) => {
         const content = await ctx.helper.chatModel.chat('filtering', data).then((r) => r.text)
-        const { message, rating } = parseFiltering(content)
-        if (rating < (ctx.helper.conf.formData.aiFiltering.score ?? 10)) {
-          return taskResult.skip(message)
+        const result = parseFiltering(content)
+        if (getFilteringDecision(result, threshold) !== true) {
+          return taskResult.skip(result.message)
         }
       }
     },

@@ -8,6 +8,7 @@ import deepmerge, { jsonClone } from '@/utils/deepmerge'
 import { exportJson, importJson } from '@/utils/jsonImportExport'
 import { logger } from '@/utils/logger'
 
+import { MATCH_SCORING_VERSION } from '../useApplying/scoring'
 import { defaultFormData } from './info'
 
 export * from './info'
@@ -33,7 +34,7 @@ export const appearanceConf = useStorageAsync(
   { mergeDefaults: true },
 )
 const isLoading = ref(true)
-const formData: FormData = reactive(defaultFormData)
+const formData: FormData = reactive(jsonClone(defaultFormData))
 const formDataPreset = ref('default')
 const formDataPresets = ref([
   {
@@ -136,6 +137,17 @@ export const useConf = () => {
   const toast = useToast()
 
   async function formDataHandler(from: Partial<FormData>) {
+    if (
+      from.aiFiltering &&
+      (from.aiFiltering.scoringVersion !== MATCH_SCORING_VERSION ||
+        'legacyScore' in from.aiFiltering)
+    ) {
+      from.aiFiltering = {
+        ...jsonClone(defaultFormData.aiFiltering),
+        enable: from.aiFiltering.enable ?? defaultFormData.aiFiltering.enable,
+        model: from.aiFiltering.model,
+      }
+    }
     try {
       for (let i = FROM_VERSION.length - 1; i >= 0; i--) {
         const [version, fn] = FROM_VERSION[i]!
@@ -169,9 +181,12 @@ export const useConf = () => {
       formDataPresets.value = rawFormDataPresets
 
       let from = await counter.storageGet<Partial<FormData>>(formDataKey(), {})
+      const previousFiltering = JSON.stringify(from.aiFiltering)
       from = (await formDataHandler(from)) ?? from
       const data = deepmerge<FormData>(defaultFormData, from)
       Object.assign(formData, data)
+      if (JSON.stringify(from.aiFiltering) !== previousFiltering)
+        await counter.storageSet(formDataKey(), jsonClone(data))
     } catch (e) {
       toast.add({
         title: `配置加载失败: ${String(e)}`,
@@ -206,8 +221,10 @@ export const useConf = () => {
   }
 
   async function confReload() {
-    const v = deepmerge<FormData>(defaultFormData, await counter.storageGet(formDataKey(), {}))
+    const from = await formDataHandler(await counter.storageGet(formDataKey(), {}))
+    const v = deepmerge<FormData>(defaultFormData, from)
     deepmerge(formData, v, { clone: false })
+    formData.aiFiltering = v.aiFiltering
     logger.debug('formData已重置')
     toast.add({
       title: '重置成功',
@@ -216,7 +233,8 @@ export const useConf = () => {
   }
 
   async function confExport() {
-    const data = deepmerge<FormData>(defaultFormData, await counter.storageGet(formDataKey(), {}))
+    const from = await formDataHandler(await counter.storageGet(formDataKey(), {}))
+    const data = deepmerge<FormData>(defaultFormData, from)
     exportJson(data, '打招呼配置')
   }
 
@@ -224,6 +242,7 @@ export const useConf = () => {
     let jsonData = await importJson<Partial<FormData>>()
     jsonData = (await formDataHandler(jsonData)) ?? jsonData
     deepmerge(formData, jsonData, { clone: false })
+    if (jsonData.aiFiltering) formData.aiFiltering = jsonClone(jsonData.aiFiltering)
     toast.add({
       title: '导入成功, 切记要手动保存哦',
       color: 'success',

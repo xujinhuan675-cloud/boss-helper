@@ -1,5 +1,7 @@
 import type { FormData, Prompt } from '@/types/formData'
 
+import { DEFAULT_MATCH_THRESHOLD, MATCH_SCORING_VERSION } from '../useApplying/scoring'
+
 // TODO: 移除info, 忘记当初为啥要维护这一坨了, 还是直接写组件里面好看
 
 export const defaultAiGreetingPrompt: Prompt = [
@@ -267,25 +269,8 @@ export const defaultFormData: FormData = {
     prompt: [
       {
         role: 'system',
-        content: `## 角色
-  求职评委
-  
-  最终返回下面格式的JSON字符串,不要有任何其他字符
-  
-  interface aiFilteringItem {
-    reason: string; // 扣分或加分的理由
-    score: number ; // 分数变化 正整数 不需要+-正负符号
-  }
-  
-  interface aiFiltering {
-    negative: aiFilteringItem[]; // 扣分项
-    positive: aiFilteringItem[] ; // 加分项
-  }
-  
-  ## 求职者需求
-  - 加分: 双休,早九晚五,新技术,机会多,年轻人多 每个加分项 10分
-  - 扣分: 需要上门,福利少,需要和客户交流,需要推销 每个扣分项 10分
-  `,
+        content:
+          '根据岗位信息、完整简历和求职者明确表达的要求评估匹配度。说明匹配证据、短板及待确认信息，不编造个人偏好。',
       },
       {
         role: 'user',
@@ -302,7 +287,8 @@ export const defaultFormData: FormData = {
   </岗位信息>`,
       },
     ],
-    score: 10,
+    score: DEFAULT_MATCH_THRESHOLD,
+    scoringVersion: MATCH_SCORING_VERSION,
   },
   aiReply: {
     enable: false,
@@ -330,5 +316,5 @@ export const defaultFormData: FormData = {
   delayCollectionDetailMin: 2,
   delayCollectionDetailMax: 5,
   delayMessageSending: 2,
-  version: '20261015',
+  version: '20261016',
 }

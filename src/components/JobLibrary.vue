@@ -2,6 +2,11 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 
 import BatchAnalysis from '@/components/AI/BatchAnalysis.vue'
+import {
+  MATCH_DIMENSIONS,
+  MATCH_SCORING_VERSION,
+  parseFiltering,
+} from '@/composables/useApplying/scoring'
 import { useHelper } from '@/composables/useHelper'
 import {
   filterJobLibrary,
@@ -123,6 +128,29 @@ const pageRecords = computed(() =>
 const selected = computed(() =>
   pageRecords.value.find((record) => record.encryptJobId === selectedId.value),
 )
+const selectedScoring = computed(() => {
+  const analysis = selected.value?.analysis
+  if (analysis?.scoringVersion !== MATCH_SCORING_VERSION) return null
+  try {
+    return parseFiltering(JSON.stringify(analysis.res))
+  } catch {
+    return null
+  }
+})
+const requirementLabels = { met: '满足', unmet: '不满足', unknown: '待确认' }
+
+function formatMatchScore(analysis?: Record<string, unknown>) {
+  if (typeof analysis?.rating !== 'number' || !Number.isFinite(analysis.rating)) return ''
+  return `${analysis.needsConfirmation ? '暂定 ' : ''}${analysis.rating}/100`
+}
+
+function analysisResultLabel(record: BossJobLibraryRecord) {
+  if (record.analysis?.passed === true) return '通过筛选'
+  if (record.analysis?.passed === false) return '未通过筛选'
+  if (record.analysis?.passed === null || record.analysis?.needsConfirmation === true)
+    return '待确认'
+  return analysisLabels[record.analysisStatus]
+}
 const jobUrl = computed(() =>
   selected.value
     ? `https://www.zhipin.com/job_detail/${encodeURIComponent(selected.value.encryptJobId)}.html`
@@ -253,32 +281,6 @@ function formatTime(value: string) {
   return Number.isNaN(date.getTime())
     ? value || '未记录'
     : date.toLocaleString('zh-CN', { hour12: false })
-}
-
-type AnalysisItem = { reason: string; score: number }
-
-function getAnalysisItems(
-  analysis: Record<string, unknown> | undefined,
-  kind: 'positive' | 'negative',
-): AnalysisItem[] {
-  const result = analysis?.res
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return []
-  const items = (result as Record<string, unknown>)[kind]
-  if (!Array.isArray(items)) return []
-  return items.filter((item): item is AnalysisItem => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return false
-    const value = item as Record<string, unknown>
-    return (
-      typeof value.reason === 'string' &&
-      !!value.reason.trim() &&
-      typeof value.score === 'number' &&
-      Number.isFinite(value.score)
-    )
-  })
-}
-
-function formatAnalysisScore(score: number, positive: boolean) {
-  return `${positive ? '+' : '-'}${Math.abs(score)} 分`
 }
 
 async function analyzeSelected() {
@@ -509,7 +511,7 @@ async function copyGreeting() {
                     :color="record.analysis?.passed === false ? 'error' : 'neutral'"
                     variant="subtle"
                   >
-                    {{ record.analysis.rating }}分
+                    {{ formatMatchScore(record.analysis) }}
                   </UBadge>
                   <UBadge
                     v-else-if="record.analysisStatus === 'ready'"
@@ -571,16 +573,10 @@ async function copyGreeting() {
                     "
                     variant="subtle"
                   >
-                    {{
-                      selected.analysis?.passed === true
-                        ? '通过筛选'
-                        : selected.analysis?.passed === false
-                          ? '未通过筛选'
-                          : analysisLabels[selected.analysisStatus]
-                    }}
+                    {{ analysisResultLabel(selected) }}
                   </UBadge>
                   <span v-if="typeof selected.analysis?.rating === 'number'" class="text-muted">
-                    评分 {{ selected.analysis.rating }}
+                    {{ formatMatchScore(selected.analysis) }}
                   </span>
                 </div>
               </div>
@@ -679,64 +675,90 @@ async function copyGreeting() {
                   "
                   variant="subtle"
                 >
-                  {{
-                    selected.analysis.passed === true
-                      ? '通过筛选'
-                      : selected.analysis.passed === false
-                        ? '未通过筛选'
-                        : '已分析'
-                  }}
+                  {{ analysisResultLabel(selected) }}
                 </UBadge>
                 <span v-if="typeof selected.analysis.rating === 'number'" class="text-muted">
-                  匹配分 {{ selected.analysis.rating }}
+                  匹配分 {{ formatMatchScore(selected.analysis) }}
+                </span>
+                <span
+                  v-if="typeof selected.analysis.scoreThreshold === 'number' && selectedScoring"
+                  class="text-muted"
+                >
+                  通过线 {{ selected.analysis.scoreThreshold }}/100
                 </span>
               </div>
-              <div v-if="getAnalysisItems(selected.analysis, 'positive').length">
-                <h5 class="font-medium text-success mb-1">匹配项</h5>
-                <ul class="space-y-1">
-                  <li
-                    v-for="item in getAnalysisItems(selected.analysis, 'positive')"
-                    :key="[item.reason, item.score].join('-')"
-                    class="flex gap-2 break-words"
+              <template v-if="selectedScoring">
+                <dl class="divide-y divide-default">
+                  <div
+                    v-for="(item, index) in selectedScoring.res.dimensions"
+                    :key="item.key"
+                    class="py-2"
                   >
-                    <span class="shrink-0 text-success">{{
-                      formatAnalysisScore(item.score, true)
-                    }}</span>
-                    <span>{{ item.reason }}</span>
-                  </li>
-                </ul>
-              </div>
-              <div v-if="getAnalysisItems(selected.analysis, 'negative').length">
-                <h5 class="font-medium text-error mb-1">风险项</h5>
-                <ul class="space-y-1">
-                  <li
-                    v-for="item in getAnalysisItems(selected.analysis, 'negative')"
-                    :key="[item.reason, item.score].join('-')"
-                    class="flex gap-2 break-words"
-                  >
-                    <span class="shrink-0 text-error">{{
-                      formatAnalysisScore(item.score, false)
-                    }}</span>
-                    <span>{{ item.reason }}</span>
-                  </li>
-                </ul>
-              </div>
+                    <dt class="flex flex-wrap justify-between gap-2 font-medium">
+                      <span>{{ MATCH_DIMENSIONS[index].label }}</span>
+                      <span
+                        >{{ item.score ?? '待确认' }}/{{ MATCH_DIMENSIONS[index].maxScore }}</span
+                      >
+                    </dt>
+                    <dd class="mt-1 text-muted break-words">{{ item.reason }}</dd>
+                  </div>
+                </dl>
+                <div v-if="selectedScoring.res.hardRequirements.length">
+                  <h5 class="font-medium mb-1">硬性条件</h5>
+                  <ul class="space-y-2">
+                    <li
+                      v-for="(item, index) in selectedScoring.res.hardRequirements"
+                      :key="index"
+                      class="break-words"
+                    >
+                      <span
+                        :class="
+                          item.status === 'unmet'
+                            ? 'text-error'
+                            : item.status === 'unknown'
+                              ? 'text-warning'
+                              : 'text-success'
+                        "
+                      >
+                        {{ requirementLabels[item.status] }}：{{ item.requirement }}
+                      </span>
+                      <p class="text-muted mt-1">{{ item.reason }}</p>
+                    </li>
+                  </ul>
+                </div>
+                <div v-if="selectedScoring.res.strengths.length">
+                  <h5 class="font-medium text-success mb-1">匹配优势</h5>
+                  <ul class="list-disc pl-5 space-y-1 break-words">
+                    <li v-for="(item, index) in selectedScoring.res.strengths" :key="index">
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+                <div v-if="selectedScoring.res.gaps.length">
+                  <h5 class="font-medium text-error mb-1">匹配短板</h5>
+                  <ul class="list-disc pl-5 space-y-1 break-words">
+                    <li v-for="(item, index) in selectedScoring.res.gaps" :key="index">
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+                <div v-if="selectedScoring.res.uncertainties.length">
+                  <h5 class="font-medium text-warning mb-1">待确认信息</h5>
+                  <ul class="list-disc pl-5 space-y-1 break-words">
+                    <li v-for="(item, index) in selectedScoring.res.uncertainties" :key="index">
+                      {{ item }}
+                    </li>
+                  </ul>
+                </div>
+              </template>
               <p
-                v-if="
-                  !getAnalysisItems(selected.analysis, 'positive').length &&
-                  !getAnalysisItems(selected.analysis, 'negative').length &&
-                  typeof selected.analysis.message === 'string'
-                "
+                v-if="!selectedScoring && typeof selected.analysis.message === 'string'"
                 class="whitespace-pre-wrap break-words leading-relaxed"
               >
                 {{ selected.analysis.message }}
               </p>
               <p
-                v-if="
-                  !getAnalysisItems(selected.analysis, 'positive').length &&
-                  !getAnalysisItems(selected.analysis, 'negative').length &&
-                  typeof selected.analysis.message !== 'string'
-                "
+                v-if="!selectedScoring && typeof selected.analysis.message !== 'string'"
                 class="text-muted"
               >
                 分析结果已保存
