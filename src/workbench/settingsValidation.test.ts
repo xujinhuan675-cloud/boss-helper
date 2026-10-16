@@ -1,0 +1,71 @@
+// @ts-nocheck -- Bun test type declarations are absent in this repository.
+import { describe, expect, it } from 'bun:test'
+
+import { defaultFormData } from '../composables/conf/info'
+import { jsonClone } from '../utils/deepmerge'
+import { parseObject, validateConfig, validateModels } from './settingsValidation'
+
+describe('workbench settings import boundaries', () => {
+  it('accepts existing configuration and preserves unknown model fields', () => {
+    expect(() => validateConfig(jsonClone(defaultFormData))).not.toThrow()
+    const models = [
+      {
+        key: 'draft',
+        name: 'Draft',
+        data: { mode: 'openai', api_key: '', advanced: { extra_body: { retained: true } } },
+        retained: { source: 'original' },
+      },
+    ]
+    validateModels(models)
+    expect(models[0].retained).toEqual({ source: 'original' })
+    expect(models[0].data.advanced.extra_body).toEqual({ retained: true })
+  })
+
+  it.each([
+    null,
+    {},
+    [null],
+    [{ key: '', name: 'Invalid' }],
+    [{ key: 'bad', name: 3 }],
+    [{ key: 'bad', name: 'Invalid', data: { api_key: 2 } }],
+    [{ key: 'bad', name: 'Invalid', data: { advanced: [] } }],
+    [
+      { key: 'duplicate', name: 'One' },
+      { key: 'duplicate', name: 'Two' },
+    ],
+  ])('rejects malformed model JSON without normalizing it: %j', (value) => {
+    expect(() => validateModels(value)).toThrow()
+  })
+
+  it('rejects invalid numeric ranges, timing and passing scores', () => {
+    const config = jsonClone(defaultFormData)
+    config.salaryRange.value = [20, 10, false]
+    expect(() => validateConfig(config)).toThrow('薪资')
+    config.salaryRange.value = [10, 20, false]
+    config.delayCollectionDetailMin = 10
+    expect(() => validateConfig(config)).toThrow('间隔')
+    config.delayCollectionDetailMin = 1
+    config.aiFiltering.score = 101
+    expect(() => validateConfig(config)).toThrow('通过分数')
+  })
+
+  it('rejects corrupt prompt, filter and image data before storage', () => {
+    const config = jsonClone(defaultFormData)
+    config.aiGreeting.prompt = [{ role: 'invalid', content: '' }]
+    expect(() => validateConfig(config)).toThrow('提示词')
+    config.aiGreeting = jsonClone(defaultFormData.aiGreeting)
+    config.company.value = [2]
+    expect(() => validateConfig(config)).toThrow('筛选')
+    config.company.value = []
+    config.customGreeting.value = [{ type: 'image', image: '' }]
+    expect(() => validateConfig(config)).toThrow('图片')
+  })
+
+  it('requires objects for advanced configuration while preserving nested values', () => {
+    expect(parseObject('{"extra_headers":{"X-Test":"value"}}', '高级配置')).toEqual({
+      extra_headers: { 'X-Test': 'value' },
+    })
+    expect(() => parseObject('[]', '高级配置')).toThrow('对象')
+    expect(() => parseObject('{', '高级配置')).toThrow('JSON')
+  })
+})

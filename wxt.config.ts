@@ -1,6 +1,7 @@
 import { resolve } from 'path'
 
 import ui from '@nuxt/ui/vite'
+import react from '@vitejs/plugin-react'
 import vueJsx from '@vitejs/plugin-vue-jsx'
 import tailwindShadowDOM from 'vite-plugin-tailwind-shadowdom'
 import { defineConfig } from 'wxt'
@@ -44,7 +45,8 @@ export default defineConfig({
       ],
     },
     plugins: [
-      vueJsx(),
+      vueJsx({ exclude: /src\/workbench\// }),
+      react({ include: /src\/workbench\/.*\.[jt]sx$/ }),
       ui({
         // autoImport: false,
         // components: false,
@@ -126,7 +128,8 @@ export default defineConfig({
     default_locale: 'zh_CN',
     name: '__MSG_extName__',
     description: '__MSG_extDescription__',
-    permissions: ['storage', 'notifications'],
+    permissions: ['storage', 'notifications', ...(browser === 'firefox' ? [] : ['sidePanel'])],
+    action: { default_title: '打开 BossHelper 侧边栏' },
     web_accessible_resources: [
       {
         resources: ['boss.js'],

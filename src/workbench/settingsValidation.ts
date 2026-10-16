@@ -1,0 +1,201 @@
+import type { ModelConf } from '@/composables/useModel'
+import type { FormData, FormDataRange } from '@/types/formData'
+
+import { validateMatchThreshold } from '../composables/useApplying/scoring'
+import { isPlainObject } from '../utils/deepmerge'
+
+export function validateModels(value: unknown): asserts value is ModelConf[] {
+  const keys = new Set<string>()
+  if (
+    !Array.isArray(value) ||
+    value.some((model) => {
+      if (
+        !isPlainObject(model) ||
+        typeof model.key !== 'string' ||
+        !model.key.trim() ||
+        typeof model.name !== 'string' ||
+        keys.has(model.key)
+      )
+        return true
+      keys.add(model.key)
+      if (model.data === undefined) return false
+      const data = model.data
+      return (
+        !isPlainObject(data) ||
+        ['mode', 'avatar', 'api_key', 'base_url', 'model'].some(
+          (field) => data[field] !== undefined && typeof data[field] !== 'string',
+        ) ||
+        ['advanced', 'other'].some(
+          (field) => data[field] !== undefined && !isPlainObject(data[field]),
+        ) ||
+        (data.responses !== undefined && typeof data.responses !== 'boolean')
+      )
+    })
+  )
+    throw new Error('模型配置格式无效，原有配置已保留')
+}
+
+export function parseObject(text: string, label: string): Record<string, unknown> {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error(`${label}不是有效的 JSON`)
+  }
+  if (!isPlainObject(value)) throw new Error(`${label}必须为 JSON 对象`)
+  return value
+}
+
+function range(value: unknown): value is FormDataRange {
+  return (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    typeof value[0] === 'number' &&
+    Number.isFinite(value[0]) &&
+    value[0] >= 0 &&
+    typeof value[1] === 'number' &&
+    Number.isFinite(value[1]) &&
+    value[1] >= value[0] &&
+    typeof value[2] === 'boolean'
+  )
+}
+
+export function validateConfig(config: FormData) {
+  for (const key of ['company', 'jobTitle', 'jobContent', 'hrPosition', 'jobAddress'] as const) {
+    const filter = config[key]
+    if (
+      !isPlainObject(filter) ||
+      typeof filter.enable !== 'boolean' ||
+      typeof filter.include !== 'boolean' ||
+      !Array.isArray(filter.value) ||
+      !filter.value.every((item) => typeof item === 'string') ||
+      !Array.isArray(filter.options) ||
+      !filter.options.every((item) => typeof item === 'string')
+    )
+      throw new Error(`${key} 筛选配置格式无效`)
+  }
+  if (
+    !isPlainObject(config.salaryRange) ||
+    typeof config.salaryRange.enable !== 'boolean' ||
+    !range(config.salaryRange.value) ||
+    !isPlainObject(config.salaryRange.advancedValue) ||
+    !['H', 'D', 'M'].every((key) => range(config.salaryRange.advancedValue[key as 'H' | 'D' | 'M']))
+  )
+    throw new Error('薪资范围应为非负数，且上限不能小于下限')
+  if (
+    !isPlainObject(config.companySizeRange) ||
+    typeof config.companySizeRange.enable !== 'boolean' ||
+    !range(config.companySizeRange.value)
+  )
+    throw new Error('公司规模范围无效')
+  for (const key of [
+    'greetingVariable',
+    'activityFilter',
+    'friendStatus',
+    'bossGoldMedalHr',
+    'sameCompanyFilter',
+    'sameHrFilter',
+    'goldHunterFilter',
+    'notification',
+    'useCache',
+  ] as const) {
+    if (!isPlainObject(config[key]) || typeof config[key].value !== 'boolean')
+      throw new Error(`${key} 配置格式无效`)
+  }
+  for (const key of ['sameCompanyFilter', 'sameHrFilter'] as const) {
+    const expire = config[key].expire
+    if (expire !== undefined && (!Number.isFinite(expire) || expire < 0))
+      throw new Error('去重有效期应为非负数')
+  }
+  if (
+    !isPlainObject(config.deliveryLimit) ||
+    !Number.isInteger(config.deliveryLimit.value) ||
+    config.deliveryLimit.value < 1 ||
+    config.deliveryLimit.value > 155
+  )
+    throw new Error('投递数量应为 1～155 的整数')
+  for (const key of [
+    'delayDeliveryStarts',
+    'delayDeliveryInterval',
+    'delayDeliveryPageNext',
+    'delayMessageSending',
+    'delayCollectionScrollMin',
+    'delayCollectionScrollMax',
+    'delayCollectionDetailMin',
+    'delayCollectionDetailMax',
+  ] as const) {
+    if (typeof config[key] !== 'number' || !Number.isFinite(config[key]) || config[key] < 0)
+      throw new Error('间隔应为非负数')
+  }
+  if (
+    config.delayCollectionScrollMin > config.delayCollectionScrollMax ||
+    config.delayCollectionDetailMin > config.delayCollectionDetailMax
+  )
+    throw new Error('采集间隔上限不能小于下限')
+  for (const key of ['aiFiltering', 'aiGreeting', 'aiReply'] as const) {
+    const ai = config[key]
+    if (
+      !isPlainObject(ai) ||
+      typeof ai.enable !== 'boolean' ||
+      (ai.model !== undefined && typeof ai.model !== 'string') ||
+      !Array.isArray(ai.prompt) ||
+      !ai.prompt.every(
+        (item) =>
+          isPlainObject(item) &&
+          ['system', 'user', 'assistant'].includes(item.role) &&
+          typeof item.content === 'string',
+      )
+    )
+      throw new Error('AI 提示词配置格式无效')
+  }
+  validateMatchThreshold(config.aiFiltering.score)
+  const greeting = config.customGreeting
+  if (
+    !isPlainObject(greeting) ||
+    typeof greeting.enable !== 'boolean' ||
+    !(
+      typeof greeting.value === 'string' ||
+      (Array.isArray(greeting.value) &&
+        greeting.value.every(
+          (item) =>
+            isPlainObject(item) &&
+            ((item.type === 'text' && typeof item.content === 'string') ||
+              (item.type === 'image' && typeof item.image === 'string' && !!item.image.trim())),
+        ))
+    )
+  )
+    throw new Error('自定义招呼语格式无效，请补全图片或移除空图片消息')
+  if (
+    !isPlainObject(config.amap) ||
+    typeof config.amap.enable !== 'boolean' ||
+    typeof config.amap.key !== 'string' ||
+    typeof config.amap.origins !== 'string' ||
+    ![
+      'straightDistance',
+      'drivingDistance',
+      'drivingDuration',
+      'walkingDistance',
+      'walkingDuration',
+    ].every(
+      (key) =>
+        typeof config.amap[key as keyof FormData['amap']] === 'number' &&
+        Number.isFinite(config.amap[key as keyof FormData['amap']]) &&
+        Number(config.amap[key as keyof FormData['amap']]) >= 0,
+    )
+  )
+    throw new Error('通勤配置格式无效')
+  if (
+    !isPlainObject(config.record) ||
+    typeof config.record.enable !== 'boolean' ||
+    (config.record.model !== undefined &&
+      (!Array.isArray(config.record.model) ||
+        !config.record.model.every((item) => typeof item === 'string')))
+  )
+    throw new Error('内容记录配置格式无效')
+  if (
+    typeof config.resumeText !== 'string' ||
+    typeof config.version !== 'string' ||
+    !['beginner', 'intermediate', 'advanced', 'expert'].includes(config.configLevel)
+  )
+    throw new Error('配置格式无效')
+}

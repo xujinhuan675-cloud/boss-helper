@@ -1,6 +1,6 @@
 import { defineProxy } from 'comctx'
 
-import { defineBackground } from '#imports'
+import { browser, defineBackground } from '#imports'
 import { BackgroundCounter, ProvideBackgroundAdapter } from '@/message/background'
 
 export default defineBackground({
@@ -10,5 +10,13 @@ export default defineBackground({
     })
 
     provideBackgroundCounter(new ProvideBackgroundAdapter())
+
+    if (browser.sidePanel) {
+      void browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+    } else {
+      browser.action.onClicked.addListener(() => {
+        void browser.tabs.create({ url: browser.runtime.getURL('/workbench.html') })
+      })
+    }
   },
 })

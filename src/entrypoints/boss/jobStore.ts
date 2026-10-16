@@ -1,3 +1,4 @@
+import { jsonClone } from '../../utils/deepmerge'
 import type { BossZpDetailData, BossZpJobItemData } from './types'
 
 export const JOB_LIBRARY_STORAGE_KEY = 'local:boss-helper:job-library:v1'
@@ -48,6 +49,105 @@ export type BossJobLibraryRecord = {
   failureReason?: string
   manualFunnelStage?: FunnelStage
   processingStatus?: ProcessingStatus
+}
+
+function hasOptionalTextFields(value: unknown, fields: readonly string[]): boolean {
+  if (value === undefined || value === null) return true
+  if (typeof value !== 'object' || Array.isArray(value)) return false
+  const object = value as Record<string, unknown>
+  return fields.every((key) => object[key] == null || typeof object[key] === 'string')
+}
+
+export function assertJobLibrary(records: unknown): asserts records is BossJobLibraryRecord[] {
+  if (
+    !Array.isArray(records) ||
+    records.some(
+      (record) =>
+        !record ||
+        typeof record !== 'object' ||
+        Array.isArray(record) ||
+        typeof record.encryptJobId !== 'string' ||
+        !record.encryptJobId.trim() ||
+        !record.snapshot ||
+        typeof record.snapshot !== 'object' ||
+        Array.isArray(record.snapshot) ||
+        record.snapshot.encryptJobId !== record.encryptJobId ||
+        !Array.isArray(record.sourceKeywords) ||
+        !record.sourceKeywords.every((keyword: unknown) => typeof keyword === 'string') ||
+        !Array.isArray(record.batches) ||
+        !record.batches.every((batch: unknown) => typeof batch === 'string') ||
+        !['pending', 'complete', 'failed'].includes(record.detailStatus) ||
+        !['pending', 'ready', 'failed'].includes(record.analysisStatus) ||
+        !['pending', 'approved', 'rejected'].includes(record.reviewStatus) ||
+        !['pending', 'queued', 'sent', 'unknown', 'failed'].includes(record.sendStatus) ||
+        (record.processingStatus !== undefined && !isProcessingStatus(record.processingStatus)) ||
+        (record.manualFunnelStage !== undefined && !isFunnelStage(record.manualFunnelStage)) ||
+        !hasOptionalTextFields(record, [
+          'key',
+          'firstSeenAt',
+          'lastSeenAt',
+          'matchedAt',
+          'failureReason',
+          'analysisFailureReason',
+          'finalGreeting',
+        ]) ||
+        !hasOptionalTextFields(record.snapshot, [
+          'jobName',
+          'brandName',
+          'bossName',
+          'bossTitle',
+          'salaryDesc',
+          'cityName',
+          'jobExperience',
+          'jobDegree',
+        ]) ||
+        (record.detail !== undefined &&
+          (!record.detail ||
+            typeof record.detail !== 'object' ||
+            Array.isArray(record.detail) ||
+            !record.detail.jobInfo ||
+            typeof record.detail.jobInfo !== 'object' ||
+            Array.isArray(record.detail.jobInfo) ||
+            !hasOptionalTextFields(record.detail.jobInfo, [
+              'jobName',
+              'positionName',
+              'postDescription',
+            ]) ||
+            !hasOptionalTextFields(record.detail.bossInfo, ['name', 'title', 'brandName']) ||
+            !hasOptionalTextFields(record.detail.brandComInfo, ['brandName']))),
+    )
+  )
+    throw new Error('本地岗位库格式异常；已保留原数据')
+}
+
+export function normalizeJobLibraryAnalysis(
+  records: BossJobLibraryRecord[],
+  scoringVersion: string,
+): BossJobLibraryRecord[] {
+  const obsoleteIds = new Set(
+    records
+      .filter(
+        (record) =>
+          record.analysis?.scoringVersion !== scoringVersion &&
+          (record.analysis !== undefined ||
+            record.analysisStatus === 'ready' ||
+            record.finalGreeting !== undefined ||
+            record.matchedAt !== undefined),
+      )
+      .map((record) => record.encryptJobId),
+  )
+  if (!obsoleteIds.size) return records
+  const cleaned = jsonClone(records)
+  for (const record of cleaned) {
+    if (!obsoleteIds.has(record.encryptJobId)) continue
+    delete record.analysis
+    delete record.finalGreeting
+    delete record.analysisFailureReason
+    delete record.matchedAt
+    record.analysisStatus = 'pending'
+    if (record.sendStatus === 'pending' && !record.snapshot.contact) record.reviewStatus = 'pending'
+  }
+  return cleaned
 }
 
 export type CollectionEndReason =

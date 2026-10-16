@@ -3,7 +3,8 @@ import { initCounter } from '@/message'
 
 export default defineUnlistedScript(async () => {
   // Capture currentScript before the asynchronous import and defer browser side effects.
-  initCounter()
+  const script = document.currentScript as HTMLScriptElement
+  initCounter(script)
   const { runBoss } = await import('./runtime')
-  await runBoss()
+  await runBoss(script)
 })

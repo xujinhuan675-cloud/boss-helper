@@ -4,7 +4,7 @@ import { reactive, ref, toRaw } from 'vue'
 import { counter } from '@/message'
 import { ExtStorage } from '@/message'
 import type { ConfigLevel, FormData } from '@/types/formData'
-import deepmerge, { jsonClone } from '@/utils/deepmerge'
+import deepmerge, { isPlainObject, jsonClone } from '@/utils/deepmerge'
 import { exportJson, importJson } from '@/utils/jsonImportExport'
 import { logger } from '@/utils/logger'
 
@@ -43,9 +43,9 @@ const formDataPresets = ref([
   },
 ])
 
-const formDataKey = () => {
-  if (formDataPreset.value !== 'default') {
-    return `local:web-geek-job-FormData-${formDataPreset.value}`
+const formDataKey = (preset = formDataPreset.value) => {
+  if (preset !== 'default') {
+    return `local:web-geek-job-FormData-${preset}`
   }
   return 'local:web-geek-job-FormData'
 }
@@ -137,6 +137,7 @@ export const useConf = () => {
   const toast = useToast()
 
   async function formDataHandler(from: Partial<FormData>) {
+    if (!isPlainObject(from)) throw new Error('配置格式异常；已保留原数据')
     if (
       from.aiFiltering &&
       (from.aiFiltering.scoringVersion !== MATCH_SCORING_VERSION ||
@@ -163,6 +164,7 @@ export const useConf = () => {
         title: `用户配置初始化失败: ${String(err)}`,
         color: 'error',
       })
+      throw err
     }
     return from
   }
@@ -170,29 +172,46 @@ export const useConf = () => {
   async function init() {
     isLoading.value = true
     try {
-      const rawFormDataPreset = await counter.storageGet(formDataPresetKey, 'default')
-      const rawFormDataPresets = await counter.storageGet(formDataPresetsKey, [
+      const rawFormDataPreset = await counter.storageGet<unknown>(formDataPresetKey, 'default')
+      const rawFormDataPresets = await counter.storageGet<unknown>(formDataPresetsKey, [
         {
           label: '默认配置',
           value: 'default',
         },
       ])
-      formDataPreset.value = rawFormDataPreset
-      formDataPresets.value = rawFormDataPresets
+      if (
+        typeof rawFormDataPreset !== 'string' ||
+        !rawFormDataPreset.trim() ||
+        !Array.isArray(rawFormDataPresets) ||
+        rawFormDataPresets.some(
+          (preset) =>
+            !isPlainObject(preset) ||
+            typeof preset.label !== 'string' ||
+            typeof preset.value !== 'string' ||
+            !preset.value.trim(),
+        )
+      )
+        throw new Error('配置预设格式异常；已保留原数据')
 
-      let from = await counter.storageGet<Partial<FormData>>(formDataKey(), {})
+      const storageKey = formDataKey(rawFormDataPreset)
+      const rawConfig = await counter.storageGet<unknown>(storageKey, {})
+      if (!isPlainObject(rawConfig)) throw new Error('配置格式异常；已保留原数据')
+      let from = rawConfig as Partial<FormData>
       const previousFiltering = JSON.stringify(from.aiFiltering)
       from = (await formDataHandler(from)) ?? from
       const data = deepmerge<FormData>(defaultFormData, from)
-      Object.assign(formData, data)
       if (JSON.stringify(from.aiFiltering) !== previousFiltering)
-        await counter.storageSet(formDataKey(), jsonClone(data))
+        await counter.storageSet(storageKey, jsonClone(data))
+      formDataPreset.value = rawFormDataPreset
+      formDataPresets.value = rawFormDataPresets
+      Object.assign(formData, data)
     } catch (e) {
       toast.add({
         title: `配置加载失败: ${String(e)}`,
         color: 'error',
       })
       logger.error('配置加载失败', e)
+      throw e
     } finally {
       isLoading.value = false
     }
@@ -326,6 +345,7 @@ export const useConf = () => {
         color: 'error',
       })
       logger.error('预设创建失败', e)
+      throw e
     } finally {
       isLoading.value = false
     }
@@ -343,12 +363,14 @@ export const useConf = () => {
         color: 'error',
       })
       logger.error('预设切换失败', e)
+      throw e
     } finally {
       isLoading.value = false
     }
   }
 
   return {
+    prepareConfig: formDataHandler,
     confInit: init,
     confSaving,
     confReload,

@@ -90,6 +90,16 @@ export function createResumeStore(storage: ResumeStorage = counter) {
   async function init(legacyText = '') {
     const stored = await storage.storageGet<Partial<ResumeStoreData>>(RESUME_STORAGE_KEY, {})
     const normalized = normalizeResumeStore(stored, legacyText)
+    if (
+      stored !== null &&
+      stored !== undefined &&
+      (typeof stored !== 'object' ||
+        Array.isArray(stored) ||
+        ('resumes' in stored &&
+          (!Array.isArray(stored.resumes) || normalized.resumes.length !== stored.resumes.length)))
+    ) {
+      throw new Error('简历存储格式无效，原有数据已保留')
+    }
     if (!Array.isArray(stored?.resumes) && normalized.resumes.length) {
       await storage.storageSet(RESUME_STORAGE_KEY, jsonClone(normalized))
     }

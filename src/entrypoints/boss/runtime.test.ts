@@ -16,10 +16,16 @@ import type { BossZpJobItemData } from './types'
 const conf = { formData: { salaryRange: { value: '10-15K' } } }
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
+let getRoot = async () => ({})
 mock.module('@/composables/conf', () => ({ appearanceConf: ref({}), useConf: () => conf }))
 mock.module('@/composables/useHelper', () => ({
   HelperContext: class {
     conf = conf
+    currentJob = ref(null)
+    _logs = ref([])
+    jobResultMaps = new Map()
+    chatModel = { jobs: ref([]), states: new Map() }
+    pendingMessages = ref(undefined)
   },
 }))
 mock.module('@/composables/useApplying/type', () => ({
@@ -27,7 +33,7 @@ mock.module('@/composables/useApplying/type', () => ({
   isInitialized: () => false,
 }))
 mock.module('@/composables/useVue', () => ({
-  getRootVue: async () => ({}),
+  getRootVue: () => getRoot(),
   useHookVueData:
     (_selector: string, key: string, _target: unknown, callback?: unknown) => async () => {
       if (key === 'jobList' && typeof callback === 'function') {
@@ -37,7 +43,8 @@ mock.module('@/composables/useVue', () => ({
   useHookVueFn: () => async () => {},
 }))
 mock.module('@/message', () => ({ counter }))
-mock.module('@/index', () => ({ run() {} }))
+let initializeBusiness = async () => {}
+mock.module('@/index', () => ({ run: () => initializeBusiness() }))
 let visualDelayCalls = 0
 mock.module('@/utils', () => ({
   delay: async () => {
@@ -53,7 +60,11 @@ mock.module('@/utils/elmGetter', () => ({
     get: async (s: string) => (s === 'boss-helper-job' ? null : wrapper),
   },
 }))
-mock.module('./chat', () => ({ GeekChatClientManager: class {} }))
+mock.module('./chat', () => ({
+  GeekChatClientManager: class {
+    async connect() {}
+  },
+}))
 let createWorkflow: () => Promise<unknown> = async () => ({})
 mock.module('./delivery', () => ({ bossWorkflow: () => createWorkflow() }))
 let bossDataRequests: Array<{ securityId: string; encryptUserId: string }> = []
@@ -95,7 +106,7 @@ mock.module('@/composables/useModel/chatModel', () => ({
   },
 }))
 Object.assign(globalThis, { reactive })
-const { BossHelperCtx } = await import('./runtime')
+const { BossHelperCtx, runBoss } = await import('./runtime')
 
 function context() {
   const ctx = new BossHelperCtx()
@@ -121,6 +132,8 @@ const root = {
 beforeEach(() => {
   data.clear()
   createWorkflow = async () => ({})
+  getRoot = async () => ({})
+  initializeBusiness = async () => {}
   visualDelayCalls = 0
   modelRequests = []
   bossDataRequests = []
@@ -161,6 +174,63 @@ beforeEach(() => {
 })
 
 describe('read-only saved job library', () => {
+  it('keeps route readiness behind business initialization and the latest mount', async () => {
+    const hooks = []
+    getRoot = async () => ({ $router: { afterHooks: hooks } })
+    createWorkflow = async () => ({ status: ref('idle'), current: ref(0), total: ref(0) })
+    let initialized
+    initializeBusiness = () =>
+      new Promise((resolve) => {
+        initialized = resolve
+      })
+    const original = BossHelperCtx.prototype.onMount
+    let mounted
+    BossHelperCtx.prototype.onMount = () =>
+      new Promise((resolve) => {
+        mounted = resolve
+      })
+    try {
+      const script = new EventTarget()
+      const [, injectExecutor] = defineProxy(() => ({}), { namespace: '__boss-helper-executor__' })
+      const bridge = injectExecutor(new ProvideContentScriptAdapter(script))
+      const starting = runBoss(script)
+      for (let i = 0; i < 10 && !hooks.length; i++) await Promise.resolve()
+      hooks[0]({ path: '/web/geek/jobs' })
+      mounted()
+      expect(await bridge.snapshot()).toMatchObject({ ready: false })
+      initialized()
+      await starting
+      expect(await bridge.snapshot()).toMatchObject({ ready: true })
+      hooks[0]({ path: '/web/geek/job-recommend' })
+      const previous = mounted
+      hooks[0]({ path: '/web/geek/jobs' })
+      previous()
+      expect(await bridge.snapshot()).toMatchObject({ ready: false })
+      mounted()
+      await Promise.resolve()
+      expect(await bridge.snapshot()).toMatchObject({ ready: true })
+    } finally {
+      BossHelperCtx.prototype.onMount = original
+    }
+  })
+
+  it('publishes headless readiness before the page is ready and retains initialization failures', async () => {
+    let rejectRoot
+    getRoot = () =>
+      new Promise((_resolve, reject) => {
+        rejectRoot = reject
+      })
+    const script = new EventTarget() as HTMLScriptElement
+    const [, injectExecutor] = defineProxy(() => ({}), { namespace: '__boss-helper-executor__' })
+    const bridge = injectExecutor(new ProvideContentScriptAdapter(script))
+    const initializing = runBoss(script)
+    expect(await bridge.snapshot()).toMatchObject({ ready: false, error: '' })
+    rejectRoot(new Error('page unavailable'))
+    await initializing
+    expect(await bridge.snapshot()).toMatchObject({ ready: false, error: 'page unavailable' })
+    await expect(bridge.command({ type: 'collect' })).rejects.toThrow('page unavailable')
+  })
+
   it('clears obsolete analysis and drafts once while retaining jobs, details and delivery history', async () => {
     const records = mergeJobRecords(
       [],
@@ -1175,17 +1245,30 @@ describe('saved job analysis data boundary', () => {
     data.set(JOB_LIBRARY_STORAGE_KEY, mergeJobRecords([], [item('a')], 'AI', 'batch').records)
     let release!: () => void
     const pendingSave = new Promise<void>((resolve) => (release = resolve))
+    let saveStarted!: () => void
+    const saving = new Promise<void>((resolve) => (saveStarted = resolve))
     setStored = async (key, value) => {
+      saveStarted()
       await pendingSave
       data.set(key, jsonClone(value))
     }
     const nativeTimeout = globalThis.setTimeout
-    globalThis.setTimeout = ((fn, ms, ...args) =>
-      nativeTimeout(fn, ms === 8000 ? 30 : ms, ...args)) as typeof setTimeout
+    let expire!: () => void
+    globalThis.setTimeout = ((fn, ms, ...args) => {
+      if (ms === 8000) expire = () => fn(...args)
+      return nativeTimeout(fn, ms, ...args)
+    }) as typeof setTimeout
     try {
-      await expect(
-        ctx.saveJobAnalysis('a', { analysisStatus: 'ready', analysis: { pass: true } }),
-      ).rejects.toThrow('保存岗位分析超时')
+      const timedOut = ctx
+        .saveJobAnalysis('a', { analysisStatus: 'ready', analysis: { pass: true } })
+        .then(
+          () => null,
+          (error) => error,
+        )
+      await saving
+      expire()
+      expect(await timedOut).toBeInstanceOf(Error)
+      expect((await timedOut).message).toContain('保存岗位分析超时')
       expect(ctx.hasPendingCollectionStorage).toBe(true)
       await expect(ctx.collectOnly()).rejects.toThrow('已有任务')
       await expect(ctx.saveJobAnalysis('a', { analysisStatus: 'failed' })).rejects.toThrow(
@@ -1322,7 +1405,7 @@ it('captures passive job-list updates when auto capture is enabled', async () =>
   await ctx._initJobList()
   expect(jobListHookCallback).toBeDefined()
   jobListHookCallback?.([item('visible')])
-  await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  await ctx['jobCapturePromise']
 
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
     { encryptJobId: 'visible', detailStatus: 'pending' },
@@ -1434,6 +1517,44 @@ describe('collection runtime with the existing storage bridge', () => {
     await expect(ctx.onMount('/web/geek/jobs')).rejects.toThrow('unsupported pagination')
     expect(calls).toEqual(['list', 'pagination'])
     expect(ctx._jobList.value).toHaveLength(1)
+  })
+
+  it('mounts headlessly and hooks each route once even with concurrent mount requests', async () => {
+    const ctx = context()
+    const calls: string[] = []
+    Object.assign(ctx, {
+      _initJobList: async () => {
+        calls.push('list')
+      },
+      _initPage: async () => {},
+      _initPageChange: async () => {},
+      _initJobDetail: async () => {
+        calls.push('detail')
+      },
+      _initClickJobCardAction: async () => {
+        calls.push('click')
+      },
+      initNetConf() {},
+      scheduleBackgroundDetailCompletion() {},
+      loadKeywordRotation: async () => {
+        calls.push('rotation')
+      },
+    })
+    document.createElement = () => {
+      throw new Error('visible UI must not mount')
+    }
+    await Promise.all([ctx.onMount('/web/geek/jobs'), ctx.onMount('/web/geek/jobs')])
+    await ctx.onMount('/web/geek/jobs')
+    expect(calls).toEqual(['list', 'detail', 'click', 'rotation'])
+    await ctx.onMount('/web/geek/job-recommend')
+    expect(calls).toEqual(['list', 'detail', 'click', 'rotation', 'list', 'detail', 'click'])
+    ctx._initPageChange = async () => {
+      throw new Error('route unavailable')
+    }
+    await expect(ctx.onMount('/web/geek/chat')).rejects.toThrow('route unavailable')
+    ctx._initPageChange = async () => {}
+    await ctx.onMount('/web/geek/job-recommend')
+    expect(calls.filter((call) => call === 'list')).toHaveLength(4)
   })
 
   it('finds a scrolling ancestor of the list instead of an unrelated document root', () => {

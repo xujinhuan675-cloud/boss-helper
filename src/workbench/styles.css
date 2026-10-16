@@ -1,0 +1,110 @@
+@import 'tailwindcss' source(none);
+@import '@heroui/styles';
+@source "./";
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, sans-serif;
+  letter-spacing: 0;
+}
+* {
+  box-sizing: border-box;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+}
+.workbench-shell {
+  min-height: 100dvh;
+}
+.workbench-tabs {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  min-height: calc(100dvh - 65px);
+  gap: 0;
+}
+.workbench-tabs > .tabs__list-container {
+  position: sticky;
+  top: 65px;
+  align-self: start;
+  height: calc(100dvh - 65px);
+  padding: 20px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.workbench-tabs > .tabs__list-container .tabs__list {
+  width: 100%;
+  gap: 4px;
+}
+.workbench-tabs > .tabs__list-container .tabs__tab {
+  justify-content: start;
+  width: 100%;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.workbench-panel {
+  min-width: 0;
+  padding: 28px;
+}
+.workbench-panel > section {
+  max-width: 1280px;
+  margin-inline: auto;
+}
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.job-detail {
+  overflow-wrap: anywhere;
+}
+.sidepanel {
+  max-width: 720px;
+  margin-inline: auto;
+}
+.sidepanel .field-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 760px) {
+  .workbench-tabs {
+    display: flex;
+    flex-direction: column;
+  }
+  .workbench-tabs > .tabs__list-container {
+    position: static;
+    width: 100%;
+    height: auto;
+    padding: 8px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .workbench-tabs > .tabs__list-container .tabs__list {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .workbench-tabs > .tabs__list-container .tabs__tab {
+    width: auto;
+    flex-shrink: 0;
+    padding: 9px 10px;
+  }
+  .workbench-panel {
+    padding: 20px 16px;
+  }
+  .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

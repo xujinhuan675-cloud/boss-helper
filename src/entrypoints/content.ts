@@ -1,12 +1,12 @@
 import { defineProxy } from 'comctx'
 
-import { defineContentScript, injectScript } from '#imports'
-
-import './boss/inject.css'
+import { browser, defineContentScript, injectScript } from '#imports'
 import type { BackgroundCounter } from '@/message/background'
 import { InjectBackgroundAdapter } from '@/message/background'
 import { ContentCounter } from '@/message/contentScript'
 import { ProvideContentScriptAdapter } from '@/message/contentScriptShare'
+import type { RuntimeBridge } from '@/workbench/protocol'
+import { EXECUTOR_NAMESPACE, handleExecutorMessage } from '@/workbench/protocol'
 
 export default defineContentScript({
   matches: ['*://zhipin.com/*', '*://*.zhipin.com/*'],
@@ -24,11 +24,19 @@ export default defineContentScript({
         heartbeatTimeout: 3000,
       },
     )
+    const [, injectExecutor] = defineProxy(() => ({}) as RuntimeBridge, {
+      namespace: EXECUTOR_NAMESPACE,
+    })
 
     await injectScript('/boss.js', {
       keepInDom: true,
       modifyScript(script) {
-        provideContentCounter(new ProvideContentScriptAdapter(script))
+        const adapter = new ProvideContentScriptAdapter(script)
+        provideContentCounter(adapter)
+        const executor = injectExecutor(adapter)
+        browser.runtime.onMessage.addListener((message, sender) =>
+          handleExecutorMessage(message, sender, browser.runtime.id, executor),
+        )
       },
     })
   },

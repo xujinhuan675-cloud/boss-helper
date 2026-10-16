@@ -4,11 +4,14 @@ import { beforeEach, describe, expect, it, mock } from 'bun:test'
 import { computed, ref } from 'vue'
 
 import { jsonClone } from '../../utils/deepmerge'
-import deepmerge from '../../utils/deepmerge'
+import deepmerge, { isPlainObject } from '../../utils/deepmerge'
 import { defaultFormData } from './info'
 
 const saved = new Map()
 let imported
+let storageError: Error | undefined
+let storageWriteError: Error | undefined
+let storageWrites = 0
 mock.module('@vueuse/core', () => ({
   useStorageAsync: (_key, value) => ref(value),
   watchThrottled() {},
@@ -16,12 +19,19 @@ mock.module('@vueuse/core', () => ({
 }))
 mock.module('@/message', () => ({
   counter: {
-    storageGet: async (key, fallback) => jsonClone(saved.get(key) ?? fallback),
-    storageSet: async (key, value) => saved.set(key, jsonClone(value)),
+    storageGet: async (key, fallback) => {
+      if (storageError) throw storageError
+      return jsonClone(saved.has(key) ? saved.get(key) : fallback)
+    },
+    storageSet: async (key, value) => {
+      storageWrites++
+      if (storageWriteError) throw storageWriteError
+      return saved.set(key, jsonClone(value))
+    },
   },
   ExtStorage: {},
 }))
-mock.module('@/utils/deepmerge', () => ({ default: deepmerge, jsonClone }))
+mock.module('@/utils/deepmerge', () => ({ default: deepmerge, isPlainObject, jsonClone }))
 mock.module('@/utils/jsonImportExport', () => ({
   importJson: async () => jsonClone(imported),
   exportJson() {},
@@ -34,10 +44,94 @@ const defaults = jsonClone(defaultFormData)
 beforeEach(() => {
   saved.clear()
   imported = undefined
-  Object.assign(useConf().formData, jsonClone(defaults))
+  storageError = undefined
+  storageWriteError = undefined
+  storageWrites = 0
+  const conf = useConf()
+  Object.assign(conf.formData, jsonClone(defaults))
+  conf.formDataPreset.value = 'default'
+  conf.formDataPresets.value = [{ label: '默认配置', value: 'default' }]
 })
 
 describe('percentage scoring configuration', () => {
+  it.each([
+    ['local:FormDataPrese', null],
+    ['local:FormDataPrese', []],
+    ['local:FormDataPrese', ''],
+    ['local:FormDataPreses', null],
+    ['local:FormDataPreses', {}],
+    ['local:FormDataPreses', [null]],
+    ['local:FormDataPreses', [{ label: 'saved', value: 1 }]],
+    ['local:FormDataPreses', [{ label: {}, value: 'saved' }]],
+    ['local:web-geek-job-FormData', null],
+    ['local:web-geek-job-FormData', []],
+    ['local:web-geek-job-FormData', 'broken'],
+  ])(
+    'rejects malformed %s without writing or changing the active settings: %j',
+    async (key, value) => {
+      const conf = useConf()
+      const before = jsonClone(conf.formData)
+      const presetBefore = conf.formDataPreset.value
+      const presetsBefore = jsonClone(conf.formDataPresets.value)
+      saved.set(key, value)
+      await expect(conf.confInit()).rejects.toThrow('格式异常')
+      expect(jsonClone(conf.formData)).toEqual(before)
+      expect(conf.formDataPreset.value).toBe(presetBefore)
+      expect(jsonClone(conf.formDataPresets.value)).toEqual(presetsBefore)
+      expect(storageWrites).toBe(0)
+      expect(saved.get(key)).toEqual(value)
+    },
+  )
+
+  it('reads a validated saved preset before replacing active settings', async () => {
+    saved.set('local:FormDataPrese', 'saved')
+    saved.set('local:FormDataPreses', [{ label: 'Saved', value: 'saved' }])
+    saved.set('local:web-geek-job-FormData-saved', {
+      version: '20261016',
+      resumeText: 'Saved resume',
+    })
+    const conf = useConf()
+    await conf.confInit()
+    expect(conf.formDataPreset.value).toBe('saved')
+    expect(jsonClone(conf.formDataPresets.value)).toEqual([{ label: 'Saved', value: 'saved' }])
+    expect(conf.formData.resumeText).toBe('Saved resume')
+    expect(storageWrites).toBe(0)
+  })
+
+  it('propagates migration failure without writing or replacing active settings', async () => {
+    const malformed = { version: '20240401', delay: null }
+    saved.set('local:web-geek-job-FormData', malformed)
+    const conf = useConf()
+    const before = jsonClone(conf.formData)
+    await expect(conf.confInit()).rejects.toThrow()
+    expect(jsonClone(conf.formData)).toEqual(before)
+    expect(saved.get('local:web-geek-job-FormData')).toEqual(malformed)
+    expect(storageWrites).toBe(0)
+  })
+
+  it.each(['createPreset', 'switchPreset'])(
+    'propagates preset storage failure through %s',
+    async (method) => {
+      const conf = useConf()
+      storageWriteError = new Error('preset write failed')
+      await expect(conf[method]('another preset')).rejects.toThrow('preset write failed')
+      expect(conf.isLoading.value).toBe(false)
+    },
+  )
+
+  it('propagates read failures while switching to a saved preset', async () => {
+    storageError = new Error('preset read failed')
+    await expect(useConf().switchPreset('saved')).rejects.toThrow('preset read failed')
+  })
+
+  it('propagates initialization failures without replacing saved configuration', async () => {
+    const stored = { ...defaults, resumeText: 'saved resume' }
+    saved.set('local:web-geek-job-FormData', jsonClone(stored))
+    storageError = new Error('storage unavailable')
+    await expect(useConf().confInit()).rejects.toThrow('storage unavailable')
+    expect(saved.get('local:web-geek-job-FormData')).toEqual(stored)
+  })
+
   it.each(['confInit', 'confReload', 'confImport'])(
     'replaces obsolete scoring through %s with the current rubric',
     async (method) => {
