@@ -144,7 +144,6 @@ describe('offline settings interactions', () => {
     expect(state.actionError).toBe('')
     expect(state.keywordRotation.status).toBe('paused')
   })
-
   it('keeps collection-only independent of keywords, resume and model configuration', async () => {
     const calls = []
     Object.assign(globalThis.__resumeHelper, {

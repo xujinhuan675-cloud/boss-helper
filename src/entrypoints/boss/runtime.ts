@@ -1,6 +1,7 @@
+import { defineProxy } from 'comctx'
 import { computed, reactive, ref } from 'vue'
 
-import { appearanceConf, useConf } from '@/composables/conf'
+import { useConf } from '@/composables/conf'
 import type { WorkflowData } from '@/composables/useApplying/type'
 import { createLazyObject, isInitialized } from '@/composables/useApplying/type'
 import type { JobData } from '@/composables/useHelper'
@@ -13,11 +14,12 @@ import { counter } from '@/message'
 import type { FormDataInput } from '@/types/formData'
 import { delay } from '@/utils'
 import { jsonClone } from '@/utils/deepmerge'
-import elmGetter from '@/utils/elmGetter'
 import { logger } from '@/utils/logger'
 
 import { defaultFormData } from '../../composables/conf/info'
 import { MATCH_SCORING_VERSION } from '../../composables/useApplying/scoring'
+import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
+import { EXECUTOR_NAMESPACE } from '../../workbench/protocol'
 import { GeekChatClientManager } from './chat'
 import type { BoosJobData } from './delivery'
 import { bossWorkflow } from './delivery'
@@ -26,6 +28,7 @@ import {
   COLLECTION_RUN_STORAGE_KEY,
   COLLECTION_SCROLL_SELECTORS,
   JOB_LIBRARY_STORAGE_KEY,
+  assertJobLibrary,
   buildAnalysisHandoff,
   createCollectionRun,
   getJobFunnel,
@@ -33,6 +36,7 @@ import {
   isFunnelStage,
   isProcessingStatus,
   mergeJobRecords,
+  normalizeJobLibraryAnalysis,
   stopCollectionRun,
 } from './jobStore'
 import {
@@ -54,6 +58,8 @@ import type { KeywordRotationPlan, KeywordRotationUsage } from './keywordRotatio
 import { getBossData, uploadImage } from './requests'
 import { SavedJobAnalyzer } from './savedAnalysis'
 import type { BossZpDetailData, BossZpJobItemData } from './types'
+import { createExecutorBridge } from './workbench'
+import type { ExecutorState } from './workbench'
 
 const gatheringStatusText: Record<CollectionRun['status'], string> = {
   running: '进行中',
@@ -65,30 +71,6 @@ const gatheringStatusText: Record<CollectionRun['status'], string> = {
   restricted: '已停止：页面提示访问限制',
   network_error: '已停止：网络异常',
   unknown_error: '异常停止',
-}
-
-function removeAd() {
-  // 新职位发布时通知我
-  void elmGetter.rm('.job-list-wrapper .subscribe-weixin-wrapper')
-  // 侧栏
-  void elmGetter.rm('.job-side-wrapper')
-  // 侧边悬浮框
-  void elmGetter.rm('.side-bar-box')
-  // 搜索栏登录框
-  void elmGetter.rm('.go-login-btn')
-  // 底部页脚
-  // elmGetter.rm("#footer-wrapper");
-
-  // 新版: 微信扫码
-  void elmGetter.rm('.c-subscribe-weixin')
-  // 新版: 求职工具
-  void elmGetter.rm('.c-job-tools.job-tools')
-  // 新版: 热门职位
-  void elmGetter.rm('.c-hot-link.hot-link')
-  // 新版: 面包屑
-  void elmGetter.rm('.c-breadcrumb')
-  // 新版: 职位详情页的引导(想要什么工作)
-  void elmGetter.rm('.job-detail-container .job-detail-guide-cont')
 }
 
 const initChange = useHookVueFn('#wrap .page-job-wrapper', 'pageChangeAction')
@@ -199,7 +181,6 @@ function applySavedJobDetail(job: JobData, detail: BossZpDetailData): JobData {
 }
 
 export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}> {
-  private static instance: HTMLElement | null = null
   label = 'Boss直聘'
   key = 'boss'
 
@@ -254,6 +235,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private jobCapturePromise: Promise<void> = Promise.resolve()
   private backgroundDetailQueued = false
   private mounted = false
+  private mountedPath = ''
+  private mountPromise: Promise<void> | null = null
   private keywordRotationPromise: Promise<KeywordRotationPlan> | null = null
   private keywordRotationStopRequested = false
 
@@ -502,7 +485,6 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     }
     return false
   }
-
   async startKeywordRotation(input?: string): Promise<KeywordRotationPlan> {
     if (this.keywordRotationPromise) return this.keywordRotationPromise
     if (this.keywordRotationSaving.value) throw new Error('正在保存岗位关键词，请稍候')
@@ -702,65 +684,14 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 
   private async readJobLibrary(): Promise<BossJobLibraryRecord[]> {
     if (this.analysisCleanup) await this.analysisCleanup
-    const records = await counter.storageGet<BossJobLibraryRecord[]>(JOB_LIBRARY_STORAGE_KEY, [])
-    if (
-      !Array.isArray(records) ||
-      records.some(
-        (record) =>
-          !record ||
-          typeof record !== 'object' ||
-          Array.isArray(record) ||
-          typeof record.encryptJobId !== 'string' ||
-          !record.encryptJobId.trim() ||
-          !record.snapshot ||
-          typeof record.snapshot !== 'object' ||
-          Array.isArray(record.snapshot) ||
-          record.snapshot.encryptJobId !== record.encryptJobId ||
-          !Array.isArray(record.sourceKeywords) ||
-          !record.sourceKeywords.every((keyword) => typeof keyword === 'string') ||
-          !Array.isArray(record.batches) ||
-          !record.batches.every((batch) => typeof batch === 'string') ||
-          !['pending', 'complete', 'failed'].includes(record.detailStatus) ||
-          !['pending', 'ready', 'failed'].includes(record.analysisStatus) ||
-          !['pending', 'approved', 'rejected'].includes(record.reviewStatus) ||
-          !['pending', 'queued', 'sent', 'unknown', 'failed'].includes(record.sendStatus) ||
-          (record.processingStatus !== undefined && !isProcessingStatus(record.processingStatus)) ||
-          (record.manualFunnelStage !== undefined && !isFunnelStage(record.manualFunnelStage)) ||
-          (record.detail !== undefined &&
-            (!record.detail ||
-              typeof record.detail !== 'object' ||
-              Array.isArray(record.detail) ||
-              !record.detail.jobInfo ||
-              typeof record.detail.jobInfo !== 'object' ||
-              Array.isArray(record.detail.jobInfo))),
-      )
-    )
-      throw new Error('本地岗位库格式异常；已保留原数据')
+    const records = await counter.storageGet<unknown>(JOB_LIBRARY_STORAGE_KEY, [])
+    assertJobLibrary(records)
     if (this.analysisCleanup) {
       await this.analysisCleanup
       return this.readJobLibrary()
     }
-    const obsolete = records.filter(
-      (record) =>
-        record.analysis?.scoringVersion !== MATCH_SCORING_VERSION &&
-        (record.analysis !== undefined ||
-          record.analysisStatus === 'ready' ||
-          record.finalGreeting !== undefined ||
-          record.matchedAt !== undefined),
-    )
-    if (obsolete.length) {
-      const obsoleteIds = new Set(obsolete.map((record) => record.encryptJobId))
-      const cleaned = jsonClone(records)
-      for (const record of cleaned) {
-        if (!obsoleteIds.has(record.encryptJobId)) continue
-        delete record.analysis
-        delete record.finalGreeting
-        delete record.analysisFailureReason
-        delete record.matchedAt
-        record.analysisStatus = 'pending'
-        if (record.sendStatus === 'pending' && !record.snapshot.contact)
-          record.reviewStatus = 'pending'
-      }
+    const cleaned = normalizeJobLibraryAnalysis(records, MATCH_SCORING_VERSION)
+    if (cleaned !== records) {
       const cleanup = this.writeJobLibrary(cleaned)
       this.analysisCleanup = cleanup
       const settled = () => {
@@ -1603,59 +1534,38 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   async onMount(path?: string) {
-    if (!path) {
-      path = this.rootVue.$route.path
-    }
-
+    path ??= this.rootVue.$route.path
+    if (this.mountPromise) await this.mountPromise
+    if (this.mountedPath === path) return
+    this.mountedPath = ''
+    this.mountPromise = this.mountRoute(path!)
     try {
-      if (await elmGetter.get('boss-helper-job', 3000)) {
-        return
-      }
-    } catch {}
-
-    if (BossHelperCtx.instance) {
-      BossHelperCtx.instance.remove()
-      BossHelperCtx.instance = null
+      await this.mountPromise
+    } finally {
+      this.mountPromise = null
     }
-    // TODO: 移除menu, 可能导致nuxtui实例冲突
-    // if (!document.querySelector('boss-helper-menu')) {
-    //   const menuElement = document.createElement('boss-helper-menu')
-    //   document.body.appendChild(menuElement)
-    // }
-    const elm = await elmGetter.get(
-      '.job-search-wrapper,.job-recommend-main,.page-jobs .page-jobs-main',
-    )
+  }
 
-    const appElement = document.createElement('boss-helper-job')
-    BossHelperCtx.instance = appElement
-    elm.insertBefore(appElement, elm.firstChild)
-    removeAd()
-
+  private async mountRoute(path: string) {
     await this._initJobList()
     await this._initPage()
     await this._initPageChange()
     await this._initJobDetail()
     await this._initClickJobCardAction()
-
-    this.initNetConf()
-    const contentElm = elm.querySelector<HTMLDivElement>('.recommend-result-inner')
-    this.geek = new GeekChatClientManager()
-    await this.geek.connect()
-    watch(
-      appearanceConf.value,
-      (v) => {
-        if (!contentElm) return
-        contentElm.style.marginRight =
-          v.leftChat && v.contentOffset != 25 ? `${v.contentOffset}%` : 'auto'
-        contentElm.style.marginLeft =
-          !v.leftChat && v.contentOffset != 25 ? `${v.contentOffset}%` : 'auto'
-      },
-      { immediate: true },
-    )
+    if (!this.mounted) {
+      this.initNetConf()
+      this.geek = new GeekChatClientManager()
+      await this.geek.connect()
+      await this.loadKeywordRotation()
+    }
     this.mounted = true
-    await this.loadKeywordRotation()
+    this.mountedPath = path
     this.scheduleBackgroundDetailCompletion()
-    if (this.keywordRotation.value?.status === 'running') void this.startKeywordRotation()
+    if (this.keywordRotation.value?.status === 'running') {
+      void this.startKeywordRotation().catch((error) => {
+        this.keywordRotationError.value = error instanceof Error ? error.message : String(error)
+      })
+    }
   }
   getConfigItems() {
     const conf = useConf()
@@ -2078,33 +1988,68 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 //   }
 // }
 
-export async function runBoss() {
-  // hookChatSocket()
+export async function runBoss(script: HTMLScriptElement) {
+  const bossHelpCtx = new BossHelperCtx()
+  const state: ExecutorState = { ready: false, error: '', lastError: '' }
+  let initialized = false
+  let routeMount: Promise<void> | undefined
+  const [provideExecutor] = defineProxy(() => createExecutorBridge(bossHelpCtx, state), {
+    namespace: EXECUTOR_NAMESPACE,
+  })
+  provideExecutor(new ProvideContentScriptAdapter(script))
 
-  const bossHelpCtx = await BossHelperCtx.new()
+  try {
+    bossHelpCtx.rootVue = await getRootVue()
+    bossHelpCtx.workflow = await bossWorkflow(bossHelpCtx)
 
-  bossHelpCtx.rootVue.$router.afterHooks.push(
-    (to: {
-      name: string
-      meta: {
-        notLogin: boolean
-        wrapClassName: string
-        scrollBehavior: string
-        hideFooter: boolean
-        headerV2: boolean
-      }
-      path: string
-      hash: string
-      query: {
-        ka: string
-      }
-      params: {}
-      fullPath: string
-    }) => {
-      // hookChatSocket()
-      bossHelpCtx.onMount(to.path)
-    },
-  )
+    bossHelpCtx.rootVue.$router.afterHooks.push(
+      (to: {
+        name: string
+        meta: {
+          notLogin: boolean
+          wrapClassName: string
+          scrollBehavior: string
+          hideFooter: boolean
+          headerV2: boolean
+        }
+        path: string
+        hash: string
+        query: {
+          ka: string
+        }
+        params: {}
+        fullPath: string
+      }) => {
+        state.ready = false
+        const mounting = bossHelpCtx.onMount(to.path)
+        routeMount = mounting
+        void mounting
+          .then(() => {
+            if (initialized && routeMount === mounting) {
+              state.ready = true
+              state.error = ''
+            }
+          })
+          .catch((error) => {
+            if (routeMount === mounting) {
+              state.ready = false
+              state.error = error instanceof Error ? error.message : String(error)
+            }
+          })
+      },
+    )
 
-  await run(bossHelpCtx)
+    await run(bossHelpCtx)
+    initialized = true
+    while (routeMount) {
+      const mounting = routeMount
+      await mounting
+      if (routeMount === mounting) break
+    }
+    state.ready = true
+    state.error = ''
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+    logger.error('Executor initialization failed', error)
+  }
 }

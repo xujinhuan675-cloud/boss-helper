@@ -20,6 +20,16 @@ function fakeStorage(initial: any = {}) {
 }
 
 describe('resume store', () => {
+  it.each([{ resumes: 'invalid' }, { resumes: [{ id: 'partial' }] }, ['invalid'], 'invalid'])(
+    'refuses malformed storage instead of migrating or dropping existing records: %j',
+    async (raw) => {
+      const storage = fakeStorage(raw)
+      const store = createResumeStore(storage)
+      await expect(store.init('旧简历')).rejects.toThrow('原有数据已保留')
+      expect(storage.read()).toEqual(raw)
+      expect(store.resumes.value).toEqual([])
+    },
+  )
   it('migrates legacy resume text into a primary resume and keeps a stable current id', () => {
     const data = normalizeResumeStore({}, '完整旧简历', '2026-10-14T00:00:00.000Z')
     expect(data.resumes).toHaveLength(1)

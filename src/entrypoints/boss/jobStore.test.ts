@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import {
+  assertJobLibrary,
   buildAnalysisHandoff,
   COLLECTION_SCROLL_SELECTORS,
   filterJobLibrary,
@@ -9,6 +10,7 @@ import {
   getJobFunnelStage,
   isJobExcluded,
   mergeJobRecords,
+  normalizeJobLibraryAnalysis,
   sortJobLibraryByMatch,
   stopCollectionRun,
 } from './jobStore'
@@ -24,6 +26,96 @@ const item = (id: string): BossZpJobItemData =>
   }) as unknown as BossZpJobItemData
 
 describe('job library', () => {
+  it('hides obsolete analysis from a detached view while retaining details, current results and delivery history', () => {
+    const records = mergeJobRecords(
+      [],
+      [item('old'), item('current'), item('sent')],
+      'AI',
+      'batch',
+    ).records
+    for (const record of records)
+      Object.assign(record, {
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: 'Saved JD' } },
+        analysis: { rating: 200 },
+        analysisStatus: 'ready',
+        finalGreeting: 'Old draft',
+        analysisFailureReason: 'Old failure',
+        matchedAt: '2026-10-15T00:00:00Z',
+        reviewStatus: 'approved',
+        manualFunnelStage: 'interview',
+        processingStatus: 'excluded',
+      })
+    records[1].analysis = { scoringVersion: 'current', rating: 76 }
+    records[2].sendStatus = 'sent'
+    const before = JSON.stringify(records)
+    const normalized = normalizeJobLibraryAnalysis(records, 'current')
+    expect(JSON.stringify(records)).toBe(before)
+    expect(normalized[0]).toMatchObject({
+      detail: { jobInfo: { postDescription: 'Saved JD' } },
+      detailStatus: 'complete',
+      analysisStatus: 'pending',
+      reviewStatus: 'pending',
+      sendStatus: 'pending',
+      manualFunnelStage: 'interview',
+      processingStatus: 'excluded',
+    })
+    for (const field of ['analysis', 'finalGreeting', 'analysisFailureReason', 'matchedAt']) {
+      expect(normalized[0][field]).toBeUndefined()
+    }
+    expect(normalized[1]).toEqual(records[1])
+    expect(normalized[2]).toMatchObject({
+      analysisStatus: 'pending',
+      reviewStatus: 'approved',
+      sendStatus: 'sent',
+    })
+    normalized[0].detail.jobInfo.postDescription = 'Changed'
+    expect(records[0].detail.jobInfo.postDescription).toBe('Saved JD')
+  })
+
+  it('reuses current records without initiating a cleanup for pending or current results', () => {
+    const records = mergeJobRecords([], [item('pending'), item('current')], 'AI', 'batch').records
+    records[1].analysis = { scoringVersion: 'current', rating: 76 }
+    records[1].analysisStatus = 'ready'
+    expect(normalizeJobLibraryAnalysis(records, 'current')).toBe(records)
+    expect(normalizeJobLibraryAnalysis([], 'current')).toEqual([])
+  })
+
+  it('accepts existing saved records and missing optional display fields without changing them', () => {
+    const records = mergeJobRecords([], [item('saved')], 'AI', 'batch').records
+    records[0].detail = { jobInfo: { postDescription: 'Saved JD' } }
+    records[0].analysis = { rating: 200 }
+    const before = JSON.stringify(records)
+    expect(() => assertJobLibrary(records)).not.toThrow()
+    expect(() => assertJobLibrary([])).not.toThrow()
+    expect(JSON.stringify(records)).toBe(before)
+  })
+
+  it.each([null, {}, [null], [{ encryptJobId: '' }]])(
+    'rejects invalid storage without replacing it: %j',
+    (records) => {
+      const before = JSON.stringify(records)
+      expect(() => assertJobLibrary(records)).toThrow('本地岗位库格式异常；已保留原数据')
+      expect(JSON.stringify(records)).toBe(before)
+    },
+  )
+
+  it.each([
+    { sourceKeywords: [1] },
+    { manualFunnelStage: 'unknown' },
+    { finalGreeting: { text: 'broken' } },
+    { failureReason: ['broken'] },
+    { snapshot: { encryptJobId: 'broken', jobName: ['broken'] } },
+    { detail: { jobInfo: { postDescription: { text: 'broken' } } } },
+    { detail: { jobInfo: {}, bossInfo: { title: 1 } } },
+  ])('rejects a partially damaged library without changing valid records: %j', (patch) => {
+    const records = mergeJobRecords([], [item('valid'), item('broken')], 'AI', 'batch').records
+    Object.assign(records[1], patch)
+    const before = JSON.stringify(records)
+    expect(() => assertJobLibrary(records)).toThrow('本地岗位库格式异常；已保留原数据')
+    expect(JSON.stringify(records)).toBe(before)
+  })
+
   const filterRecords = () => {
     const records = mergeJobRecords(
       [],
@@ -239,6 +331,26 @@ describe('job library', () => {
     })
     expect(getJobFunnelStage(records[1])).toBe('interview')
     expect(filterJobLibrary(records, { funnelStage: 'interview' })).toHaveLength(2)
+  })
+
+  it('opens the same active jobs counted by the today-matched statistic', () => {
+    const records = mergeJobRecords(
+      [],
+      ['yesterday', 'today', 'excluded', 'invalid', 'missing'].map(item),
+      'AI',
+      'run-1',
+    ).records
+    const now = new Date(2026, 9, 15, 12)
+    records[0].matchedAt = '2026-10-14T23:59:59'
+    records[1].matchedAt = '2026-10-15T00:00:00'
+    records[2].matchedAt = '2026-10-15T10:00:00'
+    records[2].processingStatus = 'excluded'
+    records[3].matchedAt = 'invalid'
+    const filtered = filterJobLibrary(records, { matchedToday: true }, now)
+    expect(filtered.map((record) => record.encryptJobId)).toEqual(['today'])
+    expect(filtered.length).toBe(getJobFunnel(records, now).matchedToday)
+    expect(filterJobLibrary(records, { matchedToday: false }, now)).toHaveLength(4)
+    expect(filterJobLibrary(records, { matchedToday: true, search: 'missing' }, now)).toEqual([])
   })
 
   it('counts only the stage transitions that happened today', () => {

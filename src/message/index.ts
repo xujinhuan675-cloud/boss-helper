@@ -8,6 +8,10 @@ export const InjectAdapter = ProvideContentScriptAdapter
 
 let _counter: ContentCounter | null = null
 
+export function setCounter(value: ContentCounter) {
+  _counter = value
+}
+
 export function initCounter(
   script: HTMLScriptElement = document.currentScript as HTMLScriptElement,
 ) {

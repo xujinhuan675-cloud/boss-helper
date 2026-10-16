@@ -11,7 +11,7 @@
 
 ## 项目介绍
 
-Boss直聘助手, 皆在减少投递简历的麻烦, 和提高投递简历的效率, 技术栈使用WXT + Vue3 + NuxtUI@4 + TailwindCSS@4, 开源在 Github 欢迎前来Pr
+Boss直聘助手, 皆在减少投递简历的麻烦, 和提高投递简历的效率。本地二开界面使用 WXT + React 19 + HeroUI 3 免费组件 + TailwindCSS 4，保留 Vue 3 业务服务与原 Nuxt UI 依赖。
 
 > 本项目处于积极维护状态, 一直很忙所以拖了比较久才开源，抱歉了~
 
@@ -22,6 +22,8 @@ Boss直聘助手, 皆在减少投递简历的麻烦, 和提高投递简历的效
 ```text
 F:\AnchorOS\6-项目仓库\boss-helper\.output\chrome-mv3
 ```
+
+本地只保留 `codex/submit-changes` 分支，HeroUI 侧边栏和独立工作台已合入，后续直接在此仓库开发。工具栏图标打开侧边栏，完整工作台入口为扩展的 `workbench.html`。
 
 在仓库根目录执行：
 

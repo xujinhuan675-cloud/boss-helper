@@ -63,7 +63,6 @@ export function keywordRotationDateKey(value = new Date()): string {
   const day = String(value.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
-
 export function normalizeKeywordList(input: string | string[]): string[] {
   const values = Array.isArray(input) ? input : input.split(/\r?\n/)
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
