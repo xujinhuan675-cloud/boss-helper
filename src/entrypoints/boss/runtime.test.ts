@@ -10,15 +10,28 @@ import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
 import { parseGptJson } from '../../utils/ai'
 import deepmerge, { jsonClone } from '../../utils/deepmerge'
 import { COLLECTION_RUN_STORAGE_KEY, JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
+import {
+  KEYWORD_ROTATION_STORAGE_KEY,
+  KEYWORD_ROTATION_USAGE_STORAGE_KEY,
+  createKeywordRotationPlan,
+  keywordRotationDateKey,
+} from './keywordRotation'
 import type { BossZpJobItemData } from './types'
 
-const conf = { formData: { salaryRange: { value: '10-15K' } } }
+const conf = {
+  formData: { salaryRange: { value: '10-15K' }, notification: { value: true } },
+}
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
 mock.module('@/composables/conf', () => ({ appearanceConf: ref({}), useConf: () => conf }))
+mock.module('@/composables/useModel', () => ({ ChatModel: class {}, useModel: () => ({}) }))
+mock.module('@/composables/useResume', () => ({ useResumes: () => ({}) }))
 mock.module('@/composables/useHelper', () => ({
   HelperContext: class {
     conf = conf
+    notification(...args) {
+      return HelperContext.prototype.notification.apply(this, args)
+    }
   },
 }))
 mock.module('@/composables/useApplying/type', () => ({
@@ -64,10 +77,20 @@ mock.module('./requests', () => ({
   },
 }))
 let modelRequests: string[] = []
-let modelRespond = async (role: string) =>
-  role === 'filtering'
-    ? JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
-    : '招呼语草稿'
+const filteringResponse = JSON.stringify({
+  dimensions: [
+    { key: 'responsibilities', score: 24, reason: '职责匹配' },
+    { key: 'skills', score: 20, reason: '技能匹配' },
+    { key: 'experience', score: 18, reason: '项目匹配' },
+    { key: 'industry', score: 6, reason: '行业相关' },
+    { key: 'preferences', score: 8, reason: '偏好匹配' },
+  ],
+  strengths: ['技能匹配'],
+  gaps: [],
+  hardRequirements: [],
+  uncertainties: [],
+})
+let modelRespond = async (role: string) => (role === 'filtering' ? filteringResponse : '招呼语草稿')
 mock.module('@/composables/useModel/chatModel', () => ({
   ChatModel: class {
     createAgent() {
@@ -77,15 +100,32 @@ mock.module('@/composables/useModel/chatModel', () => ({
       modelRequests.push(`${role}:${job.rawData.encryptJobId}`)
       return { text: await modelRespond(role) }
     }
+    async generate(role) {
+      modelRequests.push(role)
+      return modelRespond(role)
+    }
   },
 }))
-Object.assign(globalThis, { reactive })
+let desktopNotifications: string[] = []
+let pageNotifications: Array<{ title: string }> = []
+let notifyDesktop = async (message: string) => {
+  desktopNotifications.push(message)
+}
+Object.assign(globalThis, {
+  reactive,
+  useToast: () => ({ add: (toast) => pageNotifications.push(toast) }),
+  notification: (message: string) => notifyDesktop(message),
+})
+const { HelperContext } = await import('../../composables/useHelper/ctx')
 const { BossHelperCtx } = await import('./runtime')
 
 function context() {
   const ctx = new BossHelperCtx()
   // 时间边界另有回归；存储与列表测试不等待真实的操作间隔。
-  Object.assign(ctx, { waitForGathering: async () => true })
+  Object.assign(ctx, {
+    waitForGathering: async () => true,
+    waitForKeywordRotation: async () => true,
+  })
   return ctx
 }
 
@@ -105,16 +145,24 @@ const root = {
 
 beforeEach(() => {
   data.clear()
+  desktopNotifications = []
+  pageNotifications = []
+  conf.formData.notification.value = true
+  notifyDesktop = async (message) => {
+    desktopNotifications.push(message)
+  }
   createWorkflow = async () => ({})
   visualDelayCalls = 0
   modelRequests = []
   bossDataRequests = []
-  modelRespond = async (role) =>
-    role === 'filtering'
-      ? JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
-      : '招呼语草稿'
+  modelRespond = async (role) => (role === 'filtering' ? filteringResponse : '招呼语草稿')
   for (const key of Object.keys(conf.formData)) {
-    if (key.startsWith('delayCollection')) delete conf.formData[key]
+    if (
+      key.startsWith('delayCollection') ||
+      key.startsWith('delayKeywordRotation') ||
+      key.startsWith('keywordRotation')
+    )
+      delete conf.formData[key]
   }
   selectors = new Map()
   jobListHookCallback = undefined
@@ -122,6 +170,7 @@ beforeEach(() => {
   Object.assign(globalThis, {
     location: { href: 'https://www.zhipin.com/web/geek/jobs?query=AI' },
     document: {
+      visibilityState: 'hidden',
       defaultView: globalThis,
       scrollingElement: root,
       documentElement: root,
@@ -148,7 +197,188 @@ beforeEach(() => {
   initCounter(script)
 })
 
+describe('task notifications', () => {
+  it.each([
+    [true, 'hidden', 1],
+    [true, 'visible', 0],
+    [false, 'hidden', 0],
+  ])(
+    'respects enabled=%s and visibility=%s while keeping the page reminder',
+    async (enabled, visibility, count) => {
+      const ctx = context()
+      conf.formData.notification.value = enabled
+      document.visibilityState = visibility
+
+      await ctx.notification('任务结束')
+
+      expect(desktopNotifications).toHaveLength(count)
+      expect(pageNotifications.map((toast) => toast.title)).toEqual(['任务结束'])
+    },
+  )
+
+  it('keeps the page reminder and resolves when desktop notification delivery fails', async () => {
+    const ctx = context()
+    notifyDesktop = async () => {
+      throw new Error('通知不可用')
+    }
+
+    await expect(ctx.notification('任务结束')).resolves.toBeUndefined()
+    expect(pageNotifications.map((toast) => toast.title)).toEqual(['任务结束'])
+  })
+})
+
 describe('read-only saved job library', () => {
+  it('clears obsolete analysis and drafts once while retaining jobs, details and delivery history', async () => {
+    const records = mergeJobRecords(
+      [],
+      [item('old'), item('current'), item('sent')],
+      'AI',
+      'batch',
+    ).records
+    for (const record of records) {
+      Object.assign(record, {
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: '保存的完整 JD' } },
+        analysisStatus: 'ready',
+        analysis: { rating: 200, res: { positive: [], negative: [] } },
+        finalGreeting: '旧草稿',
+        matchedAt: '2026-10-15T00:00:00Z',
+        analysisFailureReason: '旧分析错误',
+        reviewStatus: 'approved',
+      })
+    }
+    records[1].analysis = { rating: 76, scoringVersion: 'weighted-v1', passed: true }
+    records[2].sendStatus = 'sent'
+    const currentBefore = jsonClone(records[1])
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    let writes = 0
+    setStored = async (key, value) => {
+      writes++
+      data.set(key, jsonClone(value))
+    }
+    const ctx = context()
+    const library = await ctx.getJobLibrary()
+    expect(library).toHaveLength(3)
+    expect(library[0]).toMatchObject({
+      detailStatus: 'complete',
+      detail: { jobInfo: { postDescription: '保存的完整 JD' } },
+      analysisStatus: 'pending',
+      reviewStatus: 'pending',
+      sendStatus: 'pending',
+      sourceKeywords: ['AI'],
+      batches: ['batch'],
+    })
+    for (const field of ['analysis', 'finalGreeting', 'analysisFailureReason', 'matchedAt']) {
+      expect(library[0][field]).toBeUndefined()
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0][field]).toBeUndefined()
+    }
+    expect(library[1]).toEqual(currentBefore)
+    expect(library[2]).toMatchObject({
+      sendStatus: 'sent',
+      reviewStatus: 'approved',
+      analysisStatus: 'pending',
+    })
+    expect(library[2].analysis).toBeUndefined()
+    await ctx.getJobLibrary()
+    expect(writes).toBe(1)
+    expect(modelRequests).toEqual([])
+  })
+
+  it('preserves original data if obsolete-analysis cleanup cannot be saved and allows retry', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    Object.assign(records[0], {
+      analysisStatus: 'ready',
+      analysis: { rating: 200 },
+      finalGreeting: '旧草稿',
+    })
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    const before = jsonClone(records)
+    setStored = async () => {
+      throw new Error('清理保存失败')
+    }
+    const ctx = context()
+    await expect(ctx.getJobLibrary()).rejects.toThrow('清理保存失败')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(before)
+    setStored = async (key, value) => data.set(key, jsonClone(value))
+    expect((await ctx.getJobLibrary())[0].analysisStatus).toBe('pending')
+  })
+
+  it('shares an obsolete-analysis cleanup between concurrent library reads', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    records[0].analysis = { rating: 200 }
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    let release
+    let writing
+    const started = new Promise((resolve) => {
+      writing = resolve
+    })
+    const ack = new Promise((resolve) => {
+      release = resolve
+    })
+    let writes = 0
+    setStored = async (key, value) => {
+      writes++
+      writing()
+      await ack
+      data.set(key, jsonClone(value))
+    }
+    const ctx = context()
+    const first = ctx.getJobLibrary()
+    const second = ctx.getJobLibrary()
+    try {
+      await started
+      expect(ctx.hasPendingCollectionStorage).toBe(true)
+      expect(records[0].analysis.rating).toBe(200)
+    } finally {
+      release()
+    }
+    expect((await first)[0].analysis).toBeUndefined()
+    expect((await second)[0].analysis).toBeUndefined()
+    expect(writes).toBe(1)
+    expect(ctx.hasPendingCollectionStorage).toBe(false)
+  })
+
+  it('reanalyzes an obsolete reviewed result from saved details under the current rubric', async () => {
+    const records = mergeJobRecords([], [item('old')], 'AI', 'batch').records
+    Object.assign(records[0], {
+      detailStatus: 'complete',
+      detail: { jobInfo: { postDescription: '已保存的完整 JD' } },
+      analysisStatus: 'ready',
+      analysis: { rating: 200 },
+      reviewStatus: 'rejected',
+      finalGreeting: '旧草稿',
+    })
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    const ctx = context()
+    ctx.conf = {
+      formData: jsonClone(defaultFormData),
+    }
+    ctx.conf.formData.aiFiltering.enable = true
+    Object.assign(ctx, {
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'test', api_key: 'key', base_url: 'url' } },
+        ]),
+        getDefaultModelKey: () => 'active',
+      },
+      resumes: { currentResume: ref({ id: 'resume', name: '主简历', content: '完整简历' }) },
+      onJobCardClick: () => {
+        throw new Error('must use saved details')
+      },
+    })
+    const run = await ctx.savedAnalyzer.analyzeOne('old')
+    expect(run).toMatchObject({ status: 'completed', completed: 1 })
+    const saved = (await ctx.getJobLibrary())[0]
+    expect(saved.analysis).toMatchObject({
+      scoringVersion: 'weighted-v1',
+      rating: 76,
+      passed: true,
+    })
+    expect(saved.reviewStatus).toBe('pending')
+    expect(saved.finalGreeting).toBe('招呼语草稿')
+    expect(modelRequests).toEqual(['filtering:old', 'greetings:old'])
+  })
+
   it.each([
     null,
     { encryptJobId: '' },
@@ -190,7 +420,7 @@ describe('read-only saved job library', () => {
     Object.assign(records[0], {
       detailStatus: 'complete',
       detail: { jobInfo: { postDescription: 'Saved JD' }, bossInfo: { name: 'Alice' } },
-      analysis: { category: 'P', reasons: ['matches'] },
+      analysis: { scoringVersion: 'weighted-v1', category: 'P', reasons: ['matches'] },
       reviewStatus: 'approved',
       sendStatus: 'sent',
       finalGreeting: 'Reviewed greeting',
@@ -373,7 +603,11 @@ describe('collection with immediate analysis', () => {
     ctx.conf = {
       formData: {
         ...conf.formData,
-        aiFiltering: { score: 10, prompt: [{ role: 'user', content: '筛选' }] },
+        aiFiltering: {
+          score: 70,
+          scoringVersion: 'weighted-v1',
+          prompt: [{ role: 'user', content: '筛选' }],
+        },
         aiGreeting: { prompt: [{ role: 'user', content: '招呼语' }] },
       },
     }
@@ -405,6 +639,196 @@ describe('collection with immediate analysis', () => {
     return ctx
   }
 
+  it('sends one combined reminder after collection and analysis complete', async () => {
+    const ctx = pipelineContext()
+
+    expect((await ctx.savedAnalyzer.start({ collectNew: true })).status).toBe('completed')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('采集并分析')
+    expect(desktopNotifications[0]).toContain('2')
+    expect(pageNotifications).toHaveLength(1)
+  })
+
+  it('sends one rotation summary without per-keyword or collection reminders', async () => {
+    const ctx = pipelineContext()
+    ctx['navigateToKeyword'] = async (keyword) => {
+      location.href = `https://www.zhipin.com/web/geek/jobs?query=${encodeURIComponent(keyword)}`
+    }
+
+    expect((await ctx.startKeywordRotation('产品经理\nAI产品经理')).status).toBe('completed')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('关键词轮换')
+    expect(desktopNotifications[0]).toContain('2/2')
+    expect(pageNotifications).toHaveLength(1)
+  })
+
+  it('reports a local analysis batch once after its saved results are available', async () => {
+    const ctx = pipelineContext()
+    const records = data.get(JOB_LIBRARY_STORAGE_KEY)
+    records[0].detailStatus = 'complete'
+    records[0].detail = { jobInfo: { postDescription: '完整 JD' } }
+
+    expect((await ctx.savedAnalyzer.start({ limit: 20 })).status).toBe('completed')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].analysisStatus).toBe('ready')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('岗位分析')
+  })
+
+  it.each(['failed', 'stopped'])(
+    'reports %s analysis once without losing the saved result',
+    async (status) => {
+      const ctx = pipelineContext()
+      modelRespond = async () => {
+        if (status === 'failed') throw new Error('模型请求失败')
+        ctx.savedAnalyzer.stop()
+        return filteringResponse
+      }
+
+      const run = await ctx.savedAnalyzer.start({ collectNew: true })
+
+      expect(run.status).toBe(status)
+      expect(desktopNotifications).toHaveLength(1)
+      expect(desktopNotifications[0]).toContain(status === 'failed' ? '模型请求失败' : '停止')
+      expect(ctx.savedAnalyzer.busy.value).toBe(false)
+    },
+  )
+
+  it('keeps the verification reason in the combined task reminder', async () => {
+    const ctx = pipelineContext()
+    document.body.innerText = '请完成安全验证'
+
+    expect((await ctx.savedAnalyzer.start({ collectNew: true })).status).toBe('failed')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('验证')
+    expect(modelRequests).toEqual([])
+  })
+
+  it.each(['collection', 'combined'])(
+    'keeps a blocked %s task stopped on a mounted page with one reminder',
+    async (task) => {
+      const ctx = pipelineContext()
+      ctx['mounted'] = true
+      document.body.innerText = '请完成安全验证'
+
+      try {
+        if (task === 'collection') await ctx.collectOnly()
+        else await ctx.savedAnalyzer.start({ collectNew: true })
+        await ctx['detailPromise']
+
+        expect(ctx.detailRun.value).toBeNull()
+        expect(desktopNotifications).toHaveLength(1)
+        expect(desktopNotifications[0]).toContain('验证')
+      } finally {
+        ctx['mounted'] = false
+        await ctx['detailPromise']
+      }
+    },
+  )
+
+  it('prepares a newly captured card for analysis without starting competing background details', async () => {
+    const ctx = pipelineContext()
+    data.set(JOB_LIBRARY_STORAGE_KEY, [])
+    ctx['mounted'] = true
+    ctx.jobMaps.set('boss::single', {
+      rawData: {
+        jobitem: item('single'),
+        detail: { jobInfo: { postDescription: '完整 JD' } },
+      },
+    })
+    try {
+      await ctx.captureJobSnapshot('boss::single')
+      await ctx.ensureSavedJobDetails('single')
+      const run = await ctx.savedAnalyzer.analyzeOne('single')
+      expect(run).toMatchObject({ status: 'completed', completed: 1 })
+      expect((await ctx.getJobLibrary())[0]).toMatchObject({
+        analysisStatus: 'ready',
+        analysis: { rating: 76, passed: true },
+        finalGreeting: '招呼语草稿',
+      })
+    } finally {
+      ctx['mounted'] = false
+      await ctx['detailPromise']
+    }
+  })
+
+  it('fills editable keywords from a resume draft without persisting or starting collection', async () => {
+    const ctx = pipelineContext()
+    modelRespond = async () => '{"keywords":["产品经理"," AI产品经理 ","产品经理"]}'
+    await ctx.extractKeywordRotationFromResume('待保存的简历正文')
+    expect(ctx.keywordRotationKeywords.value).toBe('产品经理\nAI产品经理')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+    expect(ctx.keywordRotation.value).toBeNull()
+    expect(data.has(KEYWORD_ROTATION_STORAGE_KEY)).toBe(false)
+    expect(modelRequests).toEqual(['keywords'])
+  })
+
+  it('preserves edited keywords when the AI response is invalid and allows retry', async () => {
+    const ctx = pipelineContext()
+    ctx.keywordRotationKeywords.value = '金融产品经理'
+    modelRespond = async () => '{"keywords":[]}'
+    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('岗位关键词')
+    expect(ctx.keywordRotationKeywords.value).toBe('金融产品经理')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+    modelRespond = async () => '{"keywords":["数据产品经理"]}'
+    await ctx.extractKeywordRotationFromResume()
+    expect(ctx.keywordRotationKeywords.value).toBe('数据产品经理')
+  })
+
+  it('rejects empty resumes and incomplete models before requesting extraction', async () => {
+    const ctx = pipelineContext()
+    await expect(ctx.extractKeywordRotationFromResume(' ')).rejects.toThrow('简历')
+    ctx.models.modelData.value[0].data.api_key = ''
+    await expect(ctx.extractKeywordRotationFromResume('简历')).rejects.toThrow('模型')
+    expect(modelRequests).toEqual([])
+  })
+
+  it('blocks duplicate extraction and releases the busy flag after a request fails', async () => {
+    const ctx = pipelineContext()
+    let reject
+    modelRespond = () =>
+      new Promise((_, fail) => {
+        reject = fail
+      })
+    const pending = ctx.extractKeywordRotationFromResume()
+    expect(ctx.keywordExtractionBusy.value).toBe(true)
+    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('提取')
+    await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('提取')
+    await expect(ctx.startKeywordRotation()).rejects.toThrow('提取')
+    reject(new Error('模型请求失败'))
+    await expect(pending).rejects.toThrow('模型请求失败')
+    expect(ctx.keywordExtractionBusy.value).toBe(false)
+  })
+
+  it('loads built-in keywords only when no saved rotation exists', async () => {
+    const ctx = pipelineContext()
+    await ctx.loadKeywordRotation()
+    expect(ctx.keywordRotationKeywords.value).toContain('产品经理')
+    await ctx.saveKeywordRotationKeywords('自定义岗位\nAI产品经理')
+    ctx.keywordRotationKeywords.value = '临时修改'
+    await ctx.loadKeywordRotation()
+    expect(ctx.keywordRotationKeywords.value).toBe('自定义岗位\nAI产品经理')
+  })
+
+  it('waits for keyword persistence before allowing a rotation or another extraction', async () => {
+    const ctx = pipelineContext()
+    let release
+    const ack = new Promise((resolve) => {
+      release = resolve
+    })
+    setStored = async () => ack
+    const task = ctx.saveKeywordRotationKeywords('数据产品经理')
+    try {
+      expect(ctx.keywordRotationSaving.value).toBe(true)
+      await expect(ctx.startKeywordRotation()).rejects.toThrow('保存')
+      await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('保存')
+      await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('保存')
+    } finally {
+      release()
+      await task
+    }
+    expect(ctx.keywordRotationSaving.value).toBe(false)
+  })
+
   it('resumes current pending jobs and persists score, greeting and resume identity before collection continues', async () => {
     const ctx = pipelineContext()
     Object.assign(ctx, {
@@ -433,14 +857,14 @@ describe('collection with immediate analysis', () => {
       })),
     ).toEqual([
       {
-        rating: 20,
+        rating: 76,
         resumeId: 'resume',
         greeting: '招呼语草稿',
         review: 'pending',
         send: 'pending',
       },
       {
-        rating: 20,
+        rating: 76,
         resumeId: 'resume',
         greeting: '招呼语草稿',
         review: 'pending',
@@ -460,7 +884,7 @@ describe('collection with immediate analysis', () => {
     modelRespond = async () => {
       ctx.pauseGathering()
       entered()
-      return JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
+      return filteringResponse
     }
     let scrolls = 0
     ctx.scrollDown = () => {
@@ -475,7 +899,7 @@ describe('collection with immediate analysis', () => {
     expect(run.status).toBe('stopped')
     expect(modelRequests).toEqual(['filtering:new'])
     expect(scrolls).toBe(0)
-    expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(20)
+    expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(76)
     expect(ctx.savedAnalyzer.busy.value).toBe(false)
     expect(ctx.gatheringBusy.value).toBe(false)
   })
@@ -488,7 +912,7 @@ describe('collection with immediate analysis', () => {
       Object.assign(ctx, { waitForGathering: (_ms, run) => wait(0, run) })
       modelRespond = async () => {
         document.body.innerText = message
-        return JSON.stringify({ positive: [{ score: 20, reason: '匹配' }], negative: [] })
+        return filteringResponse
       }
       let scrolls = 0
       ctx.scrollDown = () => {
@@ -498,7 +922,7 @@ describe('collection with immediate analysis', () => {
       expect(run.status).toBe('failed')
       expect(modelRequests).toEqual(['filtering:new'])
       expect(scrolls).toBe(0)
-      expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(20)
+      expect((await ctx.getJobLibrary())[1].analysis.rating).toBe(76)
       expect(ctx.savedAnalyzer.busy.value).toBe(false)
     },
   )
@@ -520,7 +944,7 @@ describe('collection with immediate analysis', () => {
       'old',
     ).records
     records[0].analysisStatus = 'ready'
-    records[0].analysis = { rating: 90 }
+    records[0].analysis = { scoringVersion: 'weighted-v1', rating: 90 }
     records[1].sendStatus = 'sent'
     records[2].sendStatus = 'unknown'
     records[3].reviewStatus = 'approved'
@@ -556,7 +980,7 @@ describe('collection with immediate analysis', () => {
       events.push(`analyze:${record.encryptJobId}`)
       await ctx.saveJobAnalysis(record.encryptJobId, {
         analysisStatus: 'ready',
-        analysis: { rating: 20 },
+        analysis: { scoringVersion: 'weighted-v1', rating: 20 },
         finalGreeting: '草稿',
       })
     })
@@ -776,11 +1200,12 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     records[0].matchedAt = '2026-10-14T10:00:00.000Z'
+    records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
 
     await ctx.saveJobAnalysis('a', {
       analysisStatus: 'pending',
-      analysis: { passed: true },
+      analysis: { scoringVersion: 'weighted-v1', passed: true },
     })
 
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].matchedAt).toBe('2026-10-14T10:00:00.000Z')
@@ -798,7 +1223,7 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     Object.assign(records[0], state, {
-      analysis: { category: 'Reviewed' },
+      analysis: { scoringVersion: 'weighted-v1', category: 'Reviewed' },
       finalGreeting: 'Protected greeting',
     })
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
@@ -820,6 +1245,7 @@ describe('saved job analysis data boundary', () => {
     const ctx = context()
     const records = mergeJobRecords([], [item('a')], 'AI', 'batch').records
     records[0].failureReason = 'Detail unavailable'
+    records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
     records[0].finalGreeting = 'Existing draft'
     data.set(JOB_LIBRARY_STORAGE_KEY, records)
     expect(
@@ -1049,7 +1475,7 @@ it('captures passive job-list updates when auto capture is enabled', async () =>
   await ctx._initJobList()
   expect(jobListHookCallback).toBeDefined()
   jobListHookCallback?.([item('visible')])
-  await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  await ctx['jobCapturePromise']
 
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
     { encryptJobId: 'visible', detailStatus: 'pending' },
@@ -1062,6 +1488,7 @@ it('sends a saved greeting through the existing BOSS chat sender', async () => {
   record.detailStatus = 'complete'
   record.detail = { jobInfo: { postDescription: 'JD' }, bossInfo: { bossSource: 7 } }
   record.finalGreeting = '您好，想和您沟通岗位细节。'
+  record.analysis = { scoringVersion: 'weighted-v1', passed: true }
   data.set(JOB_LIBRARY_STORAGE_KEY, [record])
   ctx.jobMaps.set('boss::new', {
     jobData: { key: 'boss::new' },
@@ -1347,6 +1774,15 @@ describe('collection runtime with the existing storage bridge', () => {
       },
     })
     expect((await ctx.collectOnly()).status).toBe(status)
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('停止')
+    expect(desktopNotifications[0]).toContain(
+      {
+        captcha: '验证',
+        login_required: '登录',
+        network_error: '网络',
+      }[status],
+    )
   })
 
   it('only reports completion after idle retries and a confirmed no-more signal', async () => {
@@ -1363,6 +1799,8 @@ describe('collection runtime with the existing storage bridge', () => {
     })
     expect((await ctx.collectOnly()).status).toBe('completed')
     expect(rounds).toBe(3)
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('采集完成')
   })
 
   it('reports an unreadable list without calling it an empty completed search', async () => {
@@ -1386,6 +1824,13 @@ describe('collection pacing, controls and persistence', () => {
     expect(old.delayCollectionScrollMin).toBe(1)
     expect(old.delayCollectionDetailMax).toBe(5)
     expect(old.delayDeliveryInterval).toBe(20)
+    expect(old.delayKeywordRotationMin).toBe(300)
+    expect(old.delayKeywordRotationMax).toBe(900)
+    expect(old.keywordRotationBatchSize).toBe(3)
+    expect(old.delayKeywordRotationBatchMin).toBe(1800)
+    expect(old.delayKeywordRotationBatchMax).toBe(3600)
+    expect(old.keywordRotationDailyLimit).toBe(10)
+    expect(old.keywordRotationAutoResume.value).toBe(false)
     const saved = structuredClone({ delayCollectionDetailMin: 0.5, delayCollectionDetailMax: 1.5 })
     const restored = deepmerge(defaultFormData, saved)
     expect(restored.delayCollectionDetailMin).toBe(0.5)
@@ -1583,6 +2028,7 @@ describe('slow collected detail batches', () => {
         records[0].reviewStatus = 'approved'
         records[0].sendStatus = 'sent'
         records[0].finalGreeting = 'approved text'
+        records[0].analysis = { scoringVersion: 'weighted-v1', passed: true }
       },
     })
     const task = ctx.completeCollectedDetails()
@@ -1590,6 +2036,8 @@ describe('slow collected detail batches', () => {
     const result = await task
     await other
     expect(result.completed).toBe(5)
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('详情补全')
     expect(clicks).toHaveLength(5)
     expect(waits.every((ms) => ms >= 2000 && ms <= 5000)).toBe(true)
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
@@ -1684,6 +2132,29 @@ describe('slow collected detail batches', () => {
     expect(result.completed).toBe(1)
     expect(clicks).toEqual(['boss::0'])
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[1].detailStatus).toBe('pending')
+    expect(desktopNotifications).toEqual([])
+  })
+
+  it('reports an abnormal background detail stop once', async () => {
+    const ctx = detailContext(1)
+    document.body.innerText = '访问过于频繁'
+
+    expect((await ctx.completeCollectedDetails({ availableOnly: true })).status).toBe('restricted')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('访问限制')
+  })
+
+  it('keeps completed background batches quiet when individual details remain retryable', async () => {
+    const ctx = detailContext(1)
+    ctx.onJobCardClick = async () => {
+      throw new Error('详情读取失败')
+    }
+
+    expect(await ctx.completeCollectedDetails({ availableOnly: true })).toMatchObject({
+      status: 'completed',
+      failed: 1,
+    })
+    expect(desktopNotifications).toEqual([])
   })
 
   it('stops the remaining batch if the page becomes restricted during a detail click', async () => {
@@ -1728,5 +2199,316 @@ describe('slow collected detail batches', () => {
     ctx.resumeGathering()
     expect((await task).status).toBe('completed')
     expect(ctx.gatheringBusy.value).toBe(false)
+  })
+
+  it('runs each keyword in order and persists a completed rotation', async () => {
+    const ctx = context()
+    const analyzed: string[] = []
+    ctx.rootVue = {
+      $router: {
+        push: async ({ query }) => {
+          const url = new URL(location.href)
+          url.search = new URLSearchParams(query).toString()
+          location.href = url.toString()
+        },
+      },
+    }
+    Object.assign(ctx, {
+      savedAnalyzer: {
+        start: async () => {
+          analyzed.push(new URL(location.href).searchParams.get('query') ?? '')
+          return { status: 'completed' }
+        },
+      },
+    })
+
+    const result = await ctx.startKeywordRotation('产品经理\nAI产品经理\n产品经理')
+
+    expect(analyzed).toEqual(['产品经理', 'AI产品经理'])
+    expect(result.status).toBe('completed')
+    expect(result.cursor).toBe(2)
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toMatchObject({
+      status: 'completed',
+      items: [
+        { keyword: '产品经理', status: 'completed' },
+        { keyword: 'AI产品经理', status: 'completed' },
+      ],
+    })
+  })
+
+  it('keeps the failed keyword as the rotation cursor', async () => {
+    const ctx = context()
+    ctx.rootVue = {
+      $router: {
+        push: async ({ query }) => {
+          const url = new URL(location.href)
+          url.search = new URLSearchParams(query).toString()
+          location.href = url.toString()
+        },
+      },
+    }
+    Object.assign(ctx, {
+      savedAnalyzer: {
+        start: async () => ({ status: 'failed', error: '模型请求失败' }),
+      },
+    })
+
+    const result = await ctx.startKeywordRotation('产品经理\nAI产品经理')
+
+    expect(result.status).toBe('failed')
+    expect(result.cursor).toBe(0)
+    expect(result.items[0]).toMatchObject({ keyword: '产品经理', status: 'failed' })
+    expect(result.items[1]).toMatchObject({ keyword: 'AI产品经理', status: 'pending' })
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('模型请求失败')
+  })
+})
+
+describe('keyword rotation pacing', () => {
+  function rotationContext() {
+    const ctx = context()
+    const started: string[] = []
+    const waits: number[] = []
+    Object.assign(ctx, {
+      navigateToKeyword: async (keyword) => {
+        started.push(keyword)
+      },
+      waitForKeywordRotation: async (until) => {
+        if (until) waits.push(Math.round((Date.parse(until) - Date.now()) / 1000))
+        return true
+      },
+      savedAnalyzer: { busy: ref(false), start: async () => ({ status: 'completed' }) },
+    })
+    Object.assign(conf.formData, {
+      delayKeywordRotationMin: 300,
+      delayKeywordRotationMax: 300,
+      keywordRotationBatchSize: 3,
+      delayKeywordRotationBatchMin: 1800,
+      delayKeywordRotationBatchMax: 1800,
+      keywordRotationDailyLimit: 10,
+    })
+    return { ctx, started, waits }
+  }
+
+  it('notifies once when the daily cap pauses a rotation', async () => {
+    const { ctx } = rotationContext()
+    conf.formData.keywordRotationDailyLimit = 1
+
+    expect((await ctx.startKeywordRotation('A\nB')).status).toBe('paused')
+    expect(desktopNotifications).toHaveLength(1)
+    expect(desktopNotifications[0]).toContain('每日关键词上限')
+    expect(desktopNotifications[0]).toContain('1/2')
+  })
+
+  it('waits between keywords, replaces every third wait with batch rest, and persists quota first', async () => {
+    const { ctx, started, waits } = rotationContext()
+    ctx['navigateToKeyword'] = async (keyword) => {
+      expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(started.length + 1)
+      started.push(keyword)
+    }
+    expect((await ctx.startKeywordRotation('A\nB\nC\nD')).status).toBe('completed')
+    expect(started).toEqual(['A', 'B', 'C', 'D'])
+    expect(waits).toEqual([300, 300, 1800])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toMatchObject({ count: 4, batchCount: 1 })
+  })
+
+  it('pauses at the daily cap and cannot reset quota with a fresh context or edited keywords', async () => {
+    const { ctx, started } = rotationContext()
+    conf.formData.keywordRotationDailyLimit = 2
+    const result = await ctx.startKeywordRotation('A\nB\nC')
+    expect(result).toMatchObject({ status: 'paused', cursor: 2 })
+    expect(result.error).toContain('每日')
+    expect(started).toEqual(['A', 'B'])
+    const fresh = rotationContext()
+    conf.formData.keywordRotationDailyLimit = 2
+    await fresh.ctx.loadKeywordRotation()
+    expect((await fresh.ctx.startKeywordRotation('D\nE')).status).toBe('paused')
+    expect(fresh.started).toEqual([])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(2)
+  })
+
+  it('resumes the pending cursor manually on the next local day', async () => {
+    const { ctx } = rotationContext()
+    conf.formData.keywordRotationDailyLimit = 1
+    await ctx.startKeywordRotation('A\nB')
+    const usage = data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY)
+    data.set(KEYWORD_ROTATION_USAGE_STORAGE_KEY, { ...usage, date: '2000-01-01' })
+    const fresh = rotationContext()
+    conf.formData.keywordRotationDailyLimit = 1
+    await fresh.ctx.loadKeywordRotation()
+    expect((await fresh.ctx.startKeywordRotation()).status).toBe('completed')
+    expect(fresh.started).toEqual(['B'])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toMatchObject({
+      date: keywordRotationDateKey(),
+      count: 1,
+    })
+  })
+
+  it('pauses a running plan on reload by default and preserves its cursor and cooldown', async () => {
+    const plan = createKeywordRotationPlan('A\nB', {
+      baseSearchUrl: location.href,
+      salary: '',
+      city: '',
+    })
+    plan.items[0].status = 'completed'
+    plan.cursor = 1
+    plan.nextKeywordAt = new Date(Date.now() + 300_000).toISOString()
+    data.set(KEYWORD_ROTATION_STORAGE_KEY, plan)
+    const ctx = context()
+    expect(await ctx.loadKeywordRotation()).toMatchObject({
+      status: 'paused',
+      cursor: 1,
+      nextKeywordAt: plan.nextKeywordAt,
+    })
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY).status).toBe('paused')
+    conf.formData.keywordRotationAutoResume = { value: true }
+    data.set(KEYWORD_ROTATION_STORAGE_KEY, plan)
+    expect((await context().loadKeywordRotation()).status).toBe('running')
+  })
+
+  it('retains cooldown across saving new keywords and starting a new plan', async () => {
+    const { ctx } = rotationContext()
+    await ctx.startKeywordRotation('A')
+    const usage = structuredClone(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY))
+    await ctx.saveKeywordRotationKeywords('B')
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toEqual(usage)
+    const fresh = rotationContext()
+    await fresh.ctx.loadKeywordRotation()
+    await fresh.ctx.startKeywordRotation('B')
+    expect(fresh.waits).toEqual([300])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(2)
+  })
+
+  it('rejects invalid configuration before navigating or changing quota', async () => {
+    const { ctx, started } = rotationContext()
+    for (const [key, value] of [
+      ['delayKeywordRotationMin', 0],
+      ['delayKeywordRotationMax', 1],
+      ['delayKeywordRotationBatchMax', Infinity],
+      ['keywordRotationBatchSize', 1.5],
+      ['keywordRotationDailyLimit', -1],
+    ]) {
+      const previous = conf.formData[key]
+      conf.formData[key] = value
+      await expect(ctx.startKeywordRotation('A')).rejects.toThrow()
+      conf.formData[key] = previous
+    }
+    expect(started).toEqual([])
+    expect(data.has(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toBe(false)
+  })
+
+  it('keeps corrupted quota intact and refuses further requests', async () => {
+    const { ctx, started } = rotationContext()
+    const corrupted = { date: keywordRotationDateKey(), count: -1, batchCount: 0 }
+    data.set(KEYWORD_ROTATION_USAGE_STORAGE_KEY, corrupted)
+    expect((await ctx.startKeywordRotation('A')).status).toBe('failed')
+    expect(started).toEqual([])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toEqual(corrupted)
+  })
+
+  it('stops during a persisted cooldown without navigating or reserving another keyword', async () => {
+    const { ctx, started } = rotationContext()
+    await ctx.startKeywordRotation('A')
+    const wait = BossHelperCtx.prototype['waitForKeywordRotation'].bind(ctx)
+    ctx['waitForKeywordRotation'] = async (until) => {
+      const pending = wait(until)
+      await ctx.stopKeywordRotation()
+      return pending
+    }
+    expect((await ctx.startKeywordRotation('B')).status).toBe('stopped')
+    expect(started).toEqual(['A'])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(1)
+    expect(ctx.keywordRotationWaitSeconds.value).toBe(0)
+  })
+
+  it('checks restrictions while cooling down and issues no more requests', async () => {
+    const { ctx, started } = rotationContext()
+    await ctx.startKeywordRotation('A')
+    ctx['waitForKeywordRotation'] = BossHelperCtx.prototype['waitForKeywordRotation'].bind(ctx)
+    document.body.innerText = '请完成安全验证'
+    expect((await ctx.startKeywordRotation('B')).status).toBe('failed')
+    expect(started).toEqual(['A'])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(1)
+  })
+
+  it('does not finish a real cooldown before its deadline', async () => {
+    const ctx = new BossHelperCtx()
+    const nativeTimeout = globalThis.setTimeout
+    const nativeNow = Date.now
+    const steps: number[] = []
+    let now = 1000
+    Date.now = () => now
+    globalThis.setTimeout = (callback, ms) => {
+      steps.push(ms)
+      now += ms
+      queueMicrotask(callback)
+      return 0
+    }
+    try {
+      expect(await ctx['waitForKeywordRotation'](new Date(1900).toISOString())).toBe(true)
+      expect(steps).toEqual([250, 250, 250, 150])
+      expect(now).toBe(1900)
+      expect(ctx.keywordRotationWaitSeconds.value).toBe(0)
+    } finally {
+      globalThis.setTimeout = nativeTimeout
+      Date.now = nativeNow
+    }
+  })
+
+  it('rechecks the local date after waiting before charging a keyword', async () => {
+    const { ctx } = rotationContext()
+    const usage = {
+      date: keywordRotationDateKey(),
+      count: 1,
+      batchCount: 1,
+      nextKeywordAt: new Date(Date.now() + 300_000).toISOString(),
+    }
+    data.set(KEYWORD_ROTATION_USAGE_STORAGE_KEY, usage)
+    ctx['waitForKeywordRotation'] = async (until) => {
+      if (until) data.set(KEYWORD_ROTATION_USAGE_STORAGE_KEY, { ...usage, date: '2000-01-01' })
+      return true
+    }
+    expect((await ctx.startKeywordRotation('A')).status).toBe('completed')
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(1)
+  })
+
+  it('does not navigate if quota cannot be saved', async () => {
+    const { ctx, started } = rotationContext()
+    const write = setStored
+    setStored = async (key, value) => {
+      if (key === KEYWORD_ROTATION_USAGE_STORAGE_KEY) throw new Error('额度保存失败')
+      return write(key, value)
+    }
+    expect(await ctx.startKeywordRotation('A')).toMatchObject({
+      status: 'failed',
+      error: '额度保存失败',
+    })
+    expect(started).toEqual([])
+    expect(data.has(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toBe(false)
+  })
+
+  it('keeps a failed attempt charged and observes its cooldown before a manual retry', async () => {
+    const { ctx, started, waits } = rotationContext()
+    ctx.savedAnalyzer.start = async () => ({ status: 'failed', error: '分析失败' })
+    expect((await ctx.startKeywordRotation('A\nB')).status).toBe('failed')
+    expect(started).toEqual(['A'])
+    ctx.savedAnalyzer.start = async () => ({ status: 'completed' })
+    expect((await ctx.startKeywordRotation('A\nB')).status).toBe('completed')
+    expect(started).toEqual(['A', 'A', 'B'])
+    expect(waits).toEqual([300, 300])
+    expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(3)
+  })
+
+  it('does not start passive detail completion during a rotation cooldown', async () => {
+    const { ctx } = rotationContext()
+    let calls = 0
+    ctx['mounted'] = true
+    ctx.keywordRotationBusy.value = true
+    ctx.completeCollectedDetails = async () => {
+      calls++
+    }
+    ctx.scheduleBackgroundDetailCompletion()
+    await Promise.resolve()
+    expect(calls).toBe(0)
   })
 })

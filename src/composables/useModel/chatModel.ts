@@ -18,10 +18,20 @@ import { renderTemplate } from '@/utils/ai'
 import { jsonClone } from '@/utils/deepmerge'
 
 import type { ModelConf } from '.'
+import { MATCH_SCORING_PROMPT } from '../useApplying/scoring'
 import type { WorkflowData } from '../useApplying/type'
 import type { HelperContext } from '../useHelper'
 
-const role = ['system', 'user', 'assistant', 'boss', 'jd', 'filtering', 'greetings'] as const
+const role = [
+  'system',
+  'user',
+  'assistant',
+  'boss',
+  'jd',
+  'filtering',
+  'greetings',
+  'keywords',
+] as const
 type MessageRole = (typeof role)[number]
 
 export interface Message extends ChatMessageProps {
@@ -164,6 +174,17 @@ export class ChatModel {
     return true
   }
 
+  async generate(agentName: MessageRole): Promise<string> {
+    const entry = this.agents.get(agentName)
+    if (!entry) throw new Error(`Agent ${agentName} not found`)
+    const [agent, modelConf, model] = entry
+    const result = await agent.generate({
+      messages: jsonClone(model.prompt),
+      timeout: modelConf.data?.other?.timeout ?? 60000,
+    })
+    return result.text
+  }
+
   async chat(
     agentName: MessageRole,
     data: WorkflowData<any, any>,
@@ -192,6 +213,9 @@ export class ChatModel {
       if (typeof messages[i].content === 'string') {
         messages[i].content = renderTemplate(messages[i].content, data)
       }
+    }
+    if (agentName === 'filtering') {
+      messages.push({ role: 'system', content: MATCH_SCORING_PROMPT })
     }
     const resumeText =
       this.resumeSnapshot !== undefined

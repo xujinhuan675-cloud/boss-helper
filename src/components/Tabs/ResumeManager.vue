@@ -1,19 +1,34 @@
 <script lang="ts" setup>
 import { computed, ref } from 'vue'
 
+import { useHelper } from '@/composables/useHelper'
 import { useResumes } from '@/composables/useResume'
 import type { ResumeRecord } from '@/composables/useResume'
+import type { BossHelperCtx } from '@/entrypoints/boss/runtime'
 
 const store = useResumes()
+const helper = useHelper() as BossHelperCtx
 const editingId = ref<string | null>(null)
 const name = ref('')
 const content = ref('')
 const saving = ref(false)
-const disabled = computed(() => saving.value || !store.initialized.value)
+const disabled = computed(
+  () =>
+    saving.value ||
+    !store.initialized.value ||
+    (helper.key === 'boss' && helper.keywordExtractionBusy.value),
+)
 const actionError = ref('')
 const deleteOpen = ref(false)
 const deleteId = ref<string | null>(null)
 const replacementId = ref('__none__')
+const keywordInput = helper.keywordRotationKeywords
+const keywordError = ref('')
+const keywordFeedback = ref('')
+const keywordSaving = helper.keywordRotationSaving
+const keywordDisabled = computed(
+  () => disabled.value || keywordSaving.value || helper.keywordRotationBusy.value,
+)
 
 const editing = computed(() => store.resumes.value.find((resume) => resume.id === editingId.value))
 const replacementOptions = computed(() => [
@@ -24,7 +39,7 @@ const replacementOptions = computed(() => [
 ])
 
 function resetEditor() {
-  if (saving.value) return
+  if (disabled.value) return
   editingId.value = null
   name.value = ''
   content.value = ''
@@ -32,7 +47,7 @@ function resetEditor() {
 }
 
 function editResume(resume: ResumeRecord) {
-  if (saving.value) return
+  if (disabled.value) return
   editingId.value = resume.id
   name.value = resume.name
   content.value = resume.content
@@ -52,6 +67,34 @@ async function saveResume() {
     actionError.value = error instanceof Error ? error.message : String(error)
   } finally {
     saving.value = false
+  }
+}
+
+async function extractKeywords() {
+  if (keywordDisabled.value) return
+  keywordError.value = ''
+  keywordFeedback.value = ''
+  const resume =
+    editingId.value || content.value.trim()
+      ? content.value
+      : (store.currentResume.value?.content ?? '')
+  try {
+    const keywords = await helper.extractKeywordRotationFromResume(resume)
+    keywordFeedback.value = `已提取 ${keywords.length} 个岗位关键词`
+  } catch (error) {
+    keywordError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function saveKeywords() {
+  if (keywordDisabled.value) return
+  keywordError.value = ''
+  keywordFeedback.value = ''
+  try {
+    await helper.saveKeywordRotationKeywords(keywordInput.value)
+    keywordFeedback.value = '岗位关键词已保存'
+  } catch (error) {
+    keywordError.value = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -207,9 +250,9 @@ async function confirmDelete() {
       </div>
     </div>
 
-    <div class="border-t border-default pt-4 space-y-4">
+    <div class="min-w-0 w-full border-t border-default pt-4 space-y-4">
       <h3 class="text-base font-semibold">{{ editing ? '编辑简历' : '新建简历' }}</h3>
-      <UFormField label="简历名称" class="settings-field">
+      <UFormField label="简历名称" orientation="vertical" class="w-full">
         <UInput
           v-model="name"
           placeholder="例如：AI 产品经理主简历"
@@ -217,10 +260,10 @@ async function confirmDelete() {
           :disabled="disabled"
         />
       </UFormField>
-      <UFormField label="完整简历正文" class="settings-field">
+      <UFormField label="完整简历正文" orientation="vertical" class="w-full">
         <UTextarea
           v-model="content"
-          :rows="12"
+          :rows="16"
           class="w-full"
           :disabled="disabled"
           placeholder="请粘贴完整简历正文"
@@ -242,6 +285,49 @@ async function confirmDelete() {
     </div>
 
     <p v-if="actionError" class="text-sm text-error" role="alert">{{ actionError }}</p>
+
+    <section
+      v-if="helper.key === 'boss'"
+      class="min-w-0 w-full border-t border-default pt-4 space-y-3"
+      aria-label="岗位关键词轮换"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-base font-semibold">岗位关键词轮换</h3>
+        <UButton
+          icon="i-lucide-sparkles"
+          color="neutral"
+          variant="outline"
+          :loading="helper.keywordExtractionBusy.value"
+          :disabled="keywordDisabled"
+          @click="void extractKeywords()"
+        >
+          从简历提取岗位关键词
+        </UButton>
+      </div>
+      <UFormField label="岗位搜索关键词" orientation="vertical" class="w-full">
+        <UTextarea
+          v-model="keywordInput"
+          :rows="8"
+          class="w-full"
+          :disabled="keywordDisabled"
+          placeholder="产品经理&#10;AI产品经理&#10;金融产品经理"
+        />
+      </UFormField>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="text-sm text-muted" role="status" aria-live="polite">{{
+          keywordFeedback
+        }}</span>
+        <UButton
+          icon="i-lucide-save"
+          :loading="keywordSaving"
+          :disabled="keywordDisabled || !keywordInput.trim()"
+          @click="void saveKeywords()"
+        >
+          保存关键词
+        </UButton>
+      </div>
+      <p v-if="keywordError" class="text-sm text-error" role="alert">{{ keywordError }}</p>
+    </section>
 
     <UModal
       v-model:open="deleteOpen"

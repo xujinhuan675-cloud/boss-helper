@@ -33,7 +33,7 @@ export interface FormData {
   notification: FormDataCheckbox
   useCache: FormDataCheckbox
   aiGreeting: FormDataAi
-  aiFiltering: FormDataAi & { score: number }
+  aiFiltering: FormDataAi & { score: number; scoringVersion?: string }
   aiReply: FormDataAi
   /** Full resume text shared by AI filtering and greeting prompts. */
   resumeText: string
@@ -57,6 +57,13 @@ export interface FormData {
   delayCollectionScrollMax: number
   delayCollectionDetailMin: number
   delayCollectionDetailMax: number
+  delayKeywordRotationMin: number
+  delayKeywordRotationMax: number
+  keywordRotationBatchSize: number
+  delayKeywordRotationBatchMin: number
+  delayKeywordRotationBatchMax: number
+  keywordRotationDailyLimit: number
+  keywordRotationAutoResume: FormDataCheckbox
   version: string
 
   [key: string]: any

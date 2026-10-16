@@ -62,7 +62,9 @@ const configItems = helper.getConfigItems()
               :search-input="false"
             />
           </UFormField>
-          <span data-help="可以在网站管理中打开通知权限,当停止时会自动发送桌面端通知提醒。">
+          <span
+            data-help="页面在后台时，投递、采集、详情补全、岗位分析或关键词轮换结束及异常停止会发送桌面通知；轮换达到每日上限也会提醒。页面内提示始终保留。"
+          >
             <UCheckbox label="发送通知" v-model="conf.formData.notification.value" />
           </span>
           <span

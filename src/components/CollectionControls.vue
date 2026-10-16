@@ -18,7 +18,15 @@ const libraryFunnelStage = computed(() => helper.jobLibraryFunnelStage.value)
 const librarySelectedId = computed(() => helper.jobLibrarySelectedId.value)
 const collapsed = ref(false)
 const actionError = ref('')
-const showAnalysis = ref(false)
+const keywordRotation = computed(() => helper.keywordRotation.value)
+const keywordRotationStatusLabels: Record<string, string> = {
+  idle: '未启动',
+  running: '轮换中',
+  paused: '已暂停',
+  stopped: '已停止',
+  completed: '已完成',
+  failed: '已失败',
+}
 const run = computed(() =>
   base.key === 'boss'
     ? helper.gatheringKind.value === 'detail'
@@ -39,23 +47,31 @@ const statusLabels: Record<string, string> = {
   unknown_error: '需检查',
 }
 
-async function start(kind: 'collection' | 'analysis') {
+async function startCollection() {
   actionError.value = ''
-  collapsed.value = false
-  showAnalysis.value = kind === 'analysis'
   try {
-    if (kind === 'collection') await helper.collectOnly()
-    else if (kind === 'analysis') {
-      const result = await helper.savedAnalyzer.start({ collectNew: true })
-      if (result.status === 'failed') actionError.value = result.error || '采集分析失败'
-    }
+    const result = await helper.collectOnly()
+    if (!['completed', 'stopped'].includes(result.status))
+      actionError.value = result.error || statusLabels[result.status] || '采集失败'
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function startKeywordRotation() {
+  actionError.value = ''
+  try {
+    const result = await helper.startKeywordRotation(helper.keywordRotationKeywords.value)
+    if (result.status === 'failed') actionError.value = result.error || '关键词轮换失败'
   } catch (error) {
     actionError.value = error instanceof Error ? error.message : String(error)
   }
 }
 
 onMounted(() => {
-  if (base.key === 'boss') void helper.refreshJobLibrarySummary()
+  if (base.key === 'boss') {
+    void helper.refreshJobLibrarySummary()
+  }
 })
 </script>
 
@@ -104,27 +120,80 @@ onMounted(() => {
         {{ helper.jobLibrarySummary.value.pending }} · 待重试
         {{ helper.jobLibrarySummary.value.failed }}
       </div>
-      <div class="flex items-center flex-wrap gap-2">
-        <UButton
-          icon="i-lucide-sparkles"
-          size="sm"
-          :disabled="helper.gatheringBusy.value || base.workflowRunning.value || analysisBusy"
-          @click="void start('analysis')"
+      <div class="flex flex-col gap-1">
+        <div class="flex items-center flex-wrap gap-2">
+          <UButton
+            icon="i-lucide-download"
+            color="neutral"
+            variant="outline"
+            size="xs"
+            :disabled="
+              helper.gatheringBusy.value ||
+              helper.keywordRotationBusy.value ||
+              helper.realtimeBusy.value ||
+              base.workflowRunning.value ||
+              analysisBusy
+            "
+            @click="void startCollection()"
+          >
+            只采集
+          </UButton>
+          <UButton
+            v-if="!helper.keywordRotationBusy.value"
+            icon="i-lucide-repeat-2"
+            size="xs"
+            :disabled="
+              !helper.keywordRotationKeywords.value.trim() ||
+              helper.keywordRotationSaving.value ||
+              helper.keywordExtractionBusy.value ||
+              helper.gatheringBusy.value ||
+              base.workflowRunning.value ||
+              analysisBusy
+            "
+            @click="void startKeywordRotation()"
+          >
+            {{ keywordRotation?.status === 'paused' ? '继续轮换' : '轮换采集并分析' }}
+          </UButton>
+          <UButton
+            v-else
+            icon="i-lucide-square"
+            color="error"
+            variant="soft"
+            size="xs"
+            @click="void helper.stopKeywordRotation()"
+          >
+            停止轮换
+          </UButton>
+        </div>
+        <div
+          v-if="keywordRotation"
+          class="text-xs leading-relaxed"
+          role="status"
+          aria-live="polite"
         >
-          采集并分析
-        </UButton>
-        <UButton
-          icon="i-lucide-list-plus"
-          color="neutral"
-          size="sm"
-          :disabled="helper.gatheringBusy.value || base.workflowRunning.value || analysisBusy"
-          @click="void start('collection')"
-        >
-          只采集
-        </UButton>
+          {{ keywordRotationStatusLabels[keywordRotation.status] || keywordRotation.status }}
+          <span v-if="keywordRotation.items.length">
+            · {{ Math.min(keywordRotation.cursor + 1, keywordRotation.items.length) }}/{{
+              keywordRotation.items.length
+            }}
+          </span>
+          <span v-if="keywordRotation.items[keywordRotation.cursor]?.keyword">
+            · 当前：{{ keywordRotation.items[keywordRotation.cursor].keyword }}
+          </span>
+          <div v-if="helper.keywordRotationBusy.value && helper.keywordRotationWaitSeconds.value">
+            {{ keywordRotation.nextKeywordIsBatchRest ? '批次休息' : '关键词冷却' }} · 剩余
+            {{ helper.keywordRotationWaitSeconds.value }} 秒
+          </div>
+          <div
+            v-if="keywordRotation.error"
+            :class="keywordRotation.status === 'paused' ? 'text-warning' : 'text-error'"
+          >
+            {{ keywordRotation.error }}
+          </div>
+        </div>
       </div>
       <div
-        v-if="showAnalysis && helper.savedAnalyzer.run.value"
+        v-if="helper.savedAnalyzer.run.value"
         class="text-xs text-muted break-words"
         role="status"
         aria-live="polite"

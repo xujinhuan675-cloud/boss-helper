@@ -4,11 +4,11 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
-import { createRenderer, h, nextTick } from 'vue'
+import { createRenderer, h, nextTick, ref } from 'vue'
 import { compileScript, compileTemplate, parse } from 'vue/compiler-sfc'
 
 const components = {}
-for (const name of ['Alert', 'Tabs/ResumeManager']) {
+for (const name of ['Alert', 'Tabs/ResumeManager', 'CollectionControls']) {
   const componentPath = fileURLToPath(new URL(`./${name}.vue`, import.meta.url))
   const { descriptor } = parse(readFileSync(componentPath, 'utf8'))
   const script = compileScript(descriptor, { id: name })
@@ -30,6 +30,10 @@ for (const name of ['Alert', 'Tabs/ResumeManager']) {
             path: 'helper',
             namespace: 'fixture',
           }))
+          build.onResolve({ filter: /^@\/components\/JobLibrary\.vue$/ }, () => ({
+            path: 'job-library',
+            namespace: 'fixture',
+          }))
           build.onResolve({ filter: /^@\/composables\/useResume$/ }, () => ({
             path: fileURLToPath(new URL('../composables/useResume.ts', import.meta.url)),
           }))
@@ -38,9 +42,11 @@ for (const name of ['Alert', 'Tabs/ResumeManager']) {
           }))
           build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({
             contents:
-              path === 'storage'
-                ? 'export const counter = { storageGet: (...args) => globalThis.__settingsFixture.get(...args), storageSet: (...args) => globalThis.__settingsFixture.set(...args) }'
-                : 'export const useHelper = () => ({ key: "boss", savedAnalyzer: { busy: {value: false} } })',
+              path === 'job-library'
+                ? 'export default { render: () => null }'
+                : path === 'storage'
+                  ? 'export const counter = { storageGet: (...args) => globalThis.__settingsFixture.get(...args), storageSet: (...args) => globalThis.__settingsFixture.set(...args) }'
+                  : 'export const useHelper = () => globalThis.__resumeHelper',
             loader: 'js',
           }))
         },
@@ -86,10 +92,26 @@ beforeEach(() => {
       saved[key] = structuredClone(value)
     },
   }
+  globalThis.__resumeHelper = {
+    key: 'boss',
+    savedAnalyzer: { busy: ref(false) },
+    keywordRotationKeywords: ref('产品经理'),
+    keywordRotationBusy: ref(false),
+    keywordRotation: ref(null),
+    keywordRotationWaitSeconds: ref(0),
+    keywordRotationSaving: ref(false),
+    keywordExtractionBusy: ref(false),
+    extractKeywordRotationFromResume: async (text) => {
+      const keywords = [`岗位：${text}`]
+      globalThis.__resumeHelper.keywordRotationKeywords.value = keywords.join('\n')
+      return keywords
+    },
+  }
 })
 afterEach(() => {
   renderer.render(null, root)
   delete globalThis.__settingsFixture
+  delete globalThis.__resumeHelper
 })
 function mount(name, props = {}) {
   const vnode = h(components[name].component, props)
@@ -103,6 +125,100 @@ async function resumeState() {
 }
 
 describe('offline settings interactions', () => {
+  it('continues the editable rotation through the existing start action', async () => {
+    const calls = []
+    Object.assign(globalThis.__resumeHelper, {
+      jobLibraryFunnelStage: ref(null),
+      jobLibrarySelectedId: ref(''),
+      jobLibraryOpen: ref(false),
+      refreshJobLibrarySummary: async () => {},
+      keywordRotation: ref({ status: 'paused', cursor: 1 }),
+      startKeywordRotation: async (keywords) => {
+        calls.push(keywords)
+        return { status: 'paused', error: '已达到每日关键词上限' }
+      },
+    })
+    const state = mount('CollectionControls')
+    await state.startKeywordRotation()
+    expect(calls).toEqual(['产品经理'])
+    expect(state.actionError).toBe('')
+    expect(state.keywordRotation.status).toBe('paused')
+  })
+
+  it('keeps collection-only independent of keywords, resume and model configuration', async () => {
+    const calls = []
+    Object.assign(globalThis.__resumeHelper, {
+      jobLibraryFunnelStage: ref(null),
+      jobLibrarySelectedId: ref(''),
+      jobLibraryOpen: ref(false),
+      refreshJobLibrarySummary: async () => {},
+      collectOnly: async (...args) => {
+        calls.push(args)
+        return { status: 'completed' }
+      },
+    })
+    globalThis.__resumeHelper.keywordRotationKeywords.value = ''
+    const state = mount('CollectionControls')
+    await state.startCollection()
+    expect(calls).toEqual([[]])
+    expect(state.actionError).toBe('')
+    globalThis.__resumeHelper.collectOnly = async () => {
+      throw new Error('保存失败')
+    }
+    await state.startCollection()
+    expect(state.actionError).toBe('保存失败')
+    globalThis.__resumeHelper.collectOnly = async () => ({
+      status: 'restricted',
+      error: '访问受限',
+    })
+    await state.startCollection()
+    expect(state.actionError).toBe('访问受限')
+    const template = components.CollectionControls.descriptor.template.content
+    expect(template).toMatch(/@click="void startCollection\(\)"[\s\S]*?>\s*只采集\s*<\/UButton>/)
+    expect(template).toContain('轮换采集并分析')
+  })
+
+  it('extracts from the unsaved resume draft and leaves the results editable', async () => {
+    const state = await resumeState()
+    await state.store.createResume('旧简历', '旧正文')
+    state.content = '新粘贴的简历'
+    await state.extractKeywords()
+    expect(state.keywordInput).toBe('岗位：新粘贴的简历')
+    state.keywordInput = '自定义岗位\n外部粘贴的岗位'
+    expect(globalThis.__resumeHelper.keywordRotationKeywords.value).toBe(
+      '自定义岗位\n外部粘贴的岗位',
+    )
+    expect(state.store.currentResume.value.content).toBe('旧正文')
+  })
+
+  it('uses the selected resume when the editor is blank but rejects a cleared edit', async () => {
+    const state = await resumeState()
+    const resume = await state.store.createResume('当前简历', '当前正文')
+    await state.extractKeywords()
+    expect(state.keywordInput).toBe('岗位：当前正文')
+    state.editResume(resume)
+    state.content = ''
+    globalThis.__resumeHelper.extractKeywordRotationFromResume = async (text) => {
+      if (!text.trim()) throw new Error('请先粘贴简历正文')
+    }
+    await state.extractKeywords()
+    expect(state.keywordError).toBe('请先粘贴简历正文')
+    expect(state.keywordInput).toBe('岗位：当前正文')
+  })
+
+  it('blocks keyword edits while extraction is pending and preserves them on failure', async () => {
+    const state = await resumeState()
+    globalThis.__resumeHelper.keywordExtractionBusy.value = true
+    expect(state.keywordDisabled).toBe(true)
+    globalThis.__resumeHelper.keywordExtractionBusy.value = false
+    globalThis.__resumeHelper.extractKeywordRotationFromResume = async () => {
+      throw new Error('模型连接失败')
+    }
+    await state.extractKeywords()
+    expect(state.keywordInput).toBe('产品经理')
+    expect(state.keywordError).toBe('模型连接失败')
+  })
+
   it('keeps explicit close=false and inherited alert appearance props', () => {
     const state = mount('Alert', {
       id: 'disabled',
@@ -116,7 +232,7 @@ describe('offline settings interactions', () => {
     expect(state.props.color).toBe('warning')
   })
 
-  it('compiles both settings templates', () => {
+  it('compiles the settings and collection control templates', () => {
     for (const { descriptor, componentPath } of Object.values(components)) {
       expect(
         compileTemplate({

@@ -2,7 +2,11 @@ import { ref } from 'vue'
 
 import { ChatModel } from '@/composables/useModel/chatModel'
 
-import { parseFiltering } from '../../composables/useApplying/utils'
+import {
+  getFilteringDecision,
+  parseFiltering,
+  validateMatchThreshold,
+} from '../../composables/useApplying/scoring'
 import { jsonClone } from '../../utils/deepmerge'
 import { isJobExcluded } from './jobStore'
 import type { BossJobLibraryRecord } from './jobStore'
@@ -27,31 +31,6 @@ export function isSavedJobEligible(record: BossJobLibraryRecord) {
     record.reviewStatus === 'pending' &&
     record.sendStatus === 'pending'
   )
-}
-
-function validateFiltering(content: string) {
-  const json = content.match(/```json\s*([\s\S]*?)```/)?.[1] ?? content
-  const value: unknown = JSON.parse(json)
-  if (!value || typeof value !== 'object') throw new Error('筛选结果不是有效 JSON 对象')
-  const result = value as { positive?: unknown; negative?: unknown }
-  for (const items of [result.positive, result.negative]) {
-    if (
-      !Array.isArray(items) ||
-      !items.every(
-        (item) =>
-          item &&
-          typeof item.reason === 'string' &&
-          !!item.reason.trim() &&
-          typeof item.score === 'number' &&
-          Number.isFinite(item.score),
-      )
-    ) {
-      throw new Error('筛选结果缺少合法 positive / negative 分数与理由')
-    }
-  }
-  const parsed = parseFiltering(json)
-  if (!Number.isFinite(parsed.rating)) throw new Error('筛选总分不是有效数字')
-  return parsed
 }
 
 export class SavedJobAnalyzer {
@@ -118,8 +97,8 @@ export class SavedJobAnalyzer {
       model: selectedKey,
       enable: true,
     }
+    validateMatchThreshold(filtering.score)
     if (
-      !Number.isFinite(filtering.score) ||
       ![filtering, greetings].every(
         (config) =>
           Array.isArray(config.prompt) && config.prompt.some((message) => message.content?.trim()),
@@ -181,16 +160,15 @@ export class SavedJobAnalyzer {
           const content = await chat
             .chat('filtering', data, { disableMessages: true })
             .then((response) => response.text)
-          const { res, rating, message } = validateFiltering(content)
+          const result = parseFiltering(content)
+          const passed = getFilteringDecision(result, filtering.score)
           analysis = {
             ...metadata,
             analyzedAt: new Date().toISOString(),
-            res,
-            rating,
-            message,
-            passed: rating >= filtering.score,
+            ...result,
+            passed,
           }
-          if (rating >= filtering.score) {
+          if (passed === true) {
             if (this.stopping) {
               stoppedAfterFiltering = true
             } else {
@@ -282,7 +260,15 @@ export class SavedJobAnalyzer {
       delete run.currentJob
       this.busy.value = false
       this.collecting.value = false
-      this.host.scheduleBackgroundDetailCompletion?.()
+      if (!this.host.keywordRotationBusy.value) {
+        const task = collectNew ? '采集并分析' : '岗位分析'
+        const status =
+          run.status === 'completed' ? '完成' : run.status === 'stopped' ? '已停止' : '异常停止'
+        void this.host.notification(
+          `${task}${status}：完成 ${run.completed}/${run.total}，失败 ${run.failed}，跳过 ${run.skipped}${run.error ? `；${run.error}` : ''}`,
+        )
+      }
+      if (run.status === 'completed') this.host.scheduleBackgroundDetailCompletion?.()
     }
     return run
   }

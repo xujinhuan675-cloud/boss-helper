@@ -62,6 +62,27 @@ new Function(
 const { ChatModel } = compiled.exports
 
 describe('model configuration snapshot', () => {
+  it('generates from resume messages without requiring a job or adding job chat history', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+    })
+    const prompt = [{ role: 'user', content: '简历正文 {{ 不应作为模板渲染 }}' }]
+    chat.createAgent({ prompt, enable: true }, 'keywords')
+    chat.agents.get('keywords')[0].generate = async (request) => {
+      expect(request.messages).toEqual(prompt)
+      expect(request.timeout).toBe(60000)
+      return { text: '{"keywords":["AI产品经理"]}' }
+    }
+    expect(await chat.generate('keywords')).toBe('{"keywords":["AI产品经理"]}')
+    expect(chat.states.size).toBe(0)
+    expect(chat.jobs.value).toEqual([])
+    await expect(chat.generate('missing')).rejects.toThrow('not found')
+  })
+
   it('routes inference fetches through the extension background bridge', async () => {
     const model = {
       key: 'active',
@@ -172,6 +193,7 @@ describe('model configuration snapshot', () => {
 
     expect(globalThis.__chatMessages).toEqual([
       { role: 'user', content: '匹配 AI 产品经理' },
+      { role: 'system', content: expect.stringContaining('固定五维百分制') },
       { role: 'user', content: '## 求职者完整简历\n刘博华\nAI 产品经理' },
     ])
   })
@@ -231,7 +253,32 @@ describe('model configuration snapshot', () => {
       expect(globalThis.__chatMessages.at(-1).content).toBe('## 求职者完整简历\n正文 B')
       currentResume.value = null
       await chat.chat(role, data, { disableMessages: true })
-      expect(globalThis.__chatMessages).toEqual([{ role: 'user', content: '原提示词' }])
+      expect(globalThis.__chatMessages.filter((message) => message.role === 'user')).toEqual([
+        { role: 'user', content: '原提示词' },
+      ])
     }
+  })
+
+  it('enforces the scoring contract while preserving custom preferences and greeting prompts', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'model', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+      resumes: { currentResume: ref(null) },
+    })
+    const prompt = [{ role: 'system', content: '必须双休，只看金融产品经理' }]
+    const data = { jobData: { key: 'job', brand: {}, boss: {} } }
+    chat.createAgent({ prompt, enable: true }, 'filtering')
+    await chat.chat('filtering', data, { disableMessages: true })
+    expect(globalThis.__chatMessages[0]).toEqual(prompt[0])
+    const contract = globalThis.__chatMessages.at(-1)
+    expect(contract.role).toBe('system')
+    expect(contract.content).toContain('hardRequirements')
+    expect(contract.content).toContain('严格使用以下评分规则和 JSON 格式')
+    chat.createAgent({ prompt, enable: true }, 'greetings')
+    await chat.chat('greetings', data, { disableMessages: true })
+    expect(globalThis.__chatMessages).toEqual(prompt)
   })
 })

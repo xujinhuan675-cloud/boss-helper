@@ -4,7 +4,7 @@ import type { UIMessage } from 'ai'
 import { getToolName, isReasoningUIPart, isTextUIPart, isToolUIPart } from 'ai'
 
 import { appearanceConf } from '@/composables/conf'
-import { parseFiltering } from '@/composables/useApplying/utils'
+import { formatFilteringMessage } from '@/composables/useApplying/scoring'
 import { useHelper } from '@/composables/useHelper'
 import type { Message } from '@/composables/useModel'
 import { VueChatState } from '@/composables/useModel'
@@ -241,7 +241,7 @@ onUnmounted(() => {
               />
 
               <p v-else-if="isTextUIPart(part)" class="whitespace-pre-wrap">
-                {{ message.uiRole === 'filtering' ? parseFiltering(part.text).message : part.text }}
+                {{ message.uiRole === 'filtering' ? formatFilteringMessage(part.text) : part.text }}
               </p>
             </template>
           </template>

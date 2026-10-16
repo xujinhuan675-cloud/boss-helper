@@ -12,6 +12,7 @@ import { useModel } from '@/composables/useModel'
 import { ChatModel } from '@/composables/useModel'
 import { useResumes } from '@/composables/useResume'
 import type { FormDataInput } from '@/types/formData'
+import { logger } from '@/utils/logger'
 
 import type { NetConf } from './netConf'
 import { initNetConf } from './netConf'
@@ -133,13 +134,17 @@ export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
     },
   ) {
     const toast = useToast()
-    if (this.conf.formData.notification.value && document.visibilityState !== 'visible') {
-      await notification(msg, opt?.notification)
-    }
     toast.add({
       ...opt?.toast,
       title: msg,
     })
+    if (this.conf.formData.notification.value && document.visibilityState !== 'visible') {
+      try {
+        await notification(msg, { type: 'basic', title: 'BOSS助手', ...opt?.notification })
+      } catch (error) {
+        logger.error('发送桌面通知失败', error)
+      }
+    }
   }
 
   async onJobCardClick(_key: string) {
