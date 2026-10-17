@@ -42,9 +42,9 @@ function onProtocol() {
 }
 
 onMounted(async () => {
-  logger.info('BossHelper挂载成功')
+  logger.info('OfferHunt挂载成功')
   toast.add({
-    description: 'BossHelper挂载成功!',
+    description: 'OfferHunt挂载成功!',
     duration: 2000,
   })
 

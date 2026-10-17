@@ -178,7 +178,7 @@ onMounted(() => {
             }}
           </span>
           <span v-if="keywordRotation.items[keywordRotation.cursor]?.keyword">
-            · 当前：{{ keywordRotation.items[keywordRotation.cursor].keyword }}
+            · 当前：{{ keywordRotation.items[keywordRotation.cursor]?.keyword }}
           </span>
           <div v-if="helper.keywordRotationBusy.value && helper.keywordRotationWaitSeconds.value">
             {{ keywordRotation.nextKeywordIsBatchRest ? '批次休息' : '关键词冷却' }} · 剩余

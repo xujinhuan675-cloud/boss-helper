@@ -133,14 +133,7 @@ export type ConfigItem =
       type:
         | 'select'
         | 'checkbox'
-        | (
-            | 'salaryRange'
-            | 'companySizeRange'
-            | 'customGreeting'
-            | 'address'
-            | 'appearance'
-            | 'checkbox-expire'
-          )
+        | ('customGreeting' | 'address' | 'appearance' | 'checkbox-expire')
     }
   | AlertItem
   | {

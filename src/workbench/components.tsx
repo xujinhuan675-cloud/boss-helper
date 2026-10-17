@@ -11,23 +11,28 @@ export function SelectField({
   options,
   onChange,
   disabled = false,
+  hideLabel = false,
+  placeholder,
 }: {
   label: string
   value: string
   options: { value: string; label: string }[]
   onChange: (value: string) => void
   disabled?: boolean
+  hideLabel?: boolean
+  placeholder?: string
 }) {
   return (
     <Select
       aria-label={label}
+      placeholder={placeholder}
       value={value || null}
       onChange={(key) => onChange(String(key ?? ''))}
       isDisabled={disabled}
       fullWidth
       className="min-w-0"
     >
-      <Label>{label}</Label>
+      {!hideLabel && <Label>{label}</Label>}
       <Select.Trigger>
         <Select.Value className="truncate" />
         <Select.Indicator />

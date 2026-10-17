@@ -3,6 +3,7 @@ import type { BossZpDetailData, BossZpJobItemData } from './types'
 
 export const JOB_LIBRARY_STORAGE_KEY = 'local:boss-helper:job-library:v1'
 export const COLLECTION_RUN_STORAGE_KEY = 'local:boss-helper:collection-runs:v1'
+export const AUTO_CAPTURE_STORAGE_KEY = 'local:boss-helper:auto-capture:v1'
 export const COLLECTION_SCROLL_SELECTORS = [
   '.job-list-container',
   '.rec-job-list',

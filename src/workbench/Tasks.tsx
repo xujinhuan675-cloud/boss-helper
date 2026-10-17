@@ -1,18 +1,10 @@
 /** @jsxImportSource react */
-import {
-  Accordion,
-  Alert,
-  Button,
-  Chip,
-  Label,
-  Link,
-  ProgressBar,
-  Switch,
-  Table,
-} from '@heroui/react'
+import { Alert, Button, Chip, Label, Link, ProgressBar, Switch } from '@heroui/react'
 import {
   ArrowUpRight,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   ExternalLink,
   ListRestart,
   Pause,
@@ -25,12 +17,12 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 
+import { isCompleteModel } from '@/composables/useModel'
 import { getJobFunnel } from '@/entrypoints/boss/jobStore'
 
 import { ConfirmDialog, IconButton, SelectField, act } from './components'
 import type { ExecutorCommand } from './protocol'
-import { statisticsHistory } from './statistics'
-import { command } from './store'
+import { command, selectResume } from './store'
 import { useWorkbench } from './useWorkbench'
 
 export const statusNames: Record<string, string> = {
@@ -58,46 +50,35 @@ export const statusNames: Record<string, string> = {
   ai: '分析中',
 }
 
-export function Tasks({ compact = false }: { compact?: boolean }) {
+export function Tasks() {
   const state = useWorkbench()
   const runtime = state.runtime
   const [deliveryConfirm, setDeliveryConfirm] = useState(false)
-  const [historyDays, setHistoryDays] = useState('7')
+  const [configExpanded, setConfigExpanded] = useState(true)
   const busy = !!(
     runtime?.gatheringBusy ||
     runtime?.analysisBusy ||
     runtime?.keywordRotationBusy ||
     runtime?.realtimeBusy ||
+    runtime?.keywordExtractionBusy ||
+    runtime?.keywordRotationSaving ||
     runtime?.workflow?.status === 'running'
   )
-  const disabled = !state.connected || state.saving
-  const startDisabled = disabled || busy
+  const disabled = state.loading || state.saving
+  const startDisabled = disabled || busy || !state.connected
+  const availableModels = state.models.filter(isCompleteModel)
   const funnel = getJobFunnel(state.records)
   const run = runtime?.gatheringKind === 'detail' ? runtime.detailRun : runtime?.collectionRun
-  const current = runtime?.jobs.find((job) => job.key === runtime.currentJob)
   const rotation = runtime?.keywordRotation
-  const history = statisticsHistory(
-    state.today,
-    state.statistics,
-    historyDays === 'all' ? null : Number(historyDays),
-  )
   const execute = (type: ExecutorCommand['type']) => {
     void act(() => command({ type } as ExecutorCommand))
   }
 
   return (
     <section className="space-y-6">
-      {!compact && (
-        <div>
-          <h1 className="text-2xl font-semibold">任务</h1>
-          <p className="mt-1 text-sm text-muted">
-            {current?.jobName || (busy ? '任务运行中' : '当前没有进行中的任务')}
-          </p>
-        </div>
-      )}
       <nav
         aria-label="岗位统计入口"
-        className={`grid ${compact ? 'grid-cols-2' : 'grid-cols-2 lg:grid-cols-4'} gap-x-4 gap-y-5 border-b border-border pb-5`}
+        className="grid grid-cols-2 gap-x-4 gap-y-5 border-b border-border pb-5"
       >
         {[
           { label: '已采集', count: funnel.collected, query: '' },
@@ -108,18 +89,16 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
           <Link
             key={label}
             href={`./workbench.html${query}#jobs`}
-            target={compact ? '_blank' : undefined}
-            rel={compact ? 'noreferrer' : undefined}
+            target="_blank"
+            rel="noreferrer"
             aria-label={`查看${label}岗位，共 ${count} 个`}
-            className="group block w-full min-w-0 rounded-lg p-2 text-foreground no-underline transition-colors hover:bg-default/50"
+            className="workbench-nav-item block w-full min-w-0 p-2"
           >
             <span className="flex items-center justify-between gap-2 text-sm text-muted">
               {label}
               <ArrowUpRight size={15} aria-hidden="true" className="shrink-0" />
             </span>
-            <span className="mt-1 block text-2xl font-semibold tabular-nums group-hover:text-accent">
-              {count}
-            </span>
+            <span className="mt-1 block text-2xl font-semibold tabular-nums">{count}</span>
           </Link>
         ))}
       </nav>
@@ -127,14 +106,14 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold">任务操作</h2>
           <Chip size="sm" color={busy ? 'accent' : 'default'}>
-            {busy ? '运行中' : '待命'}
+            {!state.connected ? '未连接' : busy ? '运行中' : '待命'}
           </Chip>
         </div>
-        <div className={`grid ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-3'} gap-2`}>
+        <div className="grid grid-cols-1 gap-2">
           <Button
             fullWidth
             variant="primary"
-            isDisabled={startDisabled || !runtime?.keywords.trim()}
+            isDisabled={startDisabled || !state.keywords.trim()}
             onPress={() => execute('rotate')}
           >
             <ListRestart size={16} />
@@ -191,8 +170,9 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
           )}
         </div>
         <Switch
+          className="switch-row"
           isSelected={runtime?.autoCaptureEnabled ?? false}
-          isDisabled={disabled || busy}
+          isDisabled={disabled || !state.connected}
           onChange={(enabled) => {
             void act(() => command({ type: 'setAutoCapture', enabled }))
           }}
@@ -338,184 +318,162 @@ export function Tasks({ compact = false }: { compact?: boolean }) {
         )}
       </div>
       <div className="space-y-3 border-t border-border pt-5">
-        <h2 className="text-base font-semibold">当前配置</h2>
-        <nav aria-label="当前配置" className="-mx-2 space-y-1 text-sm">
-          <Link
-            href="./workbench.html#resumes"
-            target={compact ? '_blank' : undefined}
-            rel={compact ? 'noreferrer' : undefined}
-            className="flex w-full items-center justify-between gap-4 rounded-lg p-2 text-foreground no-underline transition-colors hover:bg-default/50"
-          >
-            <span className="shrink-0 text-muted">简历</span>
-            <span className="flex min-w-0 items-center justify-end gap-2">
-              <span className="min-w-0 text-right break-words">
-                {state.resumes.resumes.find((resume) => resume.id === state.resumes.currentResumeId)
-                  ?.name || '未选择'}
-              </span>
-              <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
-            </span>
-          </Link>
-          <Link
-            href="./workbench.html#models"
-            target={compact ? '_blank' : undefined}
-            rel={compact ? 'noreferrer' : undefined}
-            className="flex w-full items-center justify-between gap-4 rounded-lg p-2 text-foreground no-underline transition-colors hover:bg-default/50"
-          >
-            <span className="shrink-0 text-muted">模型与提示词</span>
-            <span className="flex min-w-0 items-center justify-end gap-2">
-              <span className="min-w-0 text-right break-words">
-                {state.models.find(
-                  (model) =>
-                    model.data?.api_key?.trim() &&
-                    model.data.base_url?.trim() &&
-                    model.data.model?.trim(),
-                )?.name || '未配置'}
-              </span>
-              <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
-            </span>
-          </Link>
-        </nav>
-      </div>
-      {!compact && runtime && (
-        <div className="space-y-3 border-t border-border pt-5">
-          <h2 className="text-base font-semibold">
-            当前页面岗位 <span className="text-muted">{runtime.jobs.length}</span>
-          </h2>
-          <Table variant="secondary">
-            <Table.ScrollContainer>
-              <Table.Content aria-label="当前页面岗位">
-                <Table.Header>
-                  <Table.Column isRowHeader>岗位</Table.Column>
-                  <Table.Column>公司</Table.Column>
-                  <Table.Column>状态</Table.Column>
-                  <Table.Column>操作</Table.Column>
-                </Table.Header>
-                <Table.Body
-                  renderEmptyState={() => (
-                    <p className="p-8 text-center text-muted">当前列表暂无岗位</p>
-                  )}
-                >
-                  {runtime.jobs.map((job) => (
-                    <Table.Row key={job.key} id={job.key}>
-                      <Table.Cell>
-                        {job.jobName}
-                        <span className="mt-1 block text-xs text-muted">{job.salary}</span>
-                      </Table.Cell>
-                      <Table.Cell>{job.brand.name}</Table.Cell>
-                      <Table.Cell>
-                        {statusNames[
-                          runtime.results.find(([key]) => key === job.key)?.[1]?.status ?? 'pending'
-                        ] || '待处理'}
-                      </Table.Cell>
-                      <Table.Cell>
-                        <div className="flex gap-1">
-                          <IconButton
-                            label="在 BOSS 打开岗位"
-                            disabled={startDisabled}
-                            onPress={() => {
-                              void act(() => command({ type: 'openJob', key: job.key }))
-                            }}
-                          >
-                            <ExternalLink size={16} />
-                          </IconButton>
-                          <IconButton
-                            label="保存岗位"
-                            disabled={startDisabled}
-                            onPress={() => {
-                              void act(
-                                () => command({ type: 'captureJob', key: job.key }),
-                                '已保存岗位',
-                              )
-                            }}
-                          >
-                            <Save size={16} />
-                          </IconButton>
-                          <IconButton
-                            label="分析岗位"
-                            disabled={startDisabled}
-                            onPress={() => {
-                              void act(() =>
-                                command({
-                                  type: 'analyzeOne',
-                                  jobId: job.key.slice('boss::'.length),
-                                }),
-                              )
-                            }}
-                          >
-                            <WandSparkles size={16} />
-                          </IconButton>
-                        </div>
-                      </Table.Cell>
-                    </Table.Row>
-                  ))}
-                </Table.Body>
-              </Table.Content>
-            </Table.ScrollContainer>
-          </Table>
-        </div>
-      )}
-      {!compact && (
-        <Accordion>
-          <Accordion.Item id="history">
-            <Accordion.Heading>
-              <Accordion.Trigger>
-                投递统计
-                <Accordion.Indicator />
-              </Accordion.Trigger>
-            </Accordion.Heading>
-            <Accordion.Panel>
-              <Accordion.Body className="space-y-4">
-                <div className="flex flex-wrap items-end justify-between gap-3">
-                  <div className="w-44">
-                    <SelectField
-                      label="统计范围"
-                      value={historyDays}
-                      onChange={setHistoryDays}
-                      options={[
-                        { value: '3', label: '近三日' },
-                        { value: '7', label: '近七日' },
-                        { value: '30', label: '近三十日' },
-                        { value: 'all', label: '全部历史' },
-                      ]}
-                    />
+        <h2 className="text-base font-semibold">
+          当前页面岗位{' '}
+          <span className="text-muted">{state.connected ? (runtime?.jobs.length ?? 0) : '-'}</span>
+        </h2>
+        {!state.connected || !runtime?.jobs.length ? (
+          <output className="flex min-h-20 items-center text-sm text-muted">
+            {state.connected
+              ? '当前列表暂无岗位'
+              : state.tabId !== null && !state.connectionError && !runtime?.error
+                ? '正在连接岗位页'
+                : '尚未连接 BOSS 岗位页'}
+          </output>
+        ) : (
+          <ul aria-label="当前页面岗位" className="max-h-80 divide-y divide-border overflow-y-auto">
+            {runtime.jobs.map((job) => (
+              <li key={job.key} className="space-y-2 py-3">
+                <p className="text-sm font-medium break-words">{job.jobName}</p>
+                <p className="text-xs text-muted break-words">
+                  {job.brand.name} · {job.salary}
+                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs text-muted">
+                    {statusNames[
+                      runtime.results.find(([key]) => key === job.key)?.[1]?.status ?? 'pending'
+                    ] || '待处理'}
+                  </span>
+                  <div className="flex gap-1">
+                    <IconButton
+                      label="在 BOSS 打开岗位"
+                      disabled={startDisabled}
+                      onPress={() => {
+                        void act(() => command({ type: 'openJob', key: job.key }))
+                      }}
+                    >
+                      <ExternalLink size={16} />
+                    </IconButton>
+                    <IconButton
+                      label="保存岗位"
+                      disabled={startDisabled}
+                      onPress={() => {
+                        void act(() => command({ type: 'captureJob', key: job.key }), '已保存岗位')
+                      }}
+                    >
+                      <Save size={16} />
+                    </IconButton>
+                    <IconButton
+                      label="分析岗位"
+                      disabled={startDisabled}
+                      onPress={() => {
+                        void act(() =>
+                          command({
+                            type: 'analyzeOne',
+                            jobId: job.key.slice('boss::'.length),
+                          }),
+                        )
+                      }}
+                    >
+                      <WandSparkles size={16} />
+                    </IconButton>
                   </div>
-                  <p className="text-sm">
-                    成功投递 {history.reduce((sum, day) => sum + day.success, 0)}
-                  </p>
                 </div>
-                <Table variant="secondary">
-                  <Table.ScrollContainer>
-                    <Table.Content aria-label="历史投递统计">
-                      <Table.Header>
-                        <Table.Column isRowHeader>日期</Table.Column>
-                        <Table.Column>扫描</Table.Column>
-                        <Table.Column>成功</Table.Column>
-                        <Table.Column>重复</Table.Column>
-                        <Table.Column>活跃筛选</Table.Column>
-                      </Table.Header>
-                      <Table.Body
-                        renderEmptyState={() => (
-                          <p className="p-6 text-center text-muted">暂无统计</p>
-                        )}
-                      >
-                        {history.map((day) => (
-                          <Table.Row key={day.date} id={day.date}>
-                            <Table.Cell>{day.date}</Table.Cell>
-                            <Table.Cell>{day.total}</Table.Cell>
-                            <Table.Cell>{day.success}</Table.Cell>
-                            <Table.Cell>{day.repeat}</Table.Cell>
-                            <Table.Cell>{day.activityFilter}</Table.Cell>
-                          </Table.Row>
-                        ))}
-                      </Table.Body>
-                    </Table.Content>
-                  </Table.ScrollContainer>
-                </Table>
-              </Accordion.Body>
-            </Accordion.Panel>
-          </Accordion.Item>
-        </Accordion>
-      )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex items-center justify-between gap-2 border-t border-border pt-4">
+          <div>
+            <h2 className="text-base font-semibold">最近运行</h2>
+            <p className="mt-1 text-xs text-muted">显示采集、分析、投递等最近事件</p>
+          </div>
+          <Link href="./workbench.html#logs" target="_blank" rel="noreferrer" className="text-sm">
+            查看日志 <ArrowUpRight size={14} />
+          </Link>
+        </div>
+        {runtime?.logs.length ? (
+          <ul className="space-y-2 text-sm">
+            {runtime.logs
+              .slice(-3)
+              .reverse()
+              .map((log, index) => (
+                <li key={index} className="break-words">
+                  <Link
+                    href="./workbench.html#logs"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block rounded px-2 py-1 hover:bg-default"
+                  >
+                    <span className={log.state === 'danger' ? 'text-danger' : 'text-muted'}>
+                      {log.state_name}
+                    </span>{' '}
+                    {log.title}
+                  </Link>
+                </li>
+              ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted">
+            {state.connected ? '暂无运行记录' : '尚未连接岗位页'}
+          </p>
+        )}
+      </div>
+      <div className="space-y-3 border-t border-border pt-5">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">当前配置</h2>
+          <IconButton
+            label={configExpanded ? '收起当前配置' : '展开当前配置'}
+            onPress={() => setConfigExpanded((expanded) => !expanded)}
+          >
+            {configExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </IconButton>
+        </div>
+        {configExpanded && (
+          <>
+            <SelectField
+              label="当前简历"
+              value={state.resumes.currentResumeId ?? '__none__'}
+              options={[
+                { value: '__none__', label: '不使用简历' },
+                ...state.resumes.resumes.map((resume) => ({
+                  value: resume.id,
+                  label: resume.name,
+                })),
+              ]}
+              disabled={disabled || busy}
+              onChange={(id) => {
+                void act(() => selectResume(id === '__none__' ? null : id), '当前简历已更新')
+              }}
+            />
+            <nav aria-label="当前配置" className="-mx-3 space-y-1 text-sm">
+              {[
+                {
+                  id: 'models',
+                  label: '模型与提示词',
+                  value: availableModels[0]?.name || '未配置',
+                },
+                { id: 'filters', label: '岗位筛选', value: '' },
+                { id: 'settings', label: '任务设置', value: '' },
+              ].map(({ id, label, value }) => (
+                <Link
+                  key={id}
+                  href={`./workbench.html#${id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="workbench-nav-item flex min-h-10 w-full items-center justify-between gap-3 px-3 py-2.5"
+                >
+                  <span className="shrink-0">{label}</span>
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-muted">{value}</span>
+                    <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
+                  </span>
+                </Link>
+              ))}
+            </nav>
+          </>
+        )}
+      </div>
       {!state.tabs.length && (
         <Alert>
           <Alert.Content>

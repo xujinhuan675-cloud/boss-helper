@@ -7,30 +7,23 @@ import {
   Label,
   NumberField,
   Separator,
+  Slider,
   Switch,
   TextArea,
   TextField,
 } from '@heroui/react'
-import {
-  ArrowDown,
-  ArrowUp,
-  Download,
-  ImagePlus,
-  LocateFixed,
-  Plus,
-  RotateCcw,
-  Save,
-  Trash2,
-} from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { ChevronDown, Download, LocateFixed, Plus, RotateCcw, Save, Trash2 } from 'lucide-react'
+import { useRef, useState } from 'react'
 
 import { defaultFormData } from '@/composables/conf/info'
 import { counter } from '@/message'
-import type { CustomGreetingItem, FormData, FormDataRange } from '@/types/formData'
-import deepmerge, { isPlainObject, jsonClone } from '@/utils/deepmerge'
+import type { FormData } from '@/types/formData'
+import { isPlainObject, jsonClone } from '@/utils/deepmerge'
 import { exportJson } from '@/utils/jsonImportExport'
 
+import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
+import { NativeFilters } from './NativeFilters'
 import { validateConfig } from './settingsValidation'
 import { command, reloadExecutorSettings, saveConfig, services } from './store'
 import { useWorkbench } from './useWorkbench'
@@ -40,7 +33,6 @@ const filterLabels = {
   jobTitle: '岗位名称',
   jobContent: '岗位描述',
   hrPosition: 'HR 职位',
-  jobAddress: '工作地址',
 } as const
 const toggleLabels = {
   activityFilter: '过滤不活跃招聘者',
@@ -51,7 +43,6 @@ const toggleLabels = {
   goldHunterFilter: '过滤猎头',
   notification: '完成后发送通知',
   useCache: '使用筛选缓存',
-  greetingVariable: '渲染招呼语变量',
 } as const
 const timingLabels = {
   delayDeliveryStarts: '投递启动延迟（秒）',
@@ -63,19 +54,27 @@ const timingLabels = {
   delayCollectionDetailMin: '详情采集最短间隔（秒）',
   delayCollectionDetailMax: '详情采集最长间隔（秒）',
 } as const
-const commuteLabels = {
-  straightDistance: '直线距离（公里）',
-  drivingDistance: '驾车距离（公里）',
-  drivingDuration: '驾车时间（分钟）',
-  walkingDistance: '步行距离（公里）',
-  walkingDuration: '步行时间（分钟）',
-} as const
-const rotationTimingLabels = {
-  delayKeywordRotationMin: '关键词最短冷却（秒）',
-  delayKeywordRotationMax: '关键词最长冷却（秒）',
-  delayKeywordRotationBatchMin: '批次最短休息（秒）',
-  delayKeywordRotationBatchMax: '批次最长休息（秒）',
-} as const
+const deliveryTimingKeys = [
+  'delayDeliveryStarts',
+  'delayDeliveryInterval',
+  'delayDeliveryPageNext',
+  'delayMessageSending',
+] as const
+const collectionTimingKeys = [
+  'delayCollectionScrollMin',
+  'delayCollectionScrollMax',
+  'delayCollectionDetailMin',
+  'delayCollectionDetailMax',
+] as const
+const rotationKeys = [
+  'delayKeywordRotationMin',
+  'delayKeywordRotationMax',
+  'delayKeywordRotationBatchMin',
+  'delayKeywordRotationBatchMax',
+  'keywordRotationBatchSize',
+  'keywordRotationDailyLimit',
+  'keywordRotationAutoResume',
+] as const
 const millisecondsPerDay = 86400000
 
 function NumericField({
@@ -114,120 +113,123 @@ function NumericField({
   )
 }
 
-function RangeFields({
+function TimeRange({
   label,
   value,
   onChange,
   disabled,
+  minutes = false,
+  scaleMax,
+  min = 0,
 }: {
   label: string
-  value: FormDataRange
-  onChange: (value: FormDataRange) => void
+  value: [number, number]
+  onChange: (value: [number, number]) => void
   disabled: boolean
+  minutes?: boolean
+  scaleMax: number
+  min?: number
 }) {
+  const unit = minutes ? '分钟' : '秒'
+  const divisor = minutes ? 60 : 1
+  const displayed = value.map((seconds) => seconds / divisor)
+  const [sliderMax, setSliderMax] = useState(Math.max(scaleMax, value[1]))
+  const limit = Math.max(sliderMax, value[1])
   return (
-    <div className="flex flex-col gap-3">
-      <div className="field-grid">
-        <NumericField
-          label={`${label}下限`}
-          value={value[0]}
-          onChange={(number) => onChange([number, value[1], value[2]])}
-          disabled={disabled}
-        />
-        <NumericField
-          label={`${label}上限`}
-          value={value[1]}
-          onChange={(number) => onChange([value[0], number, value[2]])}
-          disabled={disabled}
-        />
-      </div>
-      <Switch
-        isSelected={value[2]}
-        onChange={(strict) => onChange([value[0], value[1], strict])}
+    <section aria-label={label} className="min-w-0 space-y-3">
+      <Slider
+        aria-label={label}
+        value={value}
+        minValue={min}
+        maxValue={limit}
+        step={0.1}
+        formatOptions={{ style: 'unit', unit: 'second' }}
         isDisabled={disabled}
+        onChange={(next) => {
+          setSliderMax(limit)
+          onChange(next as [number, number])
+        }}
+        className="w-full"
       >
-        <Switch.Content>
-          <Switch.Control>
-            <Switch.Thumb />
-          </Switch.Control>
-          <Label>严格匹配</Label>
-        </Switch.Content>
-      </Switch>
-    </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Label>{label}</Label>
+          <Slider.Output>
+            {displayed.map((number) => Number(number.toFixed(2))).join('～')} {unit}
+          </Slider.Output>
+        </div>
+        <Slider.Track>
+          <Slider.Fill />
+          <Slider.Thumb index={0} aria-label={`${label}最短`} />
+          <Slider.Thumb index={1} aria-label={`${label}最长`} />
+        </Slider.Track>
+      </Slider>
+    </section>
   )
 }
 
-function GreetingImage({
-  image,
-  index,
+function TimeInterval({
+  label,
+  value,
+  onChange,
   disabled,
-  onUpload,
+  scaleMax,
+  step = 0.1,
 }: {
-  image: string
-  index: number
+  label: string
+  value: number
+  onChange: (value: number) => void
   disabled: boolean
-  onUpload: (file: File) => void
+  scaleMax: number
+  step?: number
 }) {
-  const [preview, setPreview] = useState('')
-  const [error, setError] = useState('')
-  useEffect(() => {
-    let cancelled = false
-    let url = ''
-    setPreview('')
-    setError('')
-    if (image)
-      void counter
-        .getImage(image)
-        .then((result) => {
-          if (cancelled) return
-          if (!result.success) {
-            setError('图片不存在或已过期')
-            return
-          }
-          url = URL.createObjectURL(
-            new Blob([new Uint8Array(result.buffer)], { type: result.type }),
-          )
-          setPreview(url)
-        })
-        .catch(() => {
-          if (!cancelled) setError('图片读取失败')
-        })
-    return () => {
-      cancelled = true
-      if (url) URL.revokeObjectURL(url)
-    }
-  }, [image])
+  const [sliderMax, setSliderMax] = useState(Math.max(scaleMax, value))
+  const limit = Math.max(sliderMax, value)
+  function update(next: number) {
+    if (!Number.isFinite(next)) return
+    setSliderMax(limit)
+    onChange(next)
+  }
   return (
-    <div className="flex flex-col gap-2">
-      {preview && (
-        <img
-          src={preview}
-          alt={`招呼语图片 ${index + 1}`}
-          className="max-h-48 max-w-full object-contain self-start"
-        />
-      )}
-      {error && (
-        <p className="text-sm text-danger" role="alert">
-          {error}
-        </p>
-      )}
-      <TextField isDisabled={disabled}>
-        <Label>{image ? '更换图片' : '上传图片'}</Label>
-        <Input
-          type="file"
-          accept="image/*"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            event.target.value = ''
-            if (file) onUpload(file)
-          }}
-        />
-      </TextField>
-    </div>
+    <section
+      aria-label={label}
+      className="grid min-w-0 grid-cols-[minmax(0,1fr)_96px] items-end gap-4"
+    >
+      <Slider
+        aria-label={label}
+        value={value}
+        minValue={0}
+        maxValue={limit}
+        step={step}
+        isDisabled={disabled}
+        onChange={(next) => update(next as number)}
+        className="min-w-0"
+      >
+        <Label>{label}</Label>
+        <Slider.Track>
+          <Slider.Fill />
+          <Slider.Thumb />
+        </Slider.Track>
+      </Slider>
+      <NumberField
+        aria-label={label}
+        value={value}
+        minValue={0}
+        step={step}
+        formatOptions={{ maximumFractionDigits: 6 }}
+        isDisabled={disabled}
+        onChange={update}
+        className="min-w-0"
+      >
+        <NumberField.Group>
+          <NumberField.Input className="min-w-0 text-center" />
+        </NumberField.Group>
+      </NumberField>
+    </section>
   )
 }
 
-export function Settings() {
+export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' }) {
+  const filters = page === 'filters'
   const state = useWorkbench()
   const [draft, setDraft] = useState<Partial<FormData>>({})
   const draftPreset = useRef<string | null>(null)
@@ -237,6 +239,10 @@ export function Settings() {
   const [clearingCache, setClearingCache] = useState(false)
   const runtime = state.runtime
   const config = { ...state.config, ...draft }
+  const selectedUrl = runtime?.url || state.tabs.find((tab) => tab.id === state.tabId)?.url
+  const nativeSearch =
+    config.nativeSearch ??
+    nativeSearchFromUrl(selectedUrl || 'https://www.zhipin.com/web/geek/jobs')
   const dirty = Object.keys(draft).length > 0
   const presetConflict = dirty && draftPreset.current !== state.preset
   const busy =
@@ -252,14 +258,18 @@ export function Settings() {
       runtime?.workflow?.status === 'running'
     )
 
-  function stageDraft(patch: Partial<FormData>, replace = false) {
+  function stageDraft(patch: Partial<FormData>) {
     draftPreset.current ??= state.preset
-    setDraft((current) => (replace ? patch : { ...current, ...patch }))
+    setDraft((current) => ({ ...current, ...patch }))
     setError('')
   }
 
   function change<K extends keyof FormData>(key: K, value: FormData[K]) {
     stageDraft({ [key]: value })
+  }
+
+  function restoreGroup(keys: readonly (keyof FormData)[]) {
+    stageDraft(Object.fromEntries(keys.map((key) => [key, jsonClone(defaultFormData[key])])))
   }
 
   function discardDraft() {
@@ -289,13 +299,14 @@ export function Settings() {
   }
 
   async function save() {
-    if (busy || !dirty) return
+    if (busy || (!dirty && !filters)) return
     setError('')
     try {
       const next = preparedConfig()
       const patch = Object.fromEntries(
         Object.keys(draft).map((key) => [key, next[key]]),
       ) as Partial<FormData>
+      if (filters) patch.nativeSearch = nativeSearch
       if (
         await act(() => {
           assertDraftPreset()
@@ -303,21 +314,6 @@ export function Settings() {
         }, '配置已保存')
       )
         discardDraft()
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  async function importConfig(file: File) {
-    if (busy) return
-    setError('')
-    try {
-      const value: unknown = JSON.parse(await file.text())
-      if (!isPlainObject(value)) throw new Error('配置文件必须为 JSON 对象')
-      const imported = await services.conf.prepareConfig(value as Partial<FormData>)
-      const next = deepmerge<FormData>(jsonClone(config), imported)
-      validateConfig(next)
-      stageDraft(next, true)
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error))
     }
@@ -394,61 +390,23 @@ export function Settings() {
     })
   }
 
-  async function uploadImage(index: number, file: File) {
-    if (busy || !Array.isArray(config.customGreeting.value)) return
-    const items = config.customGreeting.value
-    await act(async () => {
-      if (!file.type.startsWith('image/')) throw new Error('请选择图片文件')
-      const image = await counter.setImage({
-        name: file.name,
-        type: file.type,
-        buffer: Array.from(new Uint8Array(await file.arrayBuffer())),
-      })
-      if (!image.success || !image.key) throw new Error('图片上传失败')
-      change('customGreeting', {
-        ...config.customGreeting,
-        value: items.map((item, i): CustomGreetingItem =>
-          i === index ? { type: 'image', image: image.key } : item,
-        ),
-      })
-    }, '图片已上传，保存配置后生效')
-  }
-
-  function greetingItems(): CustomGreetingItem[] {
-    return typeof config.customGreeting.value === 'string'
-      ? [{ type: 'text', content: config.customGreeting.value }]
-      : config.customGreeting.value
-  }
-
-  function updateGreeting(items: CustomGreetingItem[]) {
-    change('customGreeting', { ...config.customGreeting, value: items })
-  }
-
-  function moveGreeting(index: number, delta: number) {
-    const items = [...greetingItems()]
-    const next = index + delta
-    if (next < 0 || next >= items.length) return
-    ;[items[index], items[next]] = [items[next]!, items[index]!]
-    updateGreeting(items)
-  }
-
   return (
     <section className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">任务设置</h1>
+        <h1 className="text-xl font-semibold">{filters ? '岗位筛选' : '任务设置'}</h1>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" isDisabled={busy || !dirty} onPress={discardDraft}>
             <RotateCcw size={16} />
             放弃修改
           </Button>
           <Button
-            isDisabled={busy || !dirty || presetConflict}
+            isDisabled={busy || (!dirty && !filters) || presetConflict}
             onPress={() => {
               void save()
             }}
           >
             <Save size={16} />
-            保存配置
+            {filters ? '保存并同步 BOSS' : '保存配置'}
           </Button>
         </div>
       </div>
@@ -468,8 +426,16 @@ export function Settings() {
       {error && (
         <Alert status="danger">
           <Alert.Content>
-            <Alert.Title>配置未保存</Alert.Title>
+            <Alert.Title>操作未完成</Alert.Title>
             <Alert.Description>{error}</Alert.Description>
+          </Alert.Content>
+        </Alert>
+      )}
+      {filters && state.settingsWarning && (
+        <Alert status="warning">
+          <Alert.Content>
+            <Alert.Title>筛选尚未同步</Alert.Title>
+            <Alert.Description>{state.settingsWarning}</Alert.Description>
           </Alert.Content>
         </Alert>
       )}
@@ -508,616 +474,440 @@ export function Settings() {
           </Button>
         </div>
       </div>
-      <Accordion allowsMultipleExpanded defaultExpandedKeys={['filters']}>
-        <Accordion.Item id="filters">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              岗位筛选
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="flex flex-col gap-6">
-              <div className="field-grid">
-                {(Object.keys(filterLabels) as (keyof typeof filterLabels)[]).map((key) => (
-                  <section key={key} className="flex flex-col gap-3" aria-label={filterLabels[key]}>
+      {filters && (
+        <NativeFilters
+          value={nativeSearch}
+          onChange={(value) => change('nativeSearch', value)}
+          disabled={busy || presetConflict}
+          canRead={!!selectedUrl}
+          onRead={() => {
+            if (selectedUrl) change('nativeSearch', nativeSearchFromUrl(selectedUrl))
+          }}
+        />
+      )}
+      <Accordion
+        allowsMultipleExpanded
+        defaultExpandedKeys={filters ? [] : ['timing', 'rotation', 'collection']}
+      >
+        {filters && (
+          <Accordion.Item id="filters">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                本地筛选规则
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="flex flex-col gap-6">
+                <div className="field-grid">
+                  {(Object.keys(filterLabels) as (keyof typeof filterLabels)[]).map((key) => (
+                    <section
+                      key={key}
+                      className="flex flex-col gap-3"
+                      aria-label={filterLabels[key]}
+                    >
+                      <TextField
+                        value={config[key].value.join('\n')}
+                        onChange={(value) =>
+                          change(key, { ...config[key], value: value.split('\n') })
+                        }
+                        isDisabled={busy}
+                      >
+                        <Label>{filterLabels[key]}排除关键词</Label>
+                        <TextArea rows={3} />
+                      </TextField>
+                    </section>
+                  ))}
+                </div>
+                <Separator />
+                <div className="field-grid">
+                  {(
+                    Object.keys(toggleLabels).filter(
+                      (key) => !['notification', 'useCache'].includes(key),
+                    ) as (keyof typeof toggleLabels)[]
+                  ).map((key) => (
                     <Switch
-                      isSelected={config[key].enable}
-                      onChange={(enable) => change(key, { ...config[key], enable })}
+                      className="switch-row"
+                      key={key}
+                      isSelected={config[key].value}
+                      onChange={(value) => change(key, { ...config[key], value })}
                       isDisabled={busy}
                     >
                       <Switch.Content>
                         <Switch.Control>
                           <Switch.Thumb />
                         </Switch.Control>
-                        <Label>{filterLabels[key]}</Label>
+                        <Label>{toggleLabels[key]}</Label>
                       </Switch.Content>
                     </Switch>
-                    <SelectField
-                      label={`${filterLabels[key]}匹配方式`}
-                      value={config[key].include ? 'include' : 'exclude'}
-                      options={[
-                        { value: 'include', label: '包含任意关键词' },
-                        ...(key === 'jobAddress'
-                          ? []
-                          : [{ value: 'exclude', label: '排除关键词' }]),
-                      ]}
-                      disabled={busy || key === 'jobAddress'}
-                      onChange={(mode) =>
-                        change(key, { ...config[key], include: mode === 'include' })
-                      }
-                    />
-                    <TextField
-                      value={config[key].value.join('\n')}
-                      onChange={(value) =>
-                        change(key, { ...config[key], value: value.split('\n') })
-                      }
-                      isDisabled={busy}
-                    >
-                      <Label>{filterLabels[key]}关键词（每行一项）</Label>
-                      <TextArea rows={4} />
-                    </TextField>
-                  </section>
-                ))}
-              </div>
-              <Separator />
-              <Switch
-                isSelected={config.salaryRange.enable}
-                onChange={(enable) => change('salaryRange', { ...config.salaryRange, enable })}
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>薪资筛选</Label>
-                </Switch.Content>
-              </Switch>
-              <RangeFields
-                label="月薪（K）"
-                value={config.salaryRange.value}
-                disabled={busy}
-                onChange={(value) => change('salaryRange', { ...config.salaryRange, value })}
-              />
-              <div>
-                <Button
-                  variant="secondary"
-                  isDisabled={busy}
-                  onPress={() => {
-                    const [min, max, strict] = config.salaryRange.value
-                    const monthly: FormDataRange = [
-                      Math.round(min * 1000),
-                      Math.round(max * 1000),
-                      config.salaryRange.advancedValue.M[2],
-                    ]
-                    const daily: FormDataRange = [
-                      Math.round(monthly[0] / 21.75),
-                      Math.round(monthly[1] / 21.75),
-                      config.salaryRange.advancedValue.D[2],
-                    ]
-                    change('salaryRange', {
-                      ...config.salaryRange,
-                      value: [min, max, strict],
-                      advancedValue: {
-                        M: monthly,
-                        D: daily,
-                        H: [
-                          Math.round(daily[0] / 8),
-                          Math.round(daily[1] / 8),
-                          config.salaryRange.advancedValue.H[2],
-                        ],
-                      },
-                    })
-                  }}
-                >
-                  同步时薪、日薪与月薪
-                </Button>
-              </div>
-              {(['H', 'D', 'M'] as const).map((unit) => (
-                <RangeFields
-                  key={unit}
-                  label={{ H: '时薪（元）', D: '日薪（元）', M: '月薪（元）' }[unit]}
-                  value={config.salaryRange.advancedValue[unit]}
-                  disabled={busy}
-                  onChange={(value) =>
-                    change('salaryRange', {
-                      ...config.salaryRange,
-                      advancedValue: { ...config.salaryRange.advancedValue, [unit]: value },
-                    })
-                  }
-                />
-              ))}
-              <Separator />
-              <Switch
-                isSelected={config.companySizeRange.enable}
-                onChange={(enable) =>
-                  change('companySizeRange', { ...config.companySizeRange, enable })
-                }
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>公司规模筛选</Label>
-                </Switch.Content>
-              </Switch>
-              <RangeFields
-                label="公司人数"
-                value={config.companySizeRange.value}
-                disabled={busy}
-                onChange={(value) =>
-                  change('companySizeRange', { ...config.companySizeRange, value })
-                }
-              />
-              <Separator />
-              <div className="field-grid">
-                {(
-                  Object.keys(toggleLabels).filter(
-                    (key) => !['greetingVariable', 'notification', 'useCache'].includes(key),
-                  ) as (keyof typeof toggleLabels)[]
-                ).map((key) => (
+                  ))}
+                  <NumericField
+                    label="同公司去重有效期（天，0 为永久）"
+                    value={(config.sameCompanyFilter.expire ?? 0) / millisecondsPerDay}
+                    disabled={busy}
+                    onChange={(days) =>
+                      change('sameCompanyFilter', {
+                        ...config.sameCompanyFilter,
+                        expire: days * millisecondsPerDay,
+                      })
+                    }
+                  />
+                  <NumericField
+                    label="同 HR 去重有效期（天，0 为永久）"
+                    value={(config.sameHrFilter.expire ?? 0) / millisecondsPerDay}
+                    disabled={busy}
+                    onChange={(days) =>
+                      change('sameHrFilter', {
+                        ...config.sameHrFilter,
+                        expire: days * millisecondsPerDay,
+                      })
+                    }
+                  />
+                </div>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
+        {!filters && (
+          <Accordion.Item id="timing">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                投递与执行
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="space-y-4">
+                <div className="max-w-sm">
+                  <NumericField
+                    label="单次投递上限"
+                    value={config.deliveryLimit.value}
+                    disabled={busy}
+                    max={155}
+                    min={1}
+                    onChange={(value) =>
+                      change('deliveryLimit', { ...config.deliveryLimit, value })
+                    }
+                  />
+                </div>
+                <details className="settings-advanced">
+                  <summary>
+                    执行间隔 <ChevronDown size={16} aria-hidden="true" />
+                  </summary>
+                  <div className="field-grid mt-4">
+                    {deliveryTimingKeys.map((key) => (
+                      <TimeInterval
+                        key={key}
+                        label={
+                          key === 'delayDeliveryPageNext' ? '翻页间隔（分钟）' : timingLabels[key]
+                        }
+                        value={key === 'delayDeliveryPageNext' ? config[key] / 60 : config[key]}
+                        disabled={busy}
+                        scaleMax={key === 'delayDeliveryPageNext' ? 10 : 60}
+                        step={key === 'delayDeliveryPageNext' ? 1 / 60 : 0.1}
+                        onChange={(value) =>
+                          change(
+                            key,
+                            key === 'delayDeliveryPageNext' ? Math.round(value * 600) / 10 : value,
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="mt-4"
+                    isDisabled={busy}
+                    onPress={() => restoreGroup(['deliveryLimit', ...deliveryTimingKeys])}
+                  >
+                    <RotateCcw size={14} />
+                    恢复本组默认值
+                  </Button>
+                </details>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
+        {!filters && (
+          <Accordion.Item id="rotation">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                关键词轮换
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="space-y-4">
+                <div className="field-grid">
+                  <NumericField
+                    label="每日关键词上限"
+                    value={config.keywordRotationDailyLimit}
+                    disabled={busy}
+                    min={1}
+                    max={1000}
+                    onChange={(value) => change('keywordRotationDailyLimit', value)}
+                  />
                   <Switch
-                    key={key}
-                    isSelected={config[key].value}
-                    onChange={(value) => change(key, { ...config[key], value })}
+                    className="switch-row"
+                    isSelected={config.keywordRotationAutoResume.value}
+                    onChange={(value) =>
+                      change('keywordRotationAutoResume', {
+                        ...config.keywordRotationAutoResume,
+                        value,
+                      })
+                    }
                     isDisabled={busy}
                   >
                     <Switch.Content>
                       <Switch.Control>
                         <Switch.Thumb />
                       </Switch.Control>
-                      <Label>{toggleLabels[key]}</Label>
+                      <Label>页面重新加载后自动继续轮换</Label>
                     </Switch.Content>
                   </Switch>
-                ))}
-                <NumericField
-                  label="同公司去重有效期（天，0 为永久）"
-                  value={(config.sameCompanyFilter.expire ?? 0) / millisecondsPerDay}
-                  disabled={busy}
-                  onChange={(days) =>
-                    change('sameCompanyFilter', {
-                      ...config.sameCompanyFilter,
-                      expire: days * millisecondsPerDay,
-                    })
-                  }
-                />
-                <NumericField
-                  label="同 HR 去重有效期（天，0 为永久）"
-                  value={(config.sameHrFilter.expire ?? 0) / millisecondsPerDay}
-                  disabled={busy}
-                  onChange={(days) =>
-                    change('sameHrFilter', {
-                      ...config.sameHrFilter,
-                      expire: days * millisecondsPerDay,
-                    })
-                  }
-                />
-              </div>
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
-        <Accordion.Item id="greeting">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              自定义招呼语
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="flex flex-col gap-4">
-              <Switch
-                isSelected={config.customGreeting.enable}
-                onChange={(enable) =>
-                  change('customGreeting', { ...config.customGreeting, enable })
-                }
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>启用自定义招呼语</Label>
-                </Switch.Content>
-              </Switch>
-              <Switch
-                isSelected={config.greetingVariable.value}
-                onChange={(value) =>
-                  change('greetingVariable', { ...config.greetingVariable, value })
-                }
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>渲染招呼语变量</Label>
-                </Switch.Content>
-              </Switch>
-              {config.aiGreeting.enable && (
-                <p className="text-sm text-muted">
-                  当前 AI 招呼语已启用，自定义文字招呼语将由 AI 生成内容替代。
-                </p>
-              )}
-              {typeof config.customGreeting.value === 'string' ? (
-                <TextField
-                  value={config.customGreeting.value}
-                  onChange={(value) =>
-                    change('customGreeting', { ...config.customGreeting, value })
-                  }
-                  isDisabled={busy}
-                >
-                  <Label>招呼语正文</Label>
-                  <TextArea rows={6} />
-                </TextField>
-              ) : (
-                config.customGreeting.value.map((item, index) => (
-                  <section
-                    key={index}
-                    className="flex flex-col gap-3"
-                    aria-label={`消息 ${index + 1}`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-sm font-medium">
-                        消息 {index + 1} · {item.type === 'image' ? '图片' : '文字'}
-                      </h3>
-                      <div className="flex gap-1">
-                        <IconButton
-                          label={`消息 ${index + 1} 上移`}
-                          disabled={busy || index === 0}
-                          onPress={() => moveGreeting(index, -1)}
-                        >
-                          <ArrowUp size={16} />
-                        </IconButton>
-                        <IconButton
-                          label={`消息 ${index + 1} 下移`}
-                          disabled={busy || index === greetingItems().length - 1}
-                          onPress={() => moveGreeting(index, 1)}
-                        >
-                          <ArrowDown size={16} />
-                        </IconButton>
-                        <IconButton
-                          label={`删除消息 ${index + 1}`}
-                          disabled={busy}
-                          onPress={() =>
-                            updateGreeting(greetingItems().filter((_, i) => i !== index))
-                          }
-                        >
-                          <Trash2 size={16} />
-                        </IconButton>
-                      </div>
-                    </div>
-                    {item.type === 'text' ? (
-                      <TextField
-                        aria-label={`消息 ${index + 1} 文字`}
-                        value={item.content}
-                        isDisabled={busy}
-                        onChange={(content) =>
-                          updateGreeting(
-                            greetingItems().map((message, i) =>
-                              i === index ? { type: 'text', content } : message,
-                            ),
-                          )
-                        }
-                      >
-                        <TextArea rows={4} />
-                      </TextField>
-                    ) : (
-                      <GreetingImage
-                        image={item.image}
-                        index={index}
-                        disabled={busy}
-                        onUpload={(file) => {
-                          void uploadImage(index, file)
-                        }}
-                      />
-                    )}
-                  </section>
-                ))
-              )}
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="secondary"
-                  isDisabled={busy}
-                  onPress={() =>
-                    updateGreeting([...greetingItems(), { type: 'text', content: '' }])
-                  }
-                >
-                  <Plus size={16} />
-                  添加文字
-                </Button>
-                <Button
-                  variant="secondary"
-                  isDisabled={busy}
-                  onPress={() => updateGreeting([...greetingItems(), { type: 'image', image: '' }])}
-                >
-                  <ImagePlus size={16} />
-                  添加图片
-                </Button>
-              </div>
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
-        <Accordion.Item id="timing">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              投递数量与执行间隔
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="field-grid">
-              <NumericField
-                label="单次投递上限"
-                value={config.deliveryLimit.value}
-                disabled={busy}
-                max={155}
-                onChange={(value) => change('deliveryLimit', { ...config.deliveryLimit, value })}
-              />
-              {(Object.keys(timingLabels) as (keyof typeof timingLabels)[]).map((key) => (
-                <NumericField
-                  key={key}
-                  label={timingLabels[key]}
-                  value={config[key]}
-                  disabled={busy}
-                  step={0.1}
-                  onChange={(value) => change(key, value)}
-                />
-              ))}
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
-        <Accordion.Item id="rotation">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              关键词轮换
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="field-grid">
-              {(Object.keys(rotationTimingLabels) as (keyof typeof rotationTimingLabels)[]).map(
-                (key) => (
-                  <NumericField
-                    key={key}
-                    label={rotationTimingLabels[key]}
-                    value={config[key]}
-                    disabled={busy}
-                    min={1}
-                    max={86400}
-                    onChange={(value) => change(key, value)}
-                  />
-                ),
-              )}
-              <NumericField
-                label="每批关键词数"
-                value={config.keywordRotationBatchSize}
-                disabled={busy}
-                min={1}
-                max={100}
-                onChange={(value) => change('keywordRotationBatchSize', value)}
-              />
-              <NumericField
-                label="每日关键词上限"
-                value={config.keywordRotationDailyLimit}
-                disabled={busy}
-                min={1}
-                max={1000}
-                onChange={(value) => change('keywordRotationDailyLimit', value)}
-              />
-              <Switch
-                isSelected={config.keywordRotationAutoResume.value}
-                onChange={(value) =>
-                  change('keywordRotationAutoResume', {
-                    ...config.keywordRotationAutoResume,
-                    value,
-                  })
-                }
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>页面重新加载后自动继续轮换</Label>
-                </Switch.Content>
-              </Switch>
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
-        <Accordion.Item id="commute">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              通勤与地图
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="flex flex-col gap-4">
-              <Switch
-                isSelected={config.amap.enable}
-                onChange={(enable) => change('amap', { ...config.amap, enable })}
-                isDisabled={busy}
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  <Label>启用高德地图通勤筛选</Label>
-                </Switch.Content>
-              </Switch>
-              <div className="field-grid">
-                <TextField
-                  value={config.amap.key}
-                  onChange={(key) => change('amap', { ...config.amap, key })}
-                  isDisabled={busy}
-                >
-                  <Label>高德 Web 服务 Key</Label>
-                  <Input type="password" autoComplete="off" />
-                </TextField>
-                <div className="flex items-end gap-2">
-                  <TextField
-                    value={config.amap.origins}
-                    onChange={(origins) => change('amap', { ...config.amap, origins })}
-                    isDisabled={busy}
-                    className="min-w-0 flex-1"
-                  >
-                    <Label>起点地址或经度,纬度</Label>
-                    <Input />
-                  </TextField>
-                  <IconButton
-                    label="查找起点经纬度"
-                    disabled={busy}
-                    onPress={() => {
-                      void geocode()
-                    }}
-                  >
-                    <LocateFixed size={16} />
-                  </IconButton>
                 </div>
-                {(Object.keys(commuteLabels) as (keyof typeof commuteLabels)[]).map((key) => (
+                <details className="settings-advanced">
+                  <summary>
+                    轮换间隔与批次 <ChevronDown size={16} aria-hidden="true" />
+                  </summary>
+                  <div className="field-grid mt-4">
+                    <TimeRange
+                      label="关键词间隔"
+                      minutes
+                      scaleMax={3600}
+                      min={1}
+                      value={[config.delayKeywordRotationMin, config.delayKeywordRotationMax]}
+                      disabled={busy}
+                      onChange={([delayKeywordRotationMin, delayKeywordRotationMax]) =>
+                        stageDraft({ delayKeywordRotationMin, delayKeywordRotationMax })
+                      }
+                    />
+                    <TimeRange
+                      label="批次休息"
+                      minutes
+                      scaleMax={7200}
+                      min={1}
+                      value={[
+                        config.delayKeywordRotationBatchMin,
+                        config.delayKeywordRotationBatchMax,
+                      ]}
+                      disabled={busy}
+                      onChange={([delayKeywordRotationBatchMin, delayKeywordRotationBatchMax]) =>
+                        stageDraft({ delayKeywordRotationBatchMin, delayKeywordRotationBatchMax })
+                      }
+                    />
+                    <NumericField
+                      label="每批关键词数"
+                      value={config.keywordRotationBatchSize}
+                      disabled={busy}
+                      min={1}
+                      max={100}
+                      onChange={(value) => change('keywordRotationBatchSize', value)}
+                    />
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="mt-4"
+                    isDisabled={busy}
+                    onPress={() => restoreGroup(rotationKeys)}
+                  >
+                    <RotateCcw size={14} />
+                    恢复本组默认值
+                  </Button>
+                </details>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
+        {!filters && (
+          <Accordion.Item id="collection">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                采集间隔
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="space-y-4">
+                <details className="settings-advanced">
+                  <summary>
+                    调整采集间隔 <ChevronDown size={16} aria-hidden="true" />
+                  </summary>
+                  <div className="field-grid mt-4">
+                    <TimeRange
+                      label="滚动间隔"
+                      scaleMax={10}
+                      value={[config.delayCollectionScrollMin, config.delayCollectionScrollMax]}
+                      disabled={busy}
+                      onChange={([delayCollectionScrollMin, delayCollectionScrollMax]) =>
+                        stageDraft({ delayCollectionScrollMin, delayCollectionScrollMax })
+                      }
+                    />
+                    <TimeRange
+                      label="详情采集间隔"
+                      scaleMax={30}
+                      value={[config.delayCollectionDetailMin, config.delayCollectionDetailMax]}
+                      disabled={busy}
+                      onChange={([delayCollectionDetailMin, delayCollectionDetailMax]) =>
+                        stageDraft({ delayCollectionDetailMin, delayCollectionDetailMax })
+                      }
+                    />
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="mt-4"
+                    isDisabled={busy}
+                    onPress={() => restoreGroup(collectionTimingKeys)}
+                  >
+                    <RotateCcw size={14} />
+                    恢复本组默认值
+                  </Button>
+                </details>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
+        {filters && (
+          <Accordion.Item id="commute">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                通勤与地图
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="flex flex-col gap-4">
+                <div className="field-grid">
+                  <TextField
+                    value={config.amap.key}
+                    onChange={(key) => change('amap', { ...config.amap, key })}
+                    isDisabled={busy}
+                  >
+                    <Label>高德 Web 服务 Key</Label>
+                    <Input type="password" autoComplete="off" />
+                  </TextField>
+                  <div className="flex items-end gap-2">
+                    <TextField
+                      value={config.amap.origins}
+                      onChange={(origins) => change('amap', { ...config.amap, origins })}
+                      isDisabled={busy}
+                      className="min-w-0 flex-1"
+                    >
+                      <Label>起点地址或经度,纬度</Label>
+                      <Input />
+                    </TextField>
+                    <IconButton
+                      label="查找起点经纬度"
+                      disabled={busy}
+                      onPress={() => {
+                        void geocode()
+                      }}
+                    >
+                      <LocateFixed size={16} />
+                    </IconButton>
+                  </div>
                   <NumericField
-                    key={key}
-                    label={commuteLabels[key]}
-                    value={config.amap[key]}
+                    label="最大直线距离（公里）"
+                    value={config.amap.straightDistance}
                     disabled={busy}
                     step={0.1}
-                    onChange={(value) => change('amap', { ...config.amap, [key]: value })}
+                    onChange={(straightDistance) =>
+                      change('amap', { ...config.amap, straightDistance })
+                    }
                   />
-                ))}
-              </div>
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
-        <Accordion.Item id="data">
-          <Accordion.Heading>
-            <Accordion.Trigger>
-              记录、缓存与配置文件
-              <Accordion.Indicator />
-            </Accordion.Trigger>
-          </Accordion.Heading>
-          <Accordion.Panel>
-            <Accordion.Body className="flex flex-col gap-4">
-              <div className="field-grid">
-                <Switch
-                  isSelected={config.notification.value}
-                  onChange={(value) => change('notification', { ...config.notification, value })}
-                  isDisabled={busy}
-                >
-                  <Switch.Content>
-                    <Switch.Control>
-                      <Switch.Thumb />
-                    </Switch.Control>
-                    <Label>完成后发送通知</Label>
-                  </Switch.Content>
-                </Switch>
-                <Switch
-                  isSelected={config.useCache.value}
-                  onChange={(value) => change('useCache', { ...config.useCache, value })}
-                  isDisabled={busy}
-                >
-                  <Switch.Content>
-                    <Switch.Control>
-                      <Switch.Thumb />
-                    </Switch.Control>
-                    <Label>使用筛选缓存</Label>
-                  </Switch.Content>
-                </Switch>
-                <Switch
-                  isSelected={config.record.enable}
-                  onChange={(enable) => change('record', { ...config.record, enable })}
-                  isDisabled={busy}
-                >
-                  <Switch.Content>
-                    <Switch.Control>
-                      <Switch.Thumb />
-                    </Switch.Control>
-                    <Label>启用内容记录</Label>
-                  </Switch.Content>
-                </Switch>
-                <TextField
-                  value={(config.record.model ?? []).join('\n')}
-                  onChange={(value) =>
-                    change('record', { ...config.record, model: value.split('\n') })
-                  }
-                  isDisabled={busy}
-                >
-                  <Label>记录模型（每行一项）</Label>
-                  <TextArea rows={3} />
-                </TextField>
-              </div>
-              <Button
-                variant="secondary"
-                className="self-start"
-                isDisabled={busy || !state.connected}
-                onPress={() => setClearingCache(true)}
-              >
-                <Trash2 size={16} />
-                清空筛选缓存
-              </Button>
-              <Separator />
-              <TextField isDisabled={busy}>
-                <Label>导入配置文件</Label>
-                <Input
-                  type="file"
-                  accept=".json,application/json"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0]
-                    event.target.value = ''
-                    if (file) void importConfig(file)
-                  }}
-                />
-              </TextField>
-              <div className="flex flex-wrap gap-2">
+                </div>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
+        {!filters && (
+          <Accordion.Item id="data">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                记录、缓存与配置文件
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="flex flex-col gap-4">
+                <div className="field-grid">
+                  <Switch
+                    className="switch-row"
+                    isSelected={config.notification.value}
+                    onChange={(value) => change('notification', { ...config.notification, value })}
+                    isDisabled={busy}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                      <Label>完成后发送通知</Label>
+                    </Switch.Content>
+                  </Switch>
+                  <Switch
+                    className="switch-row"
+                    isSelected={config.useCache.value}
+                    onChange={(value) => change('useCache', { ...config.useCache, value })}
+                    isDisabled={busy}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                      <Label>使用筛选缓存</Label>
+                    </Switch.Content>
+                  </Switch>
+                  <Switch
+                    className="switch-row"
+                    isSelected={config.record.enable}
+                    onChange={(enable) => change('record', { ...config.record, enable })}
+                    isDisabled={busy}
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                      <Label>启用内容记录</Label>
+                    </Switch.Content>
+                  </Switch>
+                  <TextField
+                    value={(config.record.model ?? []).join('\n')}
+                    onChange={(value) =>
+                      change('record', { ...config.record, model: value.split('\n') })
+                    }
+                    isDisabled={busy}
+                  >
+                    <Label>记录模型（每行一项）</Label>
+                    <TextArea rows={3} />
+                  </TextField>
+                </div>
                 <Button
                   variant="secondary"
-                  isDisabled={busy}
-                  onPress={() => exportJson(jsonClone(state.config), '打招呼配置')}
+                  className="self-start"
+                  isDisabled={busy || !state.connected}
+                  onPress={() => setClearingCache(true)}
                 >
-                  <Download size={16} />
-                  导出已保存配置
+                  <Trash2 size={16} />
+                  清空筛选缓存
                 </Button>
-                <Button
-                  variant="secondary"
-                  isDisabled={busy}
-                  onPress={() => {
-                    const keys = [
-                      'deliveryLimit',
-                      'activityFilter',
-                      'friendStatus',
-                      'sameCompanyFilter',
-                      'sameHrFilter',
-                      'goldHunterFilter',
-                      'notification',
-                      'useCache',
-                      ...Object.keys(timingLabels),
-                      ...Object.keys(rotationTimingLabels),
-                      'keywordRotationBatchSize',
-                      'keywordRotationDailyLimit',
-                      'keywordRotationAutoResume',
-                    ] as const
-                    const recommended = Object.fromEntries(
-                      keys.map((key) => [key, jsonClone(defaultFormData[key])]),
-                    )
-                    stageDraft(recommended)
-                  }}
-                >
-                  应用推荐配置
-                </Button>
-                <Button
-                  variant="danger-soft"
-                  isDisabled={busy}
-                  onPress={() => {
-                    stageDraft(jsonClone(defaultFormData), true)
-                  }}
-                >
-                  <RotateCcw size={16} />
-                  恢复默认配置
-                </Button>
-              </div>
-            </Accordion.Body>
-          </Accordion.Panel>
-        </Accordion.Item>
+                <Separator />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    isDisabled={busy}
+                    onPress={() => exportJson(jsonClone(state.config), '打招呼配置')}
+                  >
+                    <Download size={16} />
+                    导出已保存配置
+                  </Button>
+                </div>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
       </Accordion>
       <ConfirmDialog
         open={switchingPreset !== null}

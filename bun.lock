@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "boss-helper",
+      "name": "offerhunt",
       "dependencies": {
         "@ai-sdk/openai": "^4.0.36",
         "@heroui/react": "3.2.6",

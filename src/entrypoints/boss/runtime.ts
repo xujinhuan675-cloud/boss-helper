@@ -23,8 +23,11 @@ import { EXECUTOR_NAMESPACE } from '../../workbench/protocol'
 import { GeekChatClientManager } from './chat'
 import type { BoosJobData } from './delivery'
 import { bossWorkflow } from './delivery'
+import { applySavedJobDetail, convertBossZpJobItemToJobData, getSavedJobData } from './jobData'
+import type { JobAnalysisPatch, JobLibraryMutation } from './jobLibraryStorage'
 import type { BossJobLibraryRecord, CollectionRun, DetailRun, FunnelStage } from './jobStore'
 import {
+  AUTO_CAPTURE_STORAGE_KEY,
   COLLECTION_RUN_STORAGE_KEY,
   COLLECTION_SCROLL_SELECTORS,
   JOB_LIBRARY_STORAGE_KEY,
@@ -33,9 +36,6 @@ import {
   createCollectionRun,
   getJobFunnel,
   isJobExcluded,
-  isFunnelStage,
-  isProcessingStatus,
-  mergeJobRecords,
   normalizeJobLibraryAnalysis,
   stopCollectionRun,
 } from './jobStore'
@@ -53,8 +53,11 @@ import {
   normalizeKeywordList,
   normalizeSearchUrl,
   parseJobKeywords,
+  resetKeywordRotationPlan,
 } from './keywordRotation'
 import type { KeywordRotationPlan, KeywordRotationUsage } from './keywordRotation'
+import { buildNativeSearchUrl } from './nativeSearch'
+import type { NativeSearchFilters } from './nativeSearch'
 import { getBossData, uploadImage } from './requests'
 import { SavedJobAnalyzer } from './savedAnalysis'
 import type { BossZpDetailData, BossZpJobItemData } from './types'
@@ -78,107 +81,6 @@ const initSearch = useHookVueFn('#wrap .page-job-wrapper,.job-recommend-main,.pa
   'searchJobAction',
   'onSearch',
 ])
-
-function formatActiveTime(timestamp: number): string {
-  const now = Date.now()
-  const diff = now - timestamp
-  const day = 24 * 60 * 60 * 1000
-
-  if (diff < day) return '今日活跃'
-  if (diff < 2 * day) return '昨日活跃'
-  if (diff < 7 * day) return '本周活跃'
-  if (diff < 30 * day) return '本月活跃'
-  return '较久未活跃'
-}
-
-function convertBossZpJobItemToJobData(item: BossZpJobItemData): JobData {
-  const key = `boss::${item.encryptJobId}`
-
-  return {
-    key,
-    link: `https://www.zhipin.com/job_detail/${item.encryptJobId}.html`,
-    jobName: item.jobName,
-    positionName: item.jobName,
-    jobDescription: '',
-
-    // 经验和学历要求 - 从 jobLabels 中解析或直接使用
-    experienceName: item.jobExperience || item.jobLabels?.[0] || '经验不限',
-    degreeName: item.jobDegree || '学历不限',
-    salary: item.salaryDesc,
-
-    // 地址相关
-    address: [item.cityName, item.areaDistrict, item.businessDistrict].filter(Boolean).join('-'),
-    addressCoords: item.gps ? [item.gps.longitude, item.gps.latitude] : undefined,
-
-    // 技能标签
-    showSkills: item.skills || [],
-    jobLabels: item.jobLabels || [],
-    skills: item.skills || [],
-
-    // 活跃时间 - 从 lastModifyTime 获取
-    activeTime: item.lastModifyTime,
-    activeTimeStr: item.lastModifyTime ? formatActiveTime(item.lastModifyTime) : undefined,
-
-    // 福利
-    welfareList: item.welfareList,
-
-    // 招聘者信息
-    boss: {
-      link: `https://www.zhipin.com/boss_detail/${item.encryptBossId}.html`,
-      name: item.bossName,
-      title: item.bossTitle,
-      avatar: item.bossAvatar,
-      certificated: item.bossCert > 0,
-      isHeadhunter: item.goldHunter === 1,
-      isFriend: false,
-      isOnline: item.bossOnline ?? false,
-    },
-
-    // 公司品牌信息
-    brand: {
-      link: `https://www.zhipin.com/gongsi/${item.encryptBrandId}.html`,
-      name: item.brandName,
-      logo: item.brandLogo,
-      scale: item.brandScaleName,
-      industry: item.brandIndustry,
-      stageName: item.brandStageName,
-      introduce: '',
-      labels: [],
-    },
-
-    // 状态信息
-    // status: {
-    //   status: item.contact ? 'warn' : 'pending',
-    //   msg: item.contact ? '已沟通' : '未开始',
-    // },
-  }
-}
-
-function applySavedJobDetail(job: JobData, detail: BossZpDetailData): JobData {
-  return {
-    ...job,
-    activeTime: detail.brandComInfo?.activeTime ?? job.activeTime,
-    activeTimeStr: detail.bossInfo?.activeTimeDesc ?? job.activeTimeStr,
-    jobDescription: detail.jobInfo.postDescription ?? job.jobDescription,
-    city: detail.jobInfo.locationName ?? job.city,
-    address: detail.jobInfo.address ?? job.address,
-    addressCoords:
-      typeof detail.jobInfo.longitude === 'number' && typeof detail.jobInfo.latitude === 'number'
-        ? [detail.jobInfo.longitude, detail.jobInfo.latitude]
-        : job.addressCoords,
-    boss: {
-      ...job.boss,
-      isOnline: detail.bossInfo?.bossOnline ?? job.boss.isOnline,
-      isCertificated: detail.bossInfo?.certificated ?? job.boss.isCertificated,
-    },
-    brand: {
-      ...job.brand,
-      labels: detail.brandComInfo?.labels ?? job.brand.labels,
-      introduce: detail.brandComInfo?.introduce ?? job.brand.introduce,
-      stageName: detail.brandComInfo?.stageName ?? job.brand.stageName,
-    },
-  }
-}
 
 export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}> {
   label = 'Boss直聘'
@@ -231,7 +133,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private collectionPromise: Promise<CollectionRun> | null = null
   private collectionAnalysisRun: CollectionRun | null = null
   private collectionStoragePending: Promise<unknown> | null = null
-  private analysisCleanup: Promise<void> | null = null
+  private analysisCleanup: Promise<BossJobLibraryRecord[]> | null = null
   private jobCapturePromise: Promise<void> = Promise.resolve()
   private backgroundDetailQueued = false
   private mounted = false
@@ -239,6 +141,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private mountPromise: Promise<void> | null = null
   private keywordRotationPromise: Promise<KeywordRotationPlan> | null = null
   private keywordRotationStopRequested = false
+  private autoCaptureLoaded = false
 
   constructor() {
     const jobList = ref<JobData[]>([])
@@ -341,7 +244,6 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       if (
         !chat.createAgent(
           {
-            model: modelKey,
             enable: true,
             prompt: [
               {
@@ -386,6 +288,38 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     }
   }
 
+  async applyNativeFilters(filters: NativeSearchFilters) {
+    const target = buildNativeSearchUrl(location.href, filters)
+    const router = this.rootVue?.$router
+    if (!router?.push) throw new Error('BOSS 搜索页尚未就绪，请刷新页面后重试同步')
+    await this.loadKeywordRotation()
+    this._jobList.value = []
+    this.jobList.value = []
+    await router.push({
+      path: target.pathname,
+      query: Object.fromEntries(target.searchParams.entries()),
+      hash: '',
+    })
+    const current = new URL(normalizeSearchUrl(location.href))
+    const expected = new URL(normalizeSearchUrl(target.href))
+    current.searchParams.sort()
+    expected.searchParams.sort()
+    if (
+      current.href !== expected.href ||
+      new URL(location.href).searchParams.get('query') !== target.searchParams.get('query')
+    )
+      throw new Error('BOSS 未应用筛选条件，请重试同步')
+    const plan = this.keywordRotation.value
+    if (plan) {
+      const next = resetKeywordRotationPlan(plan)
+      next.status = 'idle'
+      next.baseSearchUrl = normalizeSearchUrl(location.href)
+      next.filterSnapshot = { salary: filters.salary, city: filters.city }
+      await this.writeKeywordRotation(next)
+    }
+    return target.href
+  }
+
   private async navigateToKeyword(keyword: string, baseSearchUrl: string) {
     if (normalizeSearchUrl(location.href) !== baseSearchUrl)
       throw new Error('BOSS 原生筛选条件已变化，请重新保存关键词后再运行')
@@ -423,11 +357,11 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 
   private keywordRotationConfig() {
     const form = this.conf.formData
-    const interval = [
+    const interval: [number, number] = [
       form.delayKeywordRotationMin ?? defaultFormData.delayKeywordRotationMin,
       form.delayKeywordRotationMax ?? defaultFormData.delayKeywordRotationMax,
     ]
-    const batchRest = [
+    const batchRest: [number, number] = [
       form.delayKeywordRotationBatchMin ?? defaultFormData.delayKeywordRotationBatchMin,
       form.delayKeywordRotationBatchMax ?? defaultFormData.delayKeywordRotationBatchMax,
     ]
@@ -522,6 +456,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
             break
           }
           const item = current.items[index]
+          if (!item) throw new Error('关键词不存在或已移除')
           let usage = await this.loadKeywordRotationUsage()
           if (usage.count >= config.dailyLimit) {
             current = {
@@ -683,31 +618,27 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   private async readJobLibrary(): Promise<BossJobLibraryRecord[]> {
-    if (this.analysisCleanup) await this.analysisCleanup
+    if (this.analysisCleanup) return this.analysisCleanup
     const records = await counter.storageGet<unknown>(JOB_LIBRARY_STORAGE_KEY, [])
     assertJobLibrary(records)
-    if (this.analysisCleanup) {
-      await this.analysisCleanup
-      return this.readJobLibrary()
-    }
-    const cleaned = normalizeJobLibraryAnalysis(records, MATCH_SCORING_VERSION)
-    if (cleaned !== records) {
-      const cleanup = this.writeJobLibrary(cleaned)
+    if (this.analysisCleanup) return this.analysisCleanup
+    if (normalizeJobLibraryAnalysis(records, MATCH_SCORING_VERSION) !== records) {
+      const cleanup = this.mutateJobLibrary({ type: 'normalize' }).then((result) => result.records)
       this.analysisCleanup = cleanup
       const settled = () => {
         if (this.analysisCleanup === cleanup) this.analysisCleanup = null
       }
       void cleanup.then(settled, settled)
-      await this.waitForCollectionStorage(() => cleanup, '清理旧评分结果', null)
-      return cleaned
+      return this.waitForCollectionStorage(() => cleanup, '清理旧评分结果', null)
     }
     this.updateJobLibrarySummary(records)
     return records
   }
 
-  private async writeJobLibrary(records: BossJobLibraryRecord[]) {
-    await counter.storageSet(JOB_LIBRARY_STORAGE_KEY, jsonClone(records))
-    this.updateJobLibrarySummary(records)
+  private async mutateJobLibrary(mutation: JobLibraryMutation) {
+    const result = await counter.updateJobLibrary(mutation)
+    this.updateJobLibrarySummary(result.records)
+    return result
   }
 
   async captureNewJobs(
@@ -729,14 +660,15 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       const storedIds = new Set(stored.map((record) => record.encryptJobId))
       const unseen = unique.filter((item) => !storedIds.has(item.encryptJobId))
       if (!unseen.length) return 0
-      const merged = mergeJobRecords(
-        stored,
-        unseen,
-        keyword || new URL(location.href).searchParams.get('query') || '',
-        `auto_${Date.now()}`,
-      )
-      await this.waitForCollectionStorage(
-        () => this.writeJobLibrary(merged.records),
+      const merged = await this.waitForCollectionStorage(
+        () =>
+          this.mutateJobLibrary({
+            type: 'capture',
+            items: unseen,
+            newOnly: true,
+            keyword: keyword || new URL(location.href).searchParams.get('query') || '',
+            batch: `auto_${Date.now()}`,
+          }),
         '保存新岗位',
         null,
       )
@@ -788,10 +720,11 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     this.jobLibraryOpen.value = true
   }
 
-  setAutoCaptureEnabled(enabled: boolean) {
+  async setAutoCaptureEnabled(enabled: boolean) {
+    await counter.storageSet(AUTO_CAPTURE_STORAGE_KEY, enabled)
     this.autoCaptureEnabled.value = enabled
     if (enabled) {
-      return this.captureNewJobs(this._jobList.value).catch((error) => {
+      await this.captureNewJobs(this._jobList.value).catch((error) => {
         logger.error('自动保存新岗位失败', error)
         return 0
       })
@@ -1067,9 +1000,9 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           )
           if (this.collectionStopRequested) break
           const storedIds = new Set(stored.map((record) => record.encryptJobId))
-          const merged = mergeJobRecords(stored, current, keyword, run.id)
-          await this.waitForCollectionStorage(
-            () => this.writeJobLibrary(merged.records),
+          const merged = await this.waitForCollectionStorage(
+            () =>
+              this.mutateJobLibrary({ type: 'capture', items: current, keyword, batch: run.id }),
             '保存当前岗位',
           )
           run.savedCount = merged.records.length
@@ -1217,22 +1150,22 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         }
       }
     }
-    // 只回写详情字段，保留等待期间用户更新的审核和发送记录。
-    const latest = await this.waitForCollectionStorage(
-      () => this.readJobLibrary(),
-      '读取最新岗位记录',
+    const result = await this.waitForCollectionStorage(
+      () =>
+        this.mutateJobLibrary({
+          type: 'detail',
+          jobId: record.encryptJobId,
+          patch: {
+            detail: record.detail,
+            detailStatus: record.detailStatus,
+            detailRetryCount: record.detailRetryCount,
+            failureReason: record.failureReason,
+          },
+        }),
+      '保存详情',
       run,
     )
-    const stored = latest.find((item) => item.encryptJobId === record.encryptJobId)
-    if (!stored) throw new Error('待补全岗位已不在本地库；已停止，未覆盖其他数据')
-    Object.assign(stored, {
-      detail: record.detail,
-      detailStatus: record.detailStatus,
-      detailRetryCount: record.detailRetryCount,
-      failureReason: record.failureReason,
-    })
-    await this.waitForCollectionStorage(() => this.writeJobLibrary(latest), '保存详情', run)
-    return stored
+    return result.records.find((item) => item.encryptJobId === record.encryptJobId)!
   }
 
   async completeCollectedDetails(options: { availableOnly?: boolean } = {}) {
@@ -1374,16 +1307,17 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     await this.onJobCardClick(record.key)
     const detail = job.rawData.detail as BossZpDetailData | undefined
     if (!detail?.jobInfo?.postDescription?.trim()) throw new Error('岗位详情未返回完整 JD')
-    const latest = await this.waitForCollectionStorage(
-      () => this.readJobLibrary(),
-      '读取最新岗位记录',
+    const result = await this.waitForCollectionStorage(
+      () =>
+        this.mutateJobLibrary({
+          type: 'detail',
+          jobId,
+          patch: { detail, detailStatus: 'complete' },
+        }),
+      '保存详情',
       null,
     )
-    const stored = latest.find((item) => item.encryptJobId === jobId)
-    if (!stored) throw new Error('待补全岗位已不在本地库')
-    Object.assign(stored, { detail, detailStatus: 'complete', failureReason: undefined })
-    await this.waitForCollectionStorage(() => this.writeJobLibrary(latest), '保存详情', null)
-    return stored
+    return result.records.find((item) => item.encryptJobId === jobId)!
   }
 
   async getAnalysisHandoff() {
@@ -1395,89 +1329,48 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   getSavedJobData(record: BossJobLibraryRecord): WorkflowData<BossJobLibraryRecord, {}> {
-    const job = convertBossZpJobItemToJobData(record.snapshot)
-    return {
-      jobData: record.detail ? applySavedJobDetail(job, record.detail) : job,
-      rawData: record,
-      state: {},
-    }
+    return getSavedJobData(record)
   }
 
-  async saveJobAnalysis(
-    jobId: string,
-    patch: {
-      analysisStatus: 'pending' | 'ready' | 'failed'
-      analysis?: Record<string, unknown>
-      finalGreeting?: string
-      analysisFailureReason?: string
-    },
-  ): Promise<boolean> {
+  async claimJobAnalysis(jobId: string, token: string, duration: number) {
+    return counter.claimJobAnalysis(jobId, token, duration)
+  }
+
+  async releaseJobAnalysis(jobId: string, token: string) {
+    await counter.releaseJobAnalysis(jobId, token)
+  }
+
+  async saveJobAnalysis(jobId: string, patch: JobAnalysisPatch): Promise<boolean> {
     if (
       (this.gatheringBusy.value &&
         !(this.collectionAnalysisRun && this.savedAnalyzer.busy.value)) ||
       this.collectionStoragePending
     )
       throw new Error('已有任务正在运行或等待保存，请稍后重试')
-    if (
-      !patch ||
-      !['pending', 'ready', 'failed'].includes(patch.analysisStatus) ||
-      (patch.analysis !== undefined &&
-        (!patch.analysis || typeof patch.analysis !== 'object' || Array.isArray(patch.analysis))) ||
-      (patch.finalGreeting !== undefined && typeof patch.finalGreeting !== 'string') ||
-      (patch.analysisFailureReason !== undefined && typeof patch.analysisFailureReason !== 'string')
+    const result = await this.waitForCollectionStorage(
+      () => this.mutateJobLibrary({ type: 'analysis', jobId, patch }),
+      '保存岗位分析',
+      null,
     )
-      throw new Error('分析结果格式异常；已保留原数据')
-    const records = jsonClone(
-      await this.waitForCollectionStorage(() => this.readJobLibrary(), '读取本地岗位库', null),
-    )
-    const record = records.find((item) => item.encryptJobId === jobId)
-    if (!record) throw new Error('未找到已保存岗位')
-    if (
-      record.reviewStatus !== 'pending' ||
-      record.sendStatus !== 'pending' ||
-      record.analysisStatus === 'ready'
-    )
-      return false
-    if (isJobExcluded(record)) return false
-    record.analysisStatus = patch.analysisStatus
-    if (patch.analysis !== undefined) record.analysis = jsonClone(patch.analysis)
-    if (patch.analysis?.passed === true && !record.matchedAt)
-      record.matchedAt = new Date().toISOString()
-    if (patch.finalGreeting !== undefined) record.finalGreeting = patch.finalGreeting
-    record.analysisFailureReason =
-      patch.analysisStatus === 'failed' ? patch.analysisFailureReason : undefined
-    await this.waitForCollectionStorage(() => this.writeJobLibrary(records), '保存岗位分析', null)
-    return true
+    return result.updated
   }
 
   async updateJobFunnelStage(jobId: string, stage: FunnelStage | null): Promise<boolean> {
     if (this.gatheringBusy.value || this.collectionStoragePending)
       throw new Error('已有任务正在运行或等待保存，请稍后重试')
-    if (stage !== null && !isFunnelStage(stage)) throw new Error('漏斗阶段无效')
-    const records = jsonClone(
-      await this.waitForCollectionStorage(() => this.readJobLibrary(), '读取本地岗位库', null),
+    await this.waitForCollectionStorage(
+      () => this.mutateJobLibrary({ type: 'funnel', jobId, stage }),
+      '保存漏斗阶段',
+      null,
     )
-    const record = records.find((item) => item.encryptJobId === jobId)
-    if (!record) throw new Error('未找到已保存岗位')
-    if (stage === null) delete record.manualFunnelStage
-    else record.manualFunnelStage = stage
-    await this.waitForCollectionStorage(() => this.writeJobLibrary(records), '保存漏斗阶段', null)
     return true
   }
 
   async updateJobProcessingStatus(jobId: string, status: 'active' | 'excluded'): Promise<boolean> {
     if (this.gatheringBusy.value || this.collectionStoragePending)
       throw new Error('A job task is running or its save is pending')
-    if (!isProcessingStatus(status)) throw new Error('Invalid job processing status')
-    const records = jsonClone(
-      await this.waitForCollectionStorage(() => this.readJobLibrary(), 'Read saved jobs', null),
-    )
-    const record = records.find((item) => item.encryptJobId === jobId)
-    if (!record) throw new Error('Saved job not found')
-    if (status === 'active') delete record.processingStatus
-    else record.processingStatus = status
     await this.waitForCollectionStorage(
-      () => this.writeJobLibrary(records),
+      () => this.mutateJobLibrary({ type: 'processing', jobId, status }),
       'Save job processing status',
       null,
     )
@@ -1547,6 +1440,15 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   private async mountRoute(path: string) {
+    if (!this.autoCaptureLoaded) {
+      try {
+        this.autoCaptureEnabled.value =
+          (await counter.storageGet<unknown>(AUTO_CAPTURE_STORAGE_KEY, false)) === true
+      } catch (error) {
+        logger.error('读取自动采集设置失败', error)
+      }
+      this.autoCaptureLoaded = true
+    }
     await this._initJobList()
     await this._initPage()
     await this._initPageChange()
@@ -1590,8 +1492,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
               {
                 type: 'alert',
                 id: 'filter-config-alert-enable',
-                title: '复选框打钩才会启用，别忘记打钩启用哦。保存也别忘了',
-                description: '排除和包含可点击切换，混合模式适用性过低难以配置不会考虑开发',
+                title: '关键词按排除处理，留空时不筛选；输入关键词即可生效。',
+                description: '下面的复选框用于启用其他筛选规则，修改后记得保存。',
                 color: 'success',
                 showIcon: true,
               },
@@ -1616,26 +1518,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
                     type: 'select',
                     key: 'hrPosition',
                   },
-                  conf.configLevel.intermediate && {
-                    type: 'select',
-                    key: 'jobAddress',
-                  },
                   {
                     type: 'div',
-                  },
-                ],
-              },
-              {
-                type: 'div',
-                class: 'flex gap-2 mt-3',
-                items: [
-                  conf.configLevel.intermediate && {
-                    type: 'salaryRange',
-                    key: 'salaryRange',
-                  },
-                  conf.configLevel.intermediate && {
-                    type: 'companySizeRange',
-                    key: 'companySizeRange',
                   },
                 ],
               },
@@ -1705,12 +1589,14 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
               {
                 type: 'div',
                 class: 'grid grid-cols-2 gap-3',
-                items: [
-                  ['delayCollectionScrollMin', '滚动最短间隔（秒）'],
-                  ['delayCollectionScrollMax', '滚动最长间隔（秒）'],
-                  ['delayCollectionDetailMin', '详情最短间隔（秒）'],
-                  ['delayCollectionDetailMax', '详情最长间隔（秒）'],
-                ].map(([key, label]) => ({
+                items: (
+                  [
+                    ['delayCollectionScrollMin', '滚动最短间隔（秒）'],
+                    ['delayCollectionScrollMax', '滚动最长间隔（秒）'],
+                    ['delayCollectionDetailMin', '详情最短间隔（秒）'],
+                    ['delayCollectionDetailMax', '详情最长间隔（秒）'],
+                  ] as const
+                ).map(([key, label]) => ({
                   type: 'inputNumber' as const,
                   key,
                   fieldProps: { label },
@@ -1727,12 +1613,14 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
                 type: 'div',
                 class: 'grid grid-cols-1 sm:grid-cols-2 gap-3',
                 items: [
-                  ...[
-                    ['delayKeywordRotationMin', '关键词最短间隔（秒）'],
-                    ['delayKeywordRotationMax', '关键词最长间隔（秒）'],
-                    ['delayKeywordRotationBatchMin', '批次最短休息（秒）'],
-                    ['delayKeywordRotationBatchMax', '批次最长休息（秒）'],
-                  ].map(([key, label]) => ({
+                  ...(
+                    [
+                      ['delayKeywordRotationMin', '关键词最短间隔（秒）'],
+                      ['delayKeywordRotationMax', '关键词最长间隔（秒）'],
+                      ['delayKeywordRotationBatchMin', '批次最短休息（秒）'],
+                      ['delayKeywordRotationBatchMax', '批次最长休息（秒）'],
+                    ] as const
+                  ).map(([key, label]) => ({
                     type: 'inputNumber' as const,
                     key,
                     fieldProps: { label },
@@ -1830,7 +1718,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       ]
     })
   }
-  async onJobCardClick(key: string, shouldStop?: () => boolean) {
+  override async onJobCardClick(key: string, shouldStop?: () => boolean) {
     // const detail = await requestDetail({
     //   securityId: job.rawData.jobitem.securityId,
     //   lid: job.rawData.jobitem.encryptJobId,
@@ -1993,63 +1881,88 @@ export async function runBoss(script: HTMLScriptElement) {
   const state: ExecutorState = { ready: false, error: '', lastError: '' }
   let initialized = false
   let routeMount: Promise<void> | undefined
-  const [provideExecutor] = defineProxy(() => createExecutorBridge(bossHelpCtx, state), {
-    namespace: EXECUTOR_NAMESPACE,
-  })
+  let initialization: Promise<void> | undefined
+  let routeHooked = false
+  const [provideExecutor] = defineProxy(
+    () => createExecutorBridge(bossHelpCtx, state, initialize),
+    {
+      namespace: EXECUTOR_NAMESPACE,
+    },
+  )
   provideExecutor(new ProvideContentScriptAdapter(script))
 
-  try {
-    bossHelpCtx.rootVue = await getRootVue()
-    bossHelpCtx.workflow = await bossWorkflow(bossHelpCtx)
-
-    bossHelpCtx.rootVue.$router.afterHooks.push(
-      (to: {
-        name: string
-        meta: {
-          notLogin: boolean
-          wrapClassName: string
-          scrollBehavior: string
-          hideFooter: boolean
-          headerV2: boolean
-        }
-        path: string
-        hash: string
-        query: {
-          ka: string
-        }
-        params: {}
-        fullPath: string
-      }) => {
-        state.ready = false
-        const mounting = bossHelpCtx.onMount(to.path)
-        routeMount = mounting
-        void mounting
-          .then(() => {
-            if (initialized && routeMount === mounting) {
-              state.ready = true
-              state.error = ''
-            }
-          })
-          .catch((error) => {
-            if (routeMount === mounting) {
-              state.ready = false
-              state.error = error instanceof Error ? error.message : String(error)
-            }
-          })
-      },
-    )
-
-    await run(bossHelpCtx)
-    initialized = true
-    while (routeMount) {
-      const mounting = routeMount
-      await mounting
-      if (routeMount === mounting) break
+  async function initialize() {
+    if (initialization) return initialization
+    initialized = false
+    routeMount = undefined
+    initialization = initializeBusiness()
+    try {
+      await initialization
+    } finally {
+      initialization = undefined
     }
-    state.ready = true
-    state.error = ''
-  } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error)
-    logger.error('Executor initialization failed', error)
   }
+
+  async function initializeBusiness() {
+    state.error = ''
+    try {
+      bossHelpCtx.rootVue ??= await getRootVue()
+      bossHelpCtx.workflow ??= await bossWorkflow(bossHelpCtx)
+
+      if (!routeHooked) {
+        bossHelpCtx.rootVue.$router.afterHooks.push(
+          (to: {
+            name: string
+            meta: {
+              notLogin: boolean
+              wrapClassName: string
+              scrollBehavior: string
+              hideFooter: boolean
+              headerV2: boolean
+            }
+            path: string
+            hash: string
+            query: {
+              ka: string
+            }
+            params: {}
+            fullPath: string
+          }) => {
+            state.ready = false
+            const mounting = bossHelpCtx.onMount(to.path)
+            routeMount = mounting
+            void mounting
+              .then(() => {
+                if (initialized && routeMount === mounting) {
+                  state.ready = true
+                  state.error = ''
+                }
+              })
+              .catch((error) => {
+                if (routeMount === mounting) {
+                  state.ready = false
+                  state.error = error instanceof Error ? error.message : String(error)
+                }
+              })
+          },
+        )
+        routeHooked = true
+      }
+
+      await run(bossHelpCtx)
+      initialized = true
+      while (routeMount) {
+        const mounting = routeMount
+        await mounting
+        if (routeMount === mounting) break
+      }
+      state.ready = true
+      state.error = ''
+    } catch (error) {
+      state.ready = false
+      state.error = error instanceof Error ? error.message : String(error)
+      logger.error('Executor initialization failed', error)
+    }
+  }
+  await initialize()
 }

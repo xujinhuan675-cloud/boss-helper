@@ -174,7 +174,6 @@ async function testJob() {
         {
           prompt: message.value,
           enable: true,
-          model: conf.formData[props.data].model,
         },
         props.data === 'aiFiltering' ? 'filtering' : 'greetings',
         {
@@ -207,7 +206,7 @@ async function testJob() {
           const { message } = parseFiltering(content[0])
           content[0] = message ?? content[0]
         }
-        testDataContent[item.key].push({
+        ;(testDataContent[item.key] ??= []).push({
           time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
           reasoning_content: content[1],
           content: content[0],

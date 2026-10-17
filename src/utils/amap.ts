@@ -86,15 +86,7 @@ export async function amapDistance(destination: string) {
   const { formData } = useConf()
   const { origins, key } = formData.amap
 
-  const [res0, res1, res3] = await Promise.all([
-    fetchDistance(origins, destination, 0, key),
-    fetchDistance(origins, destination, 1, key),
-    fetchDistance(origins, destination, 3, key),
-  ])
-
   return {
-    straight: extractResult(res0),
-    driving: extractResult(res1),
-    walking: extractResult(res3),
+    straight: extractResult(await fetchDistance(origins, destination, 0, key)),
   }
 }

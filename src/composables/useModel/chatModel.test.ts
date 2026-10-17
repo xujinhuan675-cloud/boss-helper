@@ -29,7 +29,7 @@ const built = await Bun.build({
         build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({
           contents:
             path === 'ai'
-              ? 'export class ToolLoopAgent { constructor(options) { this.options = options } stream(options) { globalThis.__chatMessages = options.messages; return { toUIMessageStream: async function* () {} } } }; export const Output = {json:()=>({}),text:()=>({})}; export const createIdGenerator = () => () => "test-id"; export const APICallError={}; export const isReasoningUIPart=()=>false; export const isTextUIPart=()=>false'
+              ? 'export class ToolLoopAgent { constructor(options) { this.options = options } stream(options) { globalThis.__chatMessages = options.messages; return { toUIMessageStream: async function* () { yield* globalThis.__chatChunks ?? [] } } } }; export const Output = {json:()=>({}),text:()=>({})}; export const createIdGenerator = () => () => "test-id"; export const APICallError={}; export const isReasoningUIPart=part=>part.type==="reasoning"; export const isTextUIPart=part=>part.type==="text"'
               : path === 'message'
                 ? 'export const counter = { fetchText: async args => { globalThis.__backgroundFetch = args; return { status: 200, text: "data: [DONE]\\n\\n", contentType: "text/event-stream" } } }'
                 : 'export const createOpenAI = options => { globalThis.__openaiOptions = options; return {chat: model => ({model})} }',
@@ -62,6 +62,37 @@ new Function(
 const { ChatModel } = compiled.exports
 
 describe('model configuration snapshot', () => {
+  it('ignores empty stream endings and completes received reasoning and text parts', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+      resumes: { currentResume: ref(null) },
+    })
+    chat.createAgent({ prompt: [], enable: true }, 'greetings')
+    globalThis.__chatChunks = [
+      { type: 'reasoning-end' },
+      { type: 'text-end' },
+      { type: 'reasoning-delta', delta: 'reason' },
+      { type: 'reasoning-end' },
+      { type: 'text-delta', delta: 'hello' },
+      { type: 'text-end' },
+    ]
+    try {
+      await chat.chat('greetings', { jobData: { key: 'job', brand: {}, boss: {} } })
+      const state = chat.states.get('job')
+      expect(state.status).toBe('ready')
+      expect(state.messages.at(-1).parts).toEqual([
+        { type: 'reasoning', text: 'reason', state: 'done' },
+        { type: 'text', text: 'hello', state: 'done' },
+      ])
+    } finally {
+      delete globalThis.__chatChunks
+    }
+  })
+
   it('generates from resume messages without requiring a job or adding job chat history', async () => {
     const chat = new ChatModel({
       models: {
@@ -115,10 +146,9 @@ describe('model configuration snapshot', () => {
     const model = {
       key: 'model',
       name: 'original',
-      data: { model: 'original-model', other: { timeout: 60000 } },
+      data: { model: 'original-model', api_key: 'key', base_url: 'url', other: { timeout: 60000 } },
     }
     const settings = {
-      model: 'model',
       prompt: [{ role: 'user', content: 'original prompt' }],
       enable: true,
     }
@@ -152,7 +182,22 @@ describe('model configuration snapshot', () => {
       models: { modelData: ref(models), getDefaultModelKey: () => 'active' },
     })
     expect(chat.createAgent({ model: 'legacy', prompt: [], enable: true }, 'filtering')).toBe(true)
-    expect(chat.agents.get('filtering')[2].model).toBe('active')
+    expect(chat.agents.get('filtering')[1].key).toBe('active')
+  })
+
+  it('ignores legacy prompt model overrides when resolving the configured model list', () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'configured', api_key: 'key', base_url: 'url' } },
+          { key: 'legacy', data: { model: 'old', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+    })
+    for (const role of ['filtering', 'greetings', 'reply', 'keywords']) {
+      expect(chat.createAgent({ model: 'legacy', prompt: [], enable: true }, role)).toBe(true)
+      expect(chat.agents.get(role)[1].key).toBe('active')
+    }
   })
 
   it('appends the saved full resume to filtering and greeting requests', async () => {

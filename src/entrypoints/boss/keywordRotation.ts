@@ -134,7 +134,7 @@ export function resetKeywordRotationPlan(
 export function nextKeywordIndex(plan: KeywordRotationPlan): number {
   for (let index = Math.max(0, plan.cursor); index < plan.items.length; index++) {
     const item = plan.items[index]
-    if (item.enabled && ['pending', 'running', 'failed'].includes(item.status)) return index
+    if (item?.enabled && ['pending', 'running', 'failed'].includes(item.status)) return index
   }
   return -1
 }

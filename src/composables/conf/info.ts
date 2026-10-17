@@ -89,10 +89,6 @@ export const formInfoData: Record<string, any> = {
     'data-help':
       'Hr职位一定包含/排除在集合中，精确匹配, 不在内置中可手动输入,能实现只向经理等进行投递，毕竟人事干的不一定是人事',
   },
-  jobAddress: {
-    label: '工作地址',
-    'data-help': '只能为包含模式, 即投递工作地址当中必须包含当前内容中的任意一项，否则排除',
-  },
   customGreeting: {
     label: '自定义招呼语',
     'data-help':
@@ -145,10 +141,6 @@ export const formInfoData: Record<string, any> = {
     'data-help': '拿这些数据去训练个Ai岂不是美滋滋咯？',
   },
   amap: {
-    enable: {
-      label: '启用',
-      'data-help': '启用高德地图, 用于获取工作地址的距离和时间进行筛选，需要配置自己的key',
-    },
     key: {
       label: '高德地图key',
       'data-help': '高德地图key, 需要自己申请',
@@ -158,26 +150,8 @@ export const formInfoData: Record<string, any> = {
       'data-help': '起点经纬度, 经度和纬度用","分隔, 可以输入完整地址点击按钮自动获取',
     },
     straightDistance: {
-      label: '直线距离',
-      'data-help': '直线距离, 为0禁用，单位: km',
-    },
-    drivingDistance: {
-      label: '驾车距离',
-      'data-help':
-        '驾车距离, 为0禁用，会考虑当前时间的路况，不同时间结果不一样，策略为"速度优先", 单位: km',
-    },
-    drivingDuration: {
-      label: '驾车时间',
-      'data-help':
-        '驾车时间, 为0禁用，会考虑当前时间的路况，不同时间结果不一样，策略为"速度优先", 单位: 分钟',
-    },
-    walkingDistance: {
-      label: '步行距离',
-      'data-help': '步行距离, 为0禁用，单位: km',
-    },
-    walkingDuration: {
-      label: '步行时间',
-      'data-help': '步行时间, 为0禁用，单位: 分钟',
+      label: '最大直线距离',
+      'data-help': '最大直线距离, 为0不筛选，单位: km',
     },
   },
 }
@@ -185,49 +159,22 @@ export const formInfoData: Record<string, any> = {
 export const defaultFormData: FormData = {
   configLevel: 'beginner',
   company: {
-    include: false,
     value: [],
     options: [],
-    enable: false,
   },
   jobTitle: {
-    include: true,
     value: [],
     options: [],
-    enable: false,
   },
   jobContent: {
-    include: false,
     value: [],
     options: [],
-    enable: false,
   },
   hrPosition: {
-    include: true,
     value: [],
     options: ['经理', '主管', '法人', '人力资源主管', 'hr', '招聘专员'],
-    enable: false,
   },
-  jobAddress: {
-    value: [],
-    options: [],
-    enable: false,
-    include: true,
-  },
-  salaryRange: {
-    value: [8, 13, false],
-    advancedValue: {
-      // 默认全部关闭，避免用户未配置而投递错误岗位
-      H: [0, 1, false],
-      D: [0, 1, false],
-      M: [0, 1, false],
-    },
-    enable: false,
-  },
-  companySizeRange: {
-    value: [500, 2000, true],
-    enable: false,
-  },
+  nativeSearch: null,
   customGreeting: {
     value: '',
     enable: false,
@@ -303,11 +250,6 @@ export const defaultFormData: FormData = {
     key: '',
     origins: '',
     straightDistance: 0,
-    drivingDistance: 0,
-    drivingDuration: 0,
-    walkingDistance: 0,
-    walkingDuration: 0,
-    enable: false,
   },
   record: {
     enable: false,

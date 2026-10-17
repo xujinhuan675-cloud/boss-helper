@@ -35,6 +35,18 @@ export class ContentCounter implements BackgroundCounter {
     return this.background.request(...args)
   }
 
+  async updateJobLibrary(...args: Parameters<BackgroundCounter['updateJobLibrary']>) {
+    return this.background.updateJobLibrary(...args)
+  }
+
+  async claimJobAnalysis(...args: Parameters<BackgroundCounter['claimJobAnalysis']>) {
+    return this.background.claimJobAnalysis(...args)
+  }
+
+  async releaseJobAnalysis(...args: Parameters<BackgroundCounter['releaseJobAnalysis']>) {
+    return this.background.releaseJobAnalysis(...args)
+  }
+
   async fetchText(...args: Parameters<BackgroundCounter['fetchText']>) {
     return this.background.fetchText(...args)
   }

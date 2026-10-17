@@ -4,10 +4,10 @@ import {
   Bot,
   BriefcaseBusiness,
   ClipboardList,
-  ExternalLink,
   FileUser,
+  Filter,
   Info,
-  ListChecks,
+  LayoutDashboard,
   Moon,
   RefreshCw,
   Settings2,
@@ -21,15 +21,15 @@ import { Logs } from './Logs'
 import { Models } from './Models'
 import { Resumes } from './Resumes'
 import { Settings } from './Settings'
-import { openBoss, openWorkbench, refreshTabs, selectTab } from './store'
+import { openBoss, openWorkbench, reconnectExecutor, selectTab } from './store'
 import { Tasks } from './Tasks'
 import { useWorkbench } from './useWorkbench'
 
 const views = [
-  { id: 'tasks', label: '任务', icon: ListChecks },
-  { id: 'jobs', label: '岗位库', icon: BriefcaseBusiness },
+  { id: 'filters', label: '岗位筛选', icon: Filter },
   { id: 'resumes', label: '简历', icon: FileUser },
   { id: 'models', label: '模型与提示词', icon: Bot },
+  { id: 'jobs', label: '岗位库', icon: BriefcaseBusiness },
   { id: 'settings', label: '任务设置', icon: Settings2 },
   { id: 'logs', label: '运行日志', icon: ClipboardList },
 ] as const
@@ -38,24 +38,29 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
   const state = useWorkbench()
   const compact = mode === 'sidepanel'
   const [view, setView] = useState(() =>
-    views.some((item) => item.id === location.hash.slice(1)) ? location.hash.slice(1) : 'tasks',
+    views.some((item) => item.id === location.hash.slice(1)) ? location.hash.slice(1) : 'jobs',
   )
   const [narrow, setNarrow] = useState(window.innerWidth <= 760)
   const [dark, setDark] = useState(() => localStorage.getItem('boss-helper-theme') === 'dark')
-  const notice = state.error || state.connectionError || state.runtime?.lastError
+  const notice = state.error || (compact ? state.connectionError || state.runtime?.lastError : '')
   useEffect(() => {
     const query = matchMedia('(max-width: 760px)')
     const resized = () => setNarrow(query.matches)
     query.addEventListener('change', resized)
     const route = () => {
-      if (views.some((item) => item.id === location.hash.slice(1))) setView(location.hash.slice(1))
+      const requested = location.hash.slice(1)
+      const next = views.some((item) => item.id === requested) ? requested : 'jobs'
+      setView(next)
+      if (requested !== next && !compact)
+        location.replace(`${location.pathname}${location.search}#${next}`)
     }
+    route()
     window.addEventListener('hashchange', route)
     return () => {
       query.removeEventListener('change', resized)
       window.removeEventListener('hashchange', route)
     }
-  }, [])
+  }, [compact])
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
     localStorage.setItem('boss-helper-theme', dark ? 'dark' : 'light')
@@ -63,16 +68,57 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
 
   return (
     <div className={compact ? 'sidepanel' : 'workbench-shell'}>
-      <Toast.Provider />
-      <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-border bg-background px-4 sm:px-6">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <img src="/icons/48.png" alt="" className="size-8 shrink-0" />
-          <span className="truncate text-lg font-semibold">BossHelper</span>
-        </div>
+      <Toast.Provider placement="top end" />
+      <header
+        className={`sticky top-0 z-20 flex items-center border-b border-border bg-background ${compact ? 'h-12 gap-1 px-2' : 'h-16 justify-between gap-3 px-4 sm:px-6'}`}
+      >
+        {!compact && (
+          <div className="flex min-w-0 items-center gap-2.5">
+            <img src="/icons/logo.png" alt="" className="size-8 shrink-0" />
+            <span className="truncate text-lg font-semibold">OfferHunt</span>
+          </div>
+        )}
+        {compact && (
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            <div className="min-w-0 flex-1">
+              <SelectField
+                label="BOSS 岗位页"
+                hideLabel
+                value={state.tabId === null ? 'none' : String(state.tabId)}
+                options={
+                  state.tabs.length
+                    ? state.tabs.map((tab) => ({ value: String(tab.id), label: tab.title }))
+                    : [{ value: 'none', label: 'BOSS 岗位页' }]
+                }
+                onChange={(value) => selectTab(Number(value))}
+                disabled={state.saving || !state.tabs.length}
+              />
+            </div>
+            <IconButton
+              label="重新连接"
+              onPress={() => {
+                void act(reconnectExecutor)
+              }}
+              disabled={state.saving}
+            >
+              <RefreshCw size={17} />
+            </IconButton>
+            <IconButton
+              label="打开 BOSS 岗位页"
+              onPress={() => {
+                void openBoss()
+              }}
+            >
+              <BriefcaseBusiness size={17} />
+            </IconButton>
+          </div>
+        )}
         <div className="flex shrink-0 items-center gap-1">
-          <Chip size="sm" color={state.connected ? 'success' : 'default'}>
-            {state.connected ? '已连接' : '未连接'}
-          </Chip>
+          {compact && (
+            <Chip size="sm" color={state.connected ? 'success' : 'default'}>
+              {state.connected ? '已连接' : '未连接'}
+            </Chip>
+          )}
           {(notice || state.settingsWarning) && (
             <Popover>
               <Tooltip>
@@ -105,7 +151,7 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
                 void openWorkbench()
               }}
             >
-              <ExternalLink size={17} />
+              <LayoutDashboard size={17} />
             </IconButton>
           )}
         </div>
@@ -117,47 +163,9 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
         </output>
       ) : (
         <>
-          <div
-            className={`execution-toolbar border-b border-border bg-surface px-4 py-3 ${compact ? '' : 'sm:px-6'}`}
-          >
-            <div className="min-w-0 flex-1">
-              <SelectField
-                label="执行标签页"
-                value={state.tabId === null ? 'none' : String(state.tabId)}
-                options={
-                  state.tabs.length
-                    ? state.tabs.map((tab) => ({ value: String(tab.id), label: tab.title }))
-                    : [{ value: 'none', label: '没有打开的 BOSS 标签页' }]
-                }
-                onChange={(value) => selectTab(Number(value))}
-                disabled={state.saving || !state.tabs.length}
-              />
-            </div>
-            <div className="flex h-9 shrink-0 items-center gap-1">
-              <IconButton
-                label="重新连接"
-                onPress={() => {
-                  void act(refreshTabs)
-                }}
-                disabled={state.saving}
-              >
-                <RefreshCw size={17} />
-              </IconButton>
-              <Button
-                size="sm"
-                variant="secondary"
-                onPress={() => {
-                  void openBoss()
-                }}
-              >
-                <ExternalLink size={15} />
-                BOSS
-              </Button>
-            </div>
-          </div>
           {compact ? (
             <div className="p-4">
-              <Tasks compact />
+              <Tasks />
             </div>
           ) : (
             <Tabs
@@ -172,17 +180,14 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
               <Tabs.ListContainer>
                 <Tabs.List aria-label="工作台导航">
                   {views.map(({ id, label, icon: Icon }) => (
-                    <Tabs.Tab key={id} id={id}>
-                      <Icon size={18} />
+                    <Tabs.Tab key={id} id={id} className="workbench-nav-item">
+                      <Icon size={18} aria-hidden="true" className="shrink-0" />
                       <span>{label}</span>
                       <Tabs.Indicator />
                     </Tabs.Tab>
                   ))}
                 </Tabs.List>
               </Tabs.ListContainer>
-              <Tabs.Panel id="tasks" className="workbench-panel">
-                <Tasks />
-              </Tabs.Panel>
               <Tabs.Panel id="jobs" className="workbench-panel">
                 <Jobs />
               </Tabs.Panel>
@@ -194,6 +199,9 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
               </Tabs.Panel>
               <Tabs.Panel id="settings" className="workbench-panel">
                 <Settings />
+              </Tabs.Panel>
+              <Tabs.Panel id="filters" className="workbench-panel">
+                <Settings page="filters" />
               </Tabs.Panel>
               <Tabs.Panel id="logs" className="workbench-panel">
                 <Logs />

@@ -86,7 +86,6 @@ async function start() {
   actionError.value = ''
   try {
     const completedRun = await analyzer.start({
-      modelKey: modelKey.value,
       limit: limit.value,
     })
     await refreshCount()

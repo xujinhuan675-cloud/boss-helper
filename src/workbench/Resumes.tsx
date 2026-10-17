@@ -6,7 +6,7 @@ import { useState } from 'react'
 import type { ResumeRecord } from '@/composables/useResume'
 
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
-import { command, copyResume, deleteResume, openBoss, saveResume, selectResume } from './store'
+import { command, copyResume, deleteResume, saveKeywords, saveResume, selectResume } from './store'
 import { useWorkbench } from './useWorkbench'
 
 export function Resumes() {
@@ -33,11 +33,7 @@ export function Resumes() {
       runtime?.workflow?.status === 'running'
     )
   const current = library.resumes.find((resume) => resume.id === library.currentResumeId)
-  const keywords =
-    keywordDraft ??
-    runtime?.keywords ??
-    runtime?.keywordRotation?.items.map((item) => item.keyword).join('\n') ??
-    ''
+  const keywords = keywordDraft ?? state.keywords
 
   async function save() {
     if (busy || !editing) return
@@ -192,9 +188,7 @@ export function Resumes() {
           <h2 className="text-lg font-semibold">岗位关键词</h2>
           <Button
             variant="secondary"
-            isDisabled={
-              busy || !state.connected || !(editing ? editing.content : current?.content)?.trim()
-            }
+            isDisabled={busy || !(editing ? editing.content : current?.content)?.trim()}
             isPending={!!runtime?.keywordExtractionBusy}
             onPress={() => {
               void act(() =>
@@ -214,35 +208,21 @@ export function Resumes() {
         <TextField
           value={keywords}
           onChange={setKeywordDraft}
-          isDisabled={busy || !state.connected}
+          isDisabled={state.loading || state.saving}
         >
-          <Label>岗位搜索关键词</Label>
+          <Label>岗位搜索关键词（每行一个）</Label>
           <TextArea rows={8} />
         </TextField>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {!state.connected ? (
-            <Button
-              variant="tertiary"
-              onPress={() => {
-                void openBoss()
-              }}
-            >
-              连接 BOSS 页面
-            </Button>
-          ) : (
-            <output className="text-sm text-muted" aria-live="polite">
-              {runtime?.keywordExtractionBusy
-                ? '正在提取关键词'
-                : `${keywords.split(/\n/).filter((item) => item.trim()).length} 个关键词`}
-            </output>
-          )}
+          <output className="text-sm text-muted" aria-live="polite">
+            {runtime?.keywordExtractionBusy
+              ? '正在提取关键词'
+              : `${keywords.split(/\n/).filter((item) => item.trim()).length} 个关键词`}
+          </output>
           <Button
-            isDisabled={busy || !state.connected || !keywords.trim()}
+            isDisabled={busy || !keywords.trim()}
             onPress={() => {
-              void act(
-                () => command({ type: 'saveKeywords', input: keywords }),
-                '关键词已保存',
-              ).then((ok) => {
+              void act(() => saveKeywords(keywords), '关键词已保存').then((ok) => {
                 if (ok) setKeywordDraft(null)
               })
             }}

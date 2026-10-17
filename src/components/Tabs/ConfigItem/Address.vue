@@ -42,7 +42,7 @@ function gotoAmapDevSetting() {
       show-icon
       type="info"
       title="使用高德地图前, 需自行创建key (每日免费配额足够使用)"
-      description="推荐结合工作地址包含使用, 创建路径: 创建应用 -> 添加key -> Web服务"
+      description="创建路径: 创建应用 -> 添加key -> Web服务"
       :actions="[
         {
           label: '前往创建',
@@ -61,18 +61,11 @@ function gotoAmapDevSetting() {
     >
       <template #description>
         <div class="grid grid-cols-2 gap-2">
-          <span v-pre>直线距离: {{ amap.straightDistance }}km</span>
-          <span v-pre>驾车距离: {{ amap.drivingDistance }}km</span>
-          <span v-pre>驾车时间: {{ amap.drivingDuration }}分钟</span>
-          <span v-pre>步行距离: {{ amap.walkingDistance }}km</span>
-          <span v-pre>步行时间: {{ amap.walkingDuration }}分钟</span>
+          <span v-pre>最大直线距离: {{ amap.straightDistance }}km</span>
         </div>
       </template>
     </Alert>
     <div class="flex gap-3 items-center">
-      <span v-bind="formInfoData.amap.enable">
-        <UCheckbox v-model="conf.formData.amap.enable" />
-      </span>
       <UFormField v-bind="formInfoData.amap.key">
         <UInput v-model="conf.formData.amap.key" />
       </UFormField>
@@ -101,57 +94,6 @@ function gotoAmapDevSetting() {
             :step="1"
           />
           <UBadge label="km" />
-        </UFieldGroup>
-      </UFormField>
-
-      <UFormField v-bind="formInfoData.amap.drivingDistance">
-        <UFieldGroup>
-          <UInputNumber
-            v-model="conf.formData.amap.drivingDistance"
-            :precision="1"
-            :max="1000"
-            :min="0"
-            :step="1"
-          />
-          <UBadge label="km" />
-        </UFieldGroup>
-      </UFormField>
-      <UFormField v-bind="formInfoData.amap.drivingDuration">
-        <UFieldGroup>
-          <UInputNumber
-            v-model="conf.formData.amap.drivingDuration"
-            :precision="2"
-            :max="1440"
-            :min="0"
-            :step="30"
-          />
-
-          <UBadge label="分钟" />
-        </UFieldGroup>
-      </UFormField>
-
-      <UFormField v-bind="formInfoData.amap.walkingDistance">
-        <UFieldGroup>
-          <UInputNumber
-            v-model="conf.formData.amap.walkingDistance"
-            :precision="1"
-            :max="1000"
-            :min="0"
-            :step="1"
-          />
-          <UBadge label="km" />
-        </UFieldGroup>
-      </UFormField>
-      <UFormField v-bind="formInfoData.amap.walkingDuration">
-        <UFieldGroup>
-          <UInputNumber
-            v-model="conf.formData.amap.walkingDuration"
-            :precision="2"
-            :max="1440"
-            :min="0"
-            :step="30"
-          />
-          <UBadge label="分钟" />
         </UFieldGroup>
       </UFormField>
     </div>

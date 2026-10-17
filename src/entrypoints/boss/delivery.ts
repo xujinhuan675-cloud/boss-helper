@@ -31,8 +31,6 @@ export const bossWorkflow = defineTaskWorkflow<BossHelperCtx, BoosJobData>(
   tasks.SameHrFilter(), // 相同hr过滤
   tasks.jobTitle(), // 岗位名筛选
   tasks.company(), // 公司名筛选
-  tasks.salaryRange(), // 薪资筛选
-  tasks.companySizeRange(), // 公司规模筛选
   tasks.goldHunterFilter(), // 猎头过滤
   defineTaskHandler(
     '岗位详情获取',
@@ -46,7 +44,6 @@ export const bossWorkflow = defineTaskWorkflow<BossHelperCtx, BoosJobData>(
   ), // 获取岗位详情
   tasks.activityFilter({ deps: ['岗位详情获取'] }), // 活跃度过滤
   tasks.hrPosition({ deps: ['岗位详情获取'] }), // Hr职位筛选
-  tasks.jobAddress({ deps: ['岗位详情获取'] }), // 工作地址筛选
   tasks.jobFriendStatus({ deps: ['岗位详情获取'] }), // 好友状态过滤
   tasks.jobContent({ deps: ['岗位详情获取'] }), // 工作内容筛选
 

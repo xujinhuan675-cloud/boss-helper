@@ -42,7 +42,7 @@ export function parseFiltering(content: string) {
   const dimensions = MATCH_DIMENSIONS.map((definition) => {
     const items = value.dimensions!.filter((item) => item?.key === definition.key)
     if (items.length !== 1) throw new Error(`评分维度缺失或重复：${definition.label}`)
-    const item = items[0]
+    const item = items[0]!
     if (
       !isText(item.reason) ||
       (item.score !== null &&
@@ -81,10 +81,10 @@ export function parseFiltering(content: string) {
   const hardRequirementFailed = res.hardRequirements.some((item) => item.status === 'unmet')
   const message = [
     `${needsConfirmation ? '暂定匹配分' : '匹配分'} ${rating}/100`,
-    ...dimensions.map(
-      (item, index) =>
-        `${MATCH_DIMENSIONS[index].label}：${item.score ?? '待确认'}/${MATCH_DIMENSIONS[index].maxScore}，${item.reason}`,
-    ),
+    ...dimensions.map((item, index) => {
+      const definition = MATCH_DIMENSIONS[index]!
+      return `${definition.label}：${item.score ?? '待确认'}/${definition.maxScore}，${item.reason}`
+    }),
     ...res.hardRequirements.map(
       (item) =>
         `硬性条件：${item.requirement}（${{ met: '满足', unmet: '不满足', unknown: '待确认' }[item.status]}），${item.reason}`,

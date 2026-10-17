@@ -1,7 +1,8 @@
 import type { ModelConf } from '@/composables/useModel'
-import type { FormData, FormDataRange } from '@/types/formData'
+import type { FormData } from '@/types/formData'
 
 import { validateMatchThreshold } from '../composables/useApplying/scoring'
+import { isNativeSearchFilters } from '../entrypoints/boss/nativeSearch'
 import { isPlainObject } from '../utils/deepmerge'
 
 export function validateModels(value: unknown): asserts value is ModelConf[] {
@@ -46,27 +47,13 @@ export function parseObject(text: string, label: string): Record<string, unknown
   return value
 }
 
-function range(value: unknown): value is FormDataRange {
-  return (
-    Array.isArray(value) &&
-    value.length === 3 &&
-    typeof value[0] === 'number' &&
-    Number.isFinite(value[0]) &&
-    value[0] >= 0 &&
-    typeof value[1] === 'number' &&
-    Number.isFinite(value[1]) &&
-    value[1] >= value[0] &&
-    typeof value[2] === 'boolean'
-  )
-}
-
 export function validateConfig(config: FormData) {
-  for (const key of ['company', 'jobTitle', 'jobContent', 'hrPosition', 'jobAddress'] as const) {
+  if (config.nativeSearch !== null && !isNativeSearchFilters(config.nativeSearch))
+    throw new Error('BOSS 原生筛选配置格式无效')
+  for (const key of ['company', 'jobTitle', 'jobContent', 'hrPosition'] as const) {
     const filter = config[key]
     if (
       !isPlainObject(filter) ||
-      typeof filter.enable !== 'boolean' ||
-      typeof filter.include !== 'boolean' ||
       !Array.isArray(filter.value) ||
       !filter.value.every((item) => typeof item === 'string') ||
       !Array.isArray(filter.options) ||
@@ -74,20 +61,6 @@ export function validateConfig(config: FormData) {
     )
       throw new Error(`${key} 筛选配置格式无效`)
   }
-  if (
-    !isPlainObject(config.salaryRange) ||
-    typeof config.salaryRange.enable !== 'boolean' ||
-    !range(config.salaryRange.value) ||
-    !isPlainObject(config.salaryRange.advancedValue) ||
-    !['H', 'D', 'M'].every((key) => range(config.salaryRange.advancedValue[key as 'H' | 'D' | 'M']))
-  )
-    throw new Error('薪资范围应为非负数，且上限不能小于下限')
-  if (
-    !isPlainObject(config.companySizeRange) ||
-    typeof config.companySizeRange.enable !== 'boolean' ||
-    !range(config.companySizeRange.value)
-  )
-    throw new Error('公司规模范围无效')
   for (const key of [
     'greetingVariable',
     'activityFilter',
@@ -157,7 +130,6 @@ export function validateConfig(config: FormData) {
     if (
       !isPlainObject(ai) ||
       typeof ai.enable !== 'boolean' ||
-      (ai.model !== undefined && typeof ai.model !== 'string') ||
       !Array.isArray(ai.prompt) ||
       !ai.prompt.every(
         (item) =>
@@ -187,21 +159,11 @@ export function validateConfig(config: FormData) {
     throw new Error('自定义招呼语格式无效，请补全图片或移除空图片消息')
   if (
     !isPlainObject(config.amap) ||
-    typeof config.amap.enable !== 'boolean' ||
     typeof config.amap.key !== 'string' ||
     typeof config.amap.origins !== 'string' ||
-    ![
-      'straightDistance',
-      'drivingDistance',
-      'drivingDuration',
-      'walkingDistance',
-      'walkingDuration',
-    ].every(
-      (key) =>
-        typeof config.amap[key as keyof FormData['amap']] === 'number' &&
-        Number.isFinite(config.amap[key as keyof FormData['amap']]) &&
-        Number(config.amap[key as keyof FormData['amap']]) >= 0,
-    )
+    typeof config.amap.straightDistance !== 'number' ||
+    !Number.isFinite(config.amap.straightDistance) ||
+    config.amap.straightDistance < 0
   )
     throw new Error('通勤配置格式无效')
   if (

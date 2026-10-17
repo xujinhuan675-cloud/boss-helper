@@ -9,6 +9,12 @@ import { defineConfig } from 'wxt'
 import { version } from './package.json'
 
 const matches = ['*://zhipin.com/*', '*://*.zhipin.com/*']
+const icons = {
+  16: 'icons/logo.png',
+  32: 'icons/logo.png',
+  48: 'icons/logo.png',
+  128: 'icons/logo.png',
+}
 
 export default defineConfig({
   srcDir: 'src',
@@ -128,8 +134,9 @@ export default defineConfig({
     default_locale: 'zh_CN',
     name: '__MSG_extName__',
     description: '__MSG_extDescription__',
+    icons,
     permissions: ['storage', 'notifications', ...(browser === 'firefox' ? [] : ['sidePanel'])],
-    action: { default_title: '打开 BossHelper 侧边栏' },
+    action: { default_title: '打开 OfferHunt 侧边栏', default_icon: icons },
     web_accessible_resources: [
       {
         resources: ['boss.js'],

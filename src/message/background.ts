@@ -2,8 +2,13 @@ import type { Adapter, Message, OnMessage, SendMessage } from 'comctx'
 import { openDB } from 'idb'
 
 import type { Browser } from '#imports'
-import { browser } from '#imports'
+import { browser, storage } from '#imports'
 import type { ResponseType } from '@/utils/request'
+
+import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
+import type { JobLibraryMutation } from '../entrypoints/boss/jobLibraryStorage'
+
+const jobLibrary = new JobLibraryStorage(storage)
 
 export const userKey = 'local:conf-user'
 
@@ -21,6 +26,18 @@ async function initDB() {
 }
 
 export class BackgroundCounter {
+  async updateJobLibrary(mutation: JobLibraryMutation) {
+    return jobLibrary.update(mutation)
+  }
+
+  async claimJobAnalysis(jobId: string, token: string, duration: number) {
+    return jobLibrary.claimAnalysis(jobId, token, duration)
+  }
+
+  async releaseJobAnalysis(jobId: string, token: string) {
+    await jobLibrary.releaseAnalysis(jobId, token)
+  }
+
   async fetchText(args: { url: string; data: RequestInit; timeout: number }) {
     const signal = AbortSignal.timeout(args.timeout)
     const res = await fetch(args.url, {

@@ -101,7 +101,7 @@ export class ChatModel {
   generateId: { [key in MessageRole]: () => string }
 
   constructor(
-    public ctx: HelperContext<any, any, any>,
+    public ctx: Pick<HelperContext<any, any, any>, 'models' | 'resumes'>,
     private readonly resumeSnapshot?: string,
   ) {
     this.generateId = role.reduce(
@@ -125,7 +125,6 @@ export class ChatModel {
   ): boolean {
     const modelKey =
       this.ctx.models.getDefaultModelKey?.() ??
-      model.model ??
       this.ctx.models.modelData.value.find(
         (item) =>
           typeof item.data?.api_key === 'string' &&
@@ -170,7 +169,7 @@ export class ChatModel {
       output: opt?.json ? Output.json() : Output.text(),
       allowSystemInMessages: true,
     })
-    this.agents.set(name, [agent, jsonClone(conf), { ...jsonClone(model), model: modelKey }])
+    this.agents.set(name, [agent, jsonClone(conf), jsonClone(model)])
     return true
   }
 
@@ -209,9 +208,9 @@ export class ChatModel {
     } else {
       messages = jsonClone(model.prompt)
     }
-    for (const i in messages) {
-      if (typeof messages[i].content === 'string') {
-        messages[i].content = renderTemplate(messages[i].content, data)
+    for (const message of messages) {
+      if (typeof message.content === 'string') {
+        message.content = renderTemplate(message.content, data)
       }
     }
     if (agentName === 'filtering') {
@@ -352,7 +351,7 @@ ${data.jobData.jobDescription}`,
             }
             break
           case 'reasoning-end':
-            if (isReasoningUIPart(lastPart)) {
+            if (lastPart && isReasoningUIPart(lastPart)) {
               lastPart.state = 'done'
             }
             break
@@ -364,7 +363,7 @@ ${data.jobData.jobDescription}`,
             }
             break
           case 'text-end':
-            if (isTextUIPart(lastPart)) {
+            if (lastPart && isTextUIPart(lastPart)) {
               lastPart.state = 'done'
             }
             break

@@ -1,8 +1,8 @@
 {
   "extName": {
-    "message": "boss-helper"
+    "message": "OfferHunt"
   },
   "extDescription": {
-    "message": "BOSS Direct Assistant, Supports rich filtering rules and AI integration, enabling both screening and automatic greetings."
+    "message": "OfferHunt helps collect BOSS Zhipin jobs, analyze resume matches with AI, manage opportunities, and assist with applications."
   }
 }

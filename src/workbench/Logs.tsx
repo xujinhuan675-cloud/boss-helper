@@ -165,7 +165,7 @@ export function Logs() {
                 selectChat(key)
               }}
             />
-            <Switch isSelected={following} onChange={setFollowing}>
+            <Switch className="switch-row" isSelected={following} onChange={setFollowing}>
               <Switch.Content>
                 <Switch.Control>
                   <Switch.Thumb />

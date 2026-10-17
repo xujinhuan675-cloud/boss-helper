@@ -22,6 +22,34 @@ export type SavedAnalysisRun = {
   error?: string
 }
 
+export type SavedAnalysisHost = Pick<
+  BossHelperCtx,
+  | 'conf'
+  | 'models'
+  | 'resumes'
+  | 'getJobLibrary'
+  | 'getSavedJobData'
+  | 'saveJobAnalysis'
+  | 'claimJobAnalysis'
+  | 'releaseJobAnalysis'
+> &
+  Partial<
+    Pick<
+      BossHelperCtx,
+      | 'gatheringBusy'
+      | 'gatheringKind'
+      | 'realtimeBusy'
+      | 'workflow'
+      | 'hasPendingCollectionStorage'
+      | 'stopCollection'
+      | 'waitForCollectionAnalysis'
+      | 'collectOnly'
+      | 'keywordRotationBusy'
+      | 'notification'
+      | 'scheduleBackgroundDetailCompletion'
+    >
+  >
+
 export function isSavedJobEligible(record: BossJobLibraryRecord) {
   return (
     !isJobExcluded(record) &&
@@ -38,12 +66,12 @@ export class SavedJobAnalyzer {
   readonly collecting = ref(false)
   readonly run = ref<SavedAnalysisRun | null>(null)
 
-  constructor(public host: BossHelperCtx) {}
+  constructor(public host: SavedAnalysisHost) {}
 
   stop() {
     if (this.busy.value && this.run.value?.status === 'running') {
       this.run.value.status = 'stopping'
-      if (this.collecting.value) this.host.stopCollection()
+      if (this.collecting.value) this.host.stopCollection?.()
     }
   }
 
@@ -53,9 +81,9 @@ export class SavedJobAnalyzer {
 
   private checkOtherWork() {
     if (
-      (this.host.gatheringBusy.value &&
-        !(this.collecting.value && this.host.gatheringKind.value === 'collection')) ||
-      this.host.realtimeBusy.value ||
+      (this.host.gatheringBusy?.value &&
+        !(this.collecting.value && this.host.gatheringKind?.value === 'collection')) ||
+      this.host.realtimeBusy?.value ||
       this.host.workflow?.status.value === 'running' ||
       this.host.hasPendingCollectionStorage
     ) {
@@ -64,12 +92,10 @@ export class SavedJobAnalyzer {
   }
 
   async start({
-    modelKey,
     limit = 20,
     collectNew = false,
     jobId,
   }: {
-    modelKey?: string
     limit?: number
     collectNew?: boolean
     jobId?: string
@@ -77,7 +103,7 @@ export class SavedJobAnalyzer {
     if (this.busy.value) throw new Error('本地岗位分析正在进行，请等待当前请求结束')
     this.checkOtherWork()
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('批次数量必须是正整数')
-    const selectedKey = modelKey ?? this.host.models.getDefaultModelKey()
+    const selectedKey = this.host.models.getDefaultModelKey()
     const model = this.host.models.modelData.value.find((item) => item.key === selectedKey)
     if (
       !model?.data ||
@@ -89,12 +115,10 @@ export class SavedJobAnalyzer {
     }
     const filtering = {
       ...jsonClone(this.host.conf.formData.aiFiltering),
-      model: selectedKey,
       enable: true,
     }
     const greetings = {
       ...jsonClone(this.host.conf.formData.aiGreeting),
-      model: selectedKey,
       enable: true,
     }
     validateMatchThreshold(filtering.score)
@@ -111,6 +135,8 @@ export class SavedJobAnalyzer {
     if (!resume || !resumeText) {
       throw new Error('请先在简历页选择并保存完整简历，再开始分析')
     }
+    if (collectNew && (!this.host.collectOnly || !this.host.waitForCollectionAnalysis))
+      throw new Error('采集新岗位需要连接 BOSS 岗位页')
 
     this.collecting.value = collectNew
     this.busy.value = true
@@ -137,102 +163,122 @@ export class SavedJobAnalyzer {
       const analyze = async (candidate: BossJobLibraryRecord) => {
         if (this.stopping) return
         this.checkOtherWork()
-        const record = (await this.host.getJobLibrary()).find(
-          (item) => item.encryptJobId === candidate.encryptJobId,
-        )
-        if (!record || !isSavedJobEligible(record)) {
+        if (collectNew && !(await this.host.waitForCollectionAnalysis!('匹配度分析'))) return
+        if (this.stopping) return
+        const token = crypto.randomUUID()
+        // Covers both model timeouts; abandoned windows release their claim by expiry.
+        const duration = (model.data?.other?.timeout ?? 60000) * 2 + 30000
+        const claim = () => this.host.claimJobAnalysis(candidate.encryptJobId, token, duration)
+        if (!(await claim())) {
           run.skipped++
           return
         }
-        if (
-          this.stopping ||
-          (collectNew && !(await this.host.waitForCollectionAnalysis('匹配度分析')))
-        )
-          return
-        if (collectNew) run.total++
-        run.currentJob = record.snapshot.jobName
-        let analysis = record.analysis
-        let finalGreeting = record.finalGreeting
-        let failure: unknown
-        let stoppedAfterFiltering = false
         try {
-          const data = this.host.getSavedJobData(record)
-          const content = await chat
-            .chat('filtering', data, { disableMessages: true })
-            .then((response) => response.text)
-          const result = parseFiltering(content)
-          const passed = getFilteringDecision(result, filtering.score)
-          analysis = {
-            ...metadata,
-            analyzedAt: new Date().toISOString(),
-            ...result,
-            passed,
+          const record = (await this.host.getJobLibrary()).find(
+            (item) => item.encryptJobId === candidate.encryptJobId,
+          )
+          if (!record || !isSavedJobEligible(record)) {
+            run.skipped++
+            return
           }
-          if (passed === true) {
-            if (this.stopping) {
-              stoppedAfterFiltering = true
-            } else {
-              this.checkOtherWork()
-              const latest = (await this.host.getJobLibrary()).find(
-                (item) => item.encryptJobId === record.encryptJobId,
-              )
-              if (!latest || !isSavedJobEligible(latest)) {
-                run.skipped++
-                return
-              }
+          if (this.stopping) return
+          if (collectNew) run.total++
+          run.currentJob = record.snapshot.jobName
+          let analysis = record.analysis
+          let finalGreeting = record.finalGreeting
+          let failure: unknown
+          let stoppedAfterFiltering = false
+          try {
+            const data = this.host.getSavedJobData(record)
+            const content = await chat
+              .chat('filtering', data, { disableMessages: true })
+              .then((response) => response.text)
+            const result = parseFiltering(content)
+            const passed = getFilteringDecision(result, filtering.score)
+            analysis = {
+              ...metadata,
+              analyzedAt: new Date().toISOString(),
+              ...result,
+              passed,
+            }
+            if (passed === true) {
               if (this.stopping) {
                 stoppedAfterFiltering = true
-              } else if (
-                collectNew &&
-                !(await this.host.waitForCollectionAnalysis('生成招呼语草稿'))
-              ) {
-                if (this.stopping) stoppedAfterFiltering = true
-                else throw new Error('已停止；筛选结果已保留，招呼语尚未生成')
-              }
-              if (!stoppedAfterFiltering) {
-                const greeting = await chat
-                  .chat('greetings', this.host.getSavedJobData(latest), { disableMessages: true })
-                  .then((response) => response.text)
-                if (typeof greeting !== 'string' || !greeting.trim())
-                  throw new Error('模型返回了空招呼语')
-                finalGreeting = greeting.trim()
+              } else {
+                this.checkOtherWork()
+                if (this.stopping) {
+                  stoppedAfterFiltering = true
+                } else if (
+                  collectNew &&
+                  !(await this.host.waitForCollectionAnalysis!('生成招呼语草稿'))
+                ) {
+                  if (this.stopping) stoppedAfterFiltering = true
+                  else throw new Error('已停止；筛选结果已保留，招呼语尚未生成')
+                }
+                if (!stoppedAfterFiltering) {
+                  if (!(await claim())) {
+                    run.skipped++
+                    return
+                  }
+                  const latest = (await this.host.getJobLibrary()).find(
+                    (item) => item.encryptJobId === record.encryptJobId,
+                  )
+                  if (!latest || !isSavedJobEligible(latest)) {
+                    run.skipped++
+                    return
+                  }
+                  if (this.stopping) {
+                    stoppedAfterFiltering = true
+                  } else {
+                    const greeting = await chat
+                      .chat('greetings', this.host.getSavedJobData(latest), {
+                        disableMessages: true,
+                      })
+                      .then((response) => response.text)
+                    if (typeof greeting !== 'string' || !greeting.trim())
+                      throw new Error('模型返回了空招呼语')
+                    finalGreeting = greeting.trim()
+                  }
+                }
               }
             }
+          } catch (error) {
+            failure = error
           }
-        } catch (error) {
-          failure = error
-        }
-        const saved = await this.host.saveJobAnalysis(record.encryptJobId, {
-          analysisStatus: stoppedAfterFiltering ? 'pending' : failure ? 'failed' : 'ready',
-          ...(analysis ? { analysis } : {}),
-          ...(finalGreeting ? { finalGreeting } : {}),
-          ...(!stoppedAfterFiltering
-            ? {
-                analysisFailureReason:
-                  failure instanceof Error ? failure.message : failure ? String(failure) : '',
-              }
-            : {}),
-        })
-        if (!saved) run.skipped++
-        else if (stoppedAfterFiltering) run.skipped++
-        else if (failure) {
-          run.failed++
-          run.error = failure instanceof Error ? failure.message : String(failure)
-        } else run.completed++
-        const statusCode =
-          (failure as { statusCode?: number; status?: number } | undefined)?.statusCode ??
-          (failure as { status?: number } | undefined)?.status
-        if (
-          failure &&
-          ([401, 402, 403, 404, 429].includes(statusCode ?? 0) ||
-            (failure instanceof Error &&
-              /请求错误\s*(401|402|403|404|429)\b/.test(failure.message)))
-        ) {
-          throw failure
+          const saved = await this.host.saveJobAnalysis(record.encryptJobId, {
+            analysisStatus: stoppedAfterFiltering ? 'pending' : failure ? 'failed' : 'ready',
+            ...(analysis ? { analysis } : {}),
+            ...(finalGreeting ? { finalGreeting } : {}),
+            ...(!stoppedAfterFiltering
+              ? {
+                  analysisFailureReason:
+                    failure instanceof Error ? failure.message : failure ? String(failure) : '',
+                }
+              : {}),
+          })
+          if (!saved) run.skipped++
+          else if (stoppedAfterFiltering) run.skipped++
+          else if (failure) {
+            run.failed++
+            run.error = failure instanceof Error ? failure.message : String(failure)
+          } else run.completed++
+          const statusCode =
+            (failure as { statusCode?: number; status?: number } | undefined)?.statusCode ??
+            (failure as { status?: number } | undefined)?.status
+          if (
+            failure &&
+            ([401, 402, 403, 404, 429].includes(statusCode ?? 0) ||
+              (failure instanceof Error &&
+                /请求错误\s*(401|402|403|404|429)\b/.test(failure.message)))
+          ) {
+            throw failure
+          }
+        } finally {
+          await this.host.releaseJobAnalysis(candidate.encryptJobId, token)
         }
       }
       if (collectNew) {
-        const collection = await this.host.collectOnly(undefined, analyze)
+        const collection = await this.host.collectOnly!(undefined, analyze)
         if (!['completed', 'stopped'].includes(collection.status))
           throw new Error(collection.error || '采集未正常完成；请检查采集结束原因')
         run.status =
@@ -260,11 +306,11 @@ export class SavedJobAnalyzer {
       delete run.currentJob
       this.busy.value = false
       this.collecting.value = false
-      if (!this.host.keywordRotationBusy.value) {
+      if (!this.host.keywordRotationBusy?.value) {
         const task = collectNew ? '采集并分析' : '岗位分析'
         const status =
           run.status === 'completed' ? '完成' : run.status === 'stopped' ? '已停止' : '异常停止'
-        void this.host.notification(
+        void this.host.notification?.(
           `${task}${status}：完成 ${run.completed}/${run.total}，失败 ${run.failed}，跳过 ${run.skipped}${run.error ? `；${run.error}` : ''}`,
         )
       }
@@ -273,7 +319,7 @@ export class SavedJobAnalyzer {
     return run
   }
 
-  analyzeOne(jobId: string, modelKey?: string) {
+  validateOne(jobId: string) {
     if (!jobId?.trim()) throw new Error('缺少岗位 ID')
     if (this.busy.value) throw new Error('本地岗位分析正在进行，请等待当前请求结束')
     this.checkOtherWork()
@@ -288,7 +334,11 @@ export class SavedJobAnalyzer {
         record.sendStatus !== 'pending'
       )
         throw new Error('该岗位已分析、已审核或已进入发送流程，不能覆盖')
-      return this.start({ modelKey, limit: 1, jobId })
     })
+  }
+
+  async analyzeOne(jobId: string) {
+    await this.validateOne(jobId)
+    return this.start({ limit: 1, jobId })
   }
 }

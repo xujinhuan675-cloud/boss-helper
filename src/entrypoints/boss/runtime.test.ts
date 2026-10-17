@@ -1,5 +1,5 @@
 // @ts-nocheck -- Bun test type declarations are absent in this repository.
-import { beforeEach, describe, expect, it, mock } from 'bun:test'
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test'
 
 import { defineProxy } from 'comctx'
 import { computed, reactive, ref, watchSyncEffect } from 'vue'
@@ -9,7 +9,13 @@ import { counter, initCounter } from '../../message'
 import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
 import { parseGptJson } from '../../utils/ai'
 import deepmerge, { jsonClone } from '../../utils/deepmerge'
-import { COLLECTION_RUN_STORAGE_KEY, JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
+import { JobLibraryStorage } from './jobLibraryStorage'
+import {
+  AUTO_CAPTURE_STORAGE_KEY,
+  COLLECTION_RUN_STORAGE_KEY,
+  JOB_LIBRARY_STORAGE_KEY,
+  mergeJobRecords,
+} from './jobStore'
 import {
   KEYWORD_ROTATION_STORAGE_KEY,
   KEYWORD_ROTATION_USAGE_STORAGE_KEY,
@@ -19,7 +25,7 @@ import {
 import type { BossZpJobItemData } from './types'
 
 const conf = {
-  formData: { salaryRange: { value: '10-15K' }, notification: { value: true } },
+  formData: { notification: { value: true } },
 }
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
@@ -140,6 +146,79 @@ function context() {
   return ctx
 }
 
+describe('native filter synchronization', () => {
+  it('navigates through the BOSS router and rebases saved keyword conditions', async () => {
+    const ctx = context()
+    location.href = 'https://www.zhipin.com/web/geek/jobs?city=101020100&query=old&page=3'
+    await ctx.saveKeywordRotationKeywords('产品经理\nAI产品经理')
+    const storedPlan = jsonClone(ctx.keywordRotation.value)
+    storedPlan.items[1].enabled = false
+    data.set(KEYWORD_ROTATION_STORAGE_KEY, storedPlan)
+    const routes = []
+    ctx.rootVue = {
+      $router: {
+        push: async (route) => {
+          routes.push(route)
+          location.href = `https://www.zhipin.com${route.path}?${new URLSearchParams(Object.entries(route.query).reverse())}`
+          ctx._jobList.value = [item('new')]
+        },
+      },
+    }
+    ctx._jobList.value = [item('old')]
+    await ctx.applyNativeFilters({
+      query: '产品经理',
+      city: '101010100',
+      jobType: '1901',
+      salary: '405',
+      experience: ['104', '105'],
+      degree: ['203'],
+      stage: ['803', '804'],
+      scale: ['303'],
+      industry: ['100001'],
+    })
+    expect(routes).toHaveLength(1)
+    expect(new URL(location.href).searchParams.get('experience')).toBe('104,105')
+    expect(new URL(location.href).searchParams.has('page')).toBe(false)
+    expect(ctx._jobList.value).toEqual([item('new')])
+    expect(ctx.keywordRotation.value.baseSearchUrl).toContain('salary=405')
+    expect(ctx.keywordRotation.value.baseSearchUrl).not.toContain('query=')
+    expect(ctx.keywordRotation.value.filterSnapshot).toEqual({ city: '101010100', salary: '405' })
+    expect(ctx.keywordRotation.value.items.map((item) => item.keyword)).toEqual([
+      '产品经理',
+      'AI产品经理',
+    ])
+    expect(ctx.keywordRotation.value.items[1]).toMatchObject({ enabled: false, status: 'skipped' })
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(jsonClone(ctx.keywordRotation.value))
+  })
+
+  it('does not overwrite a keyword plan when the router rejects the navigation', async () => {
+    const ctx = context()
+    await ctx.saveKeywordRotationKeywords('产品经理')
+    const before = jsonClone(ctx.keywordRotation.value)
+    ctx.rootVue = {
+      $router: {
+        push: async () => {
+          throw new Error('router refused')
+        },
+      },
+    }
+    await expect(
+      ctx.applyNativeFilters({
+        query: 'AI',
+        city: '',
+        jobType: '',
+        salary: '405',
+        experience: [],
+        degree: [],
+        stage: [],
+        scale: [],
+        industry: [],
+      }),
+    ).rejects.toThrow('router refused')
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(before)
+  })
+})
+
 const item = (id: string) => ({ encryptJobId: id, jobName: id }) as BossZpJobItemData
 const data = new Map<string, unknown>()
 let getStored: (key: string, fallback: unknown) => Promise<unknown>
@@ -199,10 +278,17 @@ beforeEach(() => {
     data.set(key, structuredClone(value))
   }
   const script = new EventTarget() as HTMLScriptElement
+  const library = new JobLibraryStorage({
+    getItem: (key) => getStored(key, null),
+    setItem: (key, value) => setStored(key, value),
+  })
   const [provide] = defineProxy(
     () => ({
       storageGet: (key: string, fallback: unknown) => getStored(key, fallback),
       storageSet: (key: string, value: unknown) => setStored(key, value),
+      updateJobLibrary: (mutation) => library.update(mutation),
+      claimJobAnalysis: (id, token, duration) => library.claimAnalysis(id, token, duration),
+      releaseJobAnalysis: (id, token) => library.releaseAnalysis(id, token),
     }),
     { namespace: '__boss-helper-content__' },
   )
@@ -241,6 +327,28 @@ describe('task notifications', () => {
 })
 
 describe('read-only saved job library', () => {
+  it('retries failed initialization when a user invokes an executor command', async () => {
+    let attempts = 0
+    const hooks = []
+    getRoot = async () => {
+      if (++attempts === 1) throw new Error('未找到对应元素')
+      return { $router: { afterHooks: hooks } }
+    }
+    createWorkflow = async () => ({ status: ref('idle'), current: ref(0), total: ref(0) })
+    const script = new EventTarget()
+    const [, injectExecutor] = defineProxy(() => ({}), { namespace: '__boss-helper-executor__' })
+    const bridge = injectExecutor(new ProvideContentScriptAdapter(script))
+    await runBoss(script)
+    expect(await bridge.snapshot()).toMatchObject({ ready: false, error: '未找到对应元素' })
+    await bridge.command({ type: 'setPendingMessage', value: 'editable' })
+    expect(await bridge.snapshot()).toMatchObject({
+      ready: true,
+      error: '',
+      pendingMessage: 'editable',
+    })
+    expect(attempts).toBe(2)
+    expect(hooks).toHaveLength(1)
+  })
   it('keeps route readiness behind business initialization and the latest mount', async () => {
     const hooks = []
     getRoot = async () => ({ $router: { afterHooks: hooks } })
@@ -250,12 +358,13 @@ describe('read-only saved job library', () => {
       new Promise((resolve) => {
         initialized = resolve
       })
-    const original = BossHelperCtx.prototype.onMount
     let mounted
-    BossHelperCtx.prototype.onMount = () =>
-      new Promise((resolve) => {
-        mounted = resolve
-      })
+    const mount = spyOn(BossHelperCtx.prototype, 'onMount').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          mounted = resolve
+        }),
+    )
     try {
       const script = new EventTarget()
       const [, injectExecutor] = defineProxy(() => ({}), { namespace: '__boss-helper-executor__' })
@@ -277,7 +386,7 @@ describe('read-only saved job library', () => {
       await Promise.resolve()
       expect(await bridge.snapshot()).toMatchObject({ ready: true })
     } finally {
-      BossHelperCtx.prototype.onMount = original
+      mount.mockRestore()
     }
   })
 
@@ -295,7 +404,34 @@ describe('read-only saved job library', () => {
     rejectRoot(new Error('page unavailable'))
     await initializing
     expect(await bridge.snapshot()).toMatchObject({ ready: false, error: 'page unavailable' })
+    getRoot = async () => {
+      throw new Error('page unavailable')
+    }
     await expect(bridge.command({ type: 'collect' })).rejects.toThrow('page unavailable')
+  })
+  it('recovers from a rejected route mount when a command retries initialization', async () => {
+    const hooks = []
+    getRoot = async () => ({ $router: { afterHooks: hooks } })
+    createWorkflow = async () => ({ status: ref('idle'), current: ref(0), total: ref(0) })
+    const mount = spyOn(BossHelperCtx.prototype, 'onMount').mockRejectedValue(
+      new Error('route unavailable'),
+    )
+    try {
+      const script = new EventTarget()
+      const [, injectExecutor] = defineProxy(() => ({}), { namespace: '__boss-helper-executor__' })
+      const bridge = injectExecutor(new ProvideContentScriptAdapter(script))
+      await runBoss(script)
+      hooks[0]({ path: '/web/geek/jobs' })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(await bridge.snapshot()).toMatchObject({ ready: false, error: 'route unavailable' })
+      mount.mockResolvedValue(undefined)
+      await bridge.command({ type: 'setPendingMessage', value: 'recovered' })
+      expect(await bridge.snapshot()).toMatchObject({ ready: true, pendingMessage: 'recovered' })
+      expect(hooks).toHaveLength(1)
+    } finally {
+      mount.mockRestore()
+    }
   })
   it('clears obsolete analysis and drafts once while retaining jobs, details and delivery history', async () => {
     const records = mergeJobRecords(
@@ -1561,6 +1697,35 @@ it('captures passive job-list updates when auto capture is enabled', async () =>
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
     { encryptJobId: 'visible', detailStatus: 'pending' },
   ])
+})
+
+it('persists auto capture and restores it before the first mounted job list', async () => {
+  const enabled = context()
+  await enabled.setAutoCaptureEnabled(true)
+  expect(data.get(AUTO_CAPTURE_STORAGE_KEY)).toBe(true)
+
+  const ctx = context()
+  let restored = false
+  ctx._initPage = async () => {}
+  ctx._initPageChange = async () => {}
+  ctx._initJobDetail = async () => {}
+  ctx._initClickJobCardAction = async () => {}
+  ctx.initNetConf = () => {}
+  ctx.geek = { connect: async () => {} }
+  ctx.loadKeywordRotation = async () => {}
+  ctx.scheduleBackgroundDetailCompletion = () => {}
+  const originalInitJobList = ctx._initJobList.bind(ctx)
+  ctx._initJobList = async () => {
+    await originalInitJobList()
+    restored = ctx.autoCaptureEnabled.value
+  }
+
+  await ctx['mountRoute']('/web/geek/jobs')
+  expect(restored).toBe(true)
+
+  jobListHookCallback?.([item('restored')])
+  await ctx['jobCapturePromise']
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([{ encryptJobId: 'restored' }])
 })
 
 it('sends a saved greeting through the existing BOSS chat sender', async () => {

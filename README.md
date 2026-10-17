@@ -25,6 +25,8 @@ F:\AnchorOS\6-项目仓库\boss-helper\.output\chrome-mv3
 
 本地只保留 `codex/submit-changes` 分支，HeroUI 侧边栏和独立工作台已合入，后续直接在此仓库开发。工具栏图标打开侧边栏，完整工作台入口为扩展的 `workbench.html`。
 
+本地产品名称为 OfferHunt。图标唯一源文件为 `public/icons/logo.png`，扩展清单、工具栏、工作台、页面页签及桌面通知统一引用该图；替换图片后重新构建即可。
+
 在仓库根目录执行：
 
 ```powershell

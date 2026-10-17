@@ -29,14 +29,15 @@ import type { FormData, Prompt } from '@/types/formData'
 import { jsonClone } from '@/utils/deepmerge'
 
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
+import { CustomGreeting } from './CustomGreeting'
 import { parseObject, validateModels } from './settingsValidation'
-import { saveConfig, saveModels, services } from './store'
+import { saveConfig, saveModels, selectDefaultModel, services } from './store'
 import { useWorkbench } from './useWorkbench'
 
 type PromptKey = 'aiFiltering' | 'aiGreeting' | 'aiReply'
 const promptLabels: Record<PromptKey, string> = {
   aiFiltering: '岗位匹配',
-  aiGreeting: '开场招呼语',
+  aiGreeting: 'AI 招呼语',
   aiReply: '回复提示词',
 }
 type ModelDraft = { model: ModelConf; advanced: string; other: string }
@@ -57,6 +58,9 @@ export function Models() {
   const [editor, setEditor] = useState<ModelDraft | null>(null)
   const [deleting, setDeleting] = useState<ModelConf | null>(null)
   const [promptDrafts, setPromptDrafts] = useState<Partial<Pick<FormData, PromptKey>>>({})
+  const [greetingDraft, setGreetingDraft] = useState<
+    Partial<Pick<FormData, 'customGreeting' | 'greetingVariable'>>
+  >({})
   const promptPresets = useRef<Partial<Record<PromptKey, string>>>({})
   const [testing, setTesting] = useState(false)
   const testingRef = useRef(false)
@@ -77,6 +81,11 @@ export function Models() {
       runtime?.workflow?.status === 'running'
     )
   const defaultKey = state.models.find(isCompleteModel)?.key ?? state.models[0]?.key
+  const modelIds = availableModels.length
+    ? availableModels
+    : editor?.model.data?.model
+      ? [editor.model.data.model]
+      : []
 
   function edit(model?: ModelConf) {
     if (busy || testingRef.current) return
@@ -115,7 +124,7 @@ export function Models() {
       },
     })
     setConnection(null)
-    setAvailableModels([])
+    if ('base_url' in patch || 'api_key' in patch) setAvailableModels([])
   }
 
   function modelSnapshot(): ModelConf {
@@ -157,7 +166,7 @@ export function Models() {
     if (busy || testingRef.current || !editor) return
     setError('')
     setConnection(null)
-    setAvailableModels([])
+    if (select) setAvailableModels([])
     let next: ModelConf
     try {
       next = modelSnapshot()
@@ -204,6 +213,7 @@ export function Models() {
   }
 
   function discardPrompt(key: PromptKey) {
+    if (key === 'aiGreeting') setGreetingDraft({})
     delete promptPresets.current[key]
     setPromptDrafts((drafts) => {
       const next = { ...drafts }
@@ -222,11 +232,14 @@ export function Models() {
       const value =
         key === 'aiFiltering' ? { ...draft, scoringVersion: MATCH_SCORING_VERSION } : draft
       if (
-        await act(() => {
-          if (promptPresets.current[key] !== services.conf.formDataPreset.value)
-            throw new Error('配置预设已变更，请先放弃提示词草稿并重新加载当前预设')
-          return saveConfig({ [key]: value })
-        }, '提示词已保存')
+        await act(
+          () => {
+            if (promptPresets.current[key] !== services.conf.formDataPreset.value)
+              throw new Error('配置预设已变更，请先放弃提示词草稿并重新加载当前预设')
+            return saveConfig({ [key]: value, ...(key === 'aiGreeting' ? greetingDraft : {}) })
+          },
+          key === 'aiGreeting' ? '招呼语已保存' : '提示词已保存',
+        )
       )
         discardPrompt(key)
     } catch (error) {
@@ -310,19 +323,7 @@ export function Models() {
                           busy || testing || model.key === defaultKey || !isCompleteModel(model)
                         }
                         onPress={() => {
-                          void act(
-                            () =>
-                              saveModels((latest) => {
-                                const selected = latest.find((item) => item.key === model.key)
-                                if (!selected || !isCompleteModel(selected))
-                                  throw new Error('模型已在其他窗口变更，请重新选择默认模型')
-                                return [
-                                  selected,
-                                  ...latest.filter((item) => item.key !== model.key),
-                                ]
-                              }),
-                            '默认模型已更新',
-                          )
+                          void act(() => selectDefaultModel(model.key), '默认模型已更新')
                         }}
                       >
                         <ArrowUp size={16} />
@@ -376,14 +377,13 @@ export function Models() {
                 <Label>API Key</Label>
                 <Input type="password" autoComplete="off" />
               </TextField>
-              <TextField
+              <SelectField
+                label="已获取的模型"
                 value={editor.model.data?.model ?? ''}
-                isDisabled={busy || testing}
+                disabled={busy || testing || !modelIds.length}
+                options={modelIds.map((id) => ({ value: id, label: id }))}
                 onChange={(model) => changeData({ model })}
-              >
-                <Label>模型 ID</Label>
-                <Input />
-              </TextField>
+              />
               <TextField
                 value={editor.model.data?.avatar ?? ''}
                 isDisabled={busy || testing}
@@ -393,6 +393,7 @@ export function Models() {
                 <Input />
               </TextField>
               <Switch
+                className="switch-row"
                 isSelected={editor.model.data?.responses ?? false}
                 isDisabled={busy || testing}
                 onChange={(responses) => changeData({ responses })}
@@ -405,15 +406,6 @@ export function Models() {
                 </Switch.Content>
               </Switch>
             </div>
-            {availableModels.length > 0 && (
-              <SelectField
-                label="已获取的模型"
-                value={editor.model.data?.model ?? ''}
-                disabled={busy || testing}
-                options={availableModels.map((id) => ({ value: id, label: id }))}
-                onChange={(model) => changeData({ model })}
-              />
-            )}
             <Accordion>
               <Accordion.Item id="model-advanced">
                 <Accordion.Heading>
@@ -531,6 +523,7 @@ export function Models() {
               )}
               <div className="field-grid">
                 <Switch
+                  className="switch-row"
                   isSelected={value.enable}
                   isDisabled={busy || key === 'aiReply'}
                   onChange={(enable) => changePrompt(key, { enable })}
@@ -544,21 +537,6 @@ export function Models() {
                     </Label>
                   </Switch.Content>
                 </Switch>
-                <SelectField
-                  label="使用模型"
-                  value={value.model ?? '__default__'}
-                  disabled={busy}
-                  options={[
-                    { value: '__default__', label: '跟随默认模型' },
-                    ...state.models.map((model) => ({
-                      value: model.key,
-                      label: model.name || model.key,
-                    })),
-                  ]}
-                  onChange={(model) =>
-                    changePrompt(key, { model: model === '__default__' ? undefined : model })
-                  }
-                />
                 {key === 'aiFiltering' && (
                   <NumberField
                     value={(value as FormData['aiFiltering']).score}
@@ -628,48 +606,56 @@ export function Models() {
                   </TextField>
                 </div>
               ))}
-              <div className="flex flex-wrap justify-between gap-2">
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    isDisabled={busy}
-                    onPress={() =>
-                      changePrompt(key, {
-                        prompt: [...value.prompt, { role: 'user', content: '' }],
-                      })
-                    }
-                  >
-                    <Plus size={16} />
-                    添加消息
-                  </Button>
-                  <Button
-                    variant="tertiary"
-                    isDisabled={busy}
-                    onPress={() =>
-                      changePrompt(key, { prompt: jsonClone(defaultFormData[key].prompt) })
-                    }
-                  >
-                    恢复默认提示词
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    isDisabled={busy || !promptDrafts[key]}
-                    onPress={() => discardPrompt(key)}
-                  >
-                    放弃修改
-                  </Button>
-                  <Button
-                    isDisabled={busy || !promptDrafts[key] || presetConflict}
-                    onPress={() => {
-                      void savePrompt(key)
-                    }}
-                  >
-                    <Save size={16} />
-                    保存提示词
-                  </Button>
-                </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  isDisabled={busy}
+                  onPress={() =>
+                    changePrompt(key, {
+                      prompt: [...value.prompt, { role: 'user', content: '' }],
+                    })
+                  }
+                >
+                  <Plus size={16} />
+                  添加提示词消息
+                </Button>
+                <Button
+                  variant="tertiary"
+                  isDisabled={busy}
+                  onPress={() =>
+                    changePrompt(key, { prompt: jsonClone(defaultFormData[key].prompt) })
+                  }
+                >
+                  恢复默认提示词
+                </Button>
+              </div>
+              {key === 'aiGreeting' && (
+                <CustomGreeting
+                  config={{ ...state.config, ...greetingDraft, aiGreeting: value }}
+                  disabled={busy || presetConflict}
+                  onChange={(field, next) => {
+                    changePrompt('aiGreeting', {})
+                    setGreetingDraft((draft) => ({ ...draft, [field]: next }))
+                  }}
+                />
+              )}
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  variant="secondary"
+                  isDisabled={busy || !promptDrafts[key]}
+                  onPress={() => discardPrompt(key)}
+                >
+                  放弃修改
+                </Button>
+                <Button
+                  isDisabled={busy || !promptDrafts[key] || presetConflict}
+                  onPress={() => {
+                    void savePrompt(key)
+                  }}
+                >
+                  <Save size={16} />
+                  {key === 'aiGreeting' ? '保存招呼语' : '保存提示词'}
+                </Button>
               </div>
             </Tabs.Panel>
           )
@@ -695,7 +681,7 @@ export function Models() {
             })
         }}
       >
-        <p>确定删除“{deleting?.name}”？引用此模型的提示词将需要重新选择模型。</p>
+        <p>确定删除“{deleting?.name}”？</p>
       </ConfirmDialog>
     </section>
   )

@@ -10,11 +10,10 @@ export async function notification(
 ) {
   return counter.notify({
     ...options,
-    title: options?.title ?? 'Boss直聘批量投简历',
+    title: options?.title ?? 'OfferHunt',
     message: message,
     type: options?.type ?? 'basic',
-    iconUrl:
-      'https://img.bosszhipin.com/beijin/mcs/banner/3e9d37e9effaa2b6daf43f3f03f7cb15cfcd208495d565ef66e7dff9f98764da.jpg',
+    iconUrl: 'icons/logo.png',
   })
 }
 

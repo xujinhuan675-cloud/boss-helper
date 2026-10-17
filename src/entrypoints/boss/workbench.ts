@@ -7,7 +7,11 @@ import type { BossHelperCtx } from './runtime'
 
 export type ExecutorState = { ready: boolean; error: string; lastError: string }
 
-export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): RuntimeBridge {
+export function createExecutorBridge(
+  ctx: BossHelperCtx,
+  state: ExecutorState,
+  initialize?: () => Promise<void>,
+): RuntimeBridge {
   let selectedJob: string | null = null
   function start(task: () => Promise<unknown>) {
     void Promise.resolve()
@@ -77,6 +81,7 @@ export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): 
     },
     async command(command) {
       if (!isExecutorCommand(command)) throw new Error('Invalid executor command')
+      if (!state.ready && initialize) await initialize()
       if (!state.ready) throw new Error(state.error || 'Executor is still initializing')
       state.lastError = ''
       try {
@@ -145,6 +150,7 @@ export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): 
             return
           case 'reloadSettings':
           case 'clearCache':
+          case 'applyNativeFilters':
             if (
               ctx.gatheringBusy.value ||
               ctx.savedAnalyzer.busy.value ||
@@ -156,11 +162,15 @@ export function createExecutorBridge(ctx: BossHelperCtx, state: ExecutorState): 
               ctx.hasPendingCollectionStorage
             )
               throw new Error('Wait for active tasks and pending saves before reloading settings')
+            if (command.type === 'applyNativeFilters')
+              return await ctx.applyNativeFilters(command.filters)
             if (command.type === 'clearCache') {
               const { getCacheManager } = await import('../../composables/useApplying')
               return await getCacheManager().clearCache()
             }
-            return await reloadSettings(ctx)
+            await reloadSettings(ctx)
+            await ctx.loadKeywordRotation()
+            return
         }
       } catch (error) {
         state.lastError = error instanceof Error ? error.message : String(error)

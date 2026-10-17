@@ -6,6 +6,8 @@ import type { KeywordRotationPlan } from '@/entrypoints/boss/keywordRotation'
 import type { SavedAnalysisRun } from '@/entrypoints/boss/savedAnalysis'
 
 import { isFunnelStage } from '../entrypoints/boss/jobStore'
+import type { NativeSearchFilters } from '../entrypoints/boss/nativeSearch'
+import { isNativeSearchFilters } from '../entrypoints/boss/nativeSearch'
 
 export const EXECUTOR_NAMESPACE = '__boss-helper-executor__'
 export const EXECUTOR_MESSAGE_TYPE = 'boss-helper:executor'
@@ -35,6 +37,7 @@ export type ExecutorCommand =
   | { type: 'setAutoCapture'; enabled: boolean }
   | { type: 'extractKeywords' | 'saveKeywords'; input: string }
   | { type: 'setPendingMessage'; value: string }
+  | { type: 'applyNativeFilters'; filters: NativeSearchFilters }
 
 export type ExecutorLog = Omit<Log, 'data'> & {
   data?: Partial<
@@ -109,6 +112,8 @@ function text(value: unknown): value is string {
 export function isExecutorCommand(value: unknown): value is ExecutorCommand {
   if (!record(value) || typeof value.type !== 'string') return false
   switch (value.type) {
+    case 'applyNativeFilters':
+      return keys(value, ['type', 'filters']) && isNativeSearchFilters(value.filters)
     case 'analyze':
       return (
         keys(value, ['type', 'limit']) &&

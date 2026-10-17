@@ -8,6 +8,7 @@ import { compileScript, compileTemplate, parse } from 'vue/compiler-sfc'
 
 import { parseGptJson } from '../../utils/ai'
 import { jsonClone } from '../../utils/deepmerge'
+import { JobLibraryStorage } from './jobLibraryStorage'
 import { mergeJobRecords } from './jobStore'
 
 let respond: (role: string, data: any) => Promise<string>
@@ -26,7 +27,9 @@ mock.module('@/composables/useModel/chatModel', () => ({
     }
     createAgent(config: any, name: string) {
       agentConfigs.push({ name, config: jsonClone(config) })
-      return this.host.models.modelData.value.some((model: any) => model.key === config.model)
+      return this.host.models.modelData.value.some(
+        (model: any) => model.key === this.host.models.getDefaultModelKey(),
+      )
     }
     async chat(role: string, data: any, options: any) {
       expect(options.disableMessages).toBe(true)
@@ -81,14 +84,12 @@ function fixture(count = 2) {
       formData: {
         aiFiltering: {
           enable: false,
-          model: 'original-filter',
           score: 70,
           scoringVersion: 'weighted-v1',
           prompt: [{ role: 'system', content: '真实筛选标准与简历摘要' }],
         },
         aiGreeting: {
           enable: false,
-          model: 'original-greeting',
           prompt: [{ role: 'system', content: '真实招呼语标准与简历摘要' }],
         },
         resumeText: '',
@@ -102,6 +103,7 @@ function fixture(count = 2) {
       }),
     },
     models: {
+      getDefaultModelKey: () => 'selected',
       modelData: ref([
         {
           key: 'selected',
@@ -121,6 +123,8 @@ function fixture(count = 2) {
     hasPendingCollectionStorage: false,
     keywordRotationBusy: ref(false),
     notification: async () => {},
+    claimJobAnalysis: async () => true,
+    releaseJobAnalysis: async () => {},
     getJobLibrary: async () => jsonClone(records),
     getSavedJobData: (record: any) => ({
       jobData: {
@@ -182,6 +186,43 @@ describe('local batch analysis interface', () => {
 })
 
 describe('saved job analysis', () => {
+  it('skips a job claimed by another analyzer without making duplicate model requests', async () => {
+    const { analyzer, host } = fixture(1)
+    const storage = new Map()
+    const library = new JobLibraryStorage({
+      getItem: async (key) => jsonClone(storage.get(key) ?? null),
+      setItem: async (key, value) => {
+        storage.set(key, jsonClone(value))
+      },
+    })
+    host.claimJobAnalysis = (id, token, duration) => library.claimAnalysis(id, token, duration)
+    host.releaseJobAnalysis = (id, token) => library.releaseAnalysis(id, token)
+    let release
+    let started
+    const waiting = new Promise((resolve) => {
+      started = resolve
+    })
+    const response = new Promise((resolve) => {
+      release = resolve
+    })
+    respond = async (role) => {
+      if (role === 'filtering') {
+        started()
+        await response
+        return filtering
+      }
+      return '招呼语'
+    }
+    const first = analyzer.start({ limit: 1 })
+    await waiting
+    const second = await new SavedJobAnalyzer(host).start({ limit: 1 })
+    expect(second).toMatchObject({ completed: 0, skipped: 1 })
+    expect(requests).toHaveLength(1)
+    release()
+    expect((await first).completed).toBe(1)
+    expect(requests.map((request) => request.role)).toEqual(['filtering', 'greetings'])
+  })
+
   it.each(['unmet', 'unknown'])(
     'saves a high score with %s hard requirements without generating a greeting',
     async (status) => {
@@ -189,7 +230,7 @@ describe('saved job analysis', () => {
       const value = JSON.parse(filtering)
       value.hardRequirements = [{ requirement: '硕士学历', status, reason: '学历依据' }]
       respond = async () => JSON.stringify(value)
-      const run = await analyzer.start({ modelKey: 'selected', limit: 1 })
+      const run = await analyzer.start({ limit: 1 })
       expect(run.completed).toBe(1)
       expect(records[0].analysis).toMatchObject({
         rating: 76,
@@ -206,7 +247,7 @@ describe('saved job analysis', () => {
     const value = JSON.parse(filtering)
     value.uncertainties = ['工作制需要确认']
     respond = async () => JSON.stringify(value)
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(records[0].analysis).toMatchObject({ rating: 76, passed: null, needsConfirmation: true })
     expect(requests).toHaveLength(1)
   })
@@ -216,7 +257,7 @@ describe('saved job analysis', () => {
     async (score) => {
       const { analyzer, host } = fixture(1)
       host.conf.formData.aiFiltering.score = score
-      await expect(analyzer.start({ modelKey: 'selected', limit: 1 })).rejects.toThrow()
+      await expect(analyzer.start({ limit: 1 })).rejects.toThrow()
       expect(requests).toEqual([])
     },
   )
@@ -225,7 +266,7 @@ describe('saved job analysis', () => {
     const { analyzer, records } = fixture(2)
     records[0].processingStatus = 'excluded'
 
-    const run = await analyzer.start({ modelKey: 'selected', limit: 20 })
+    const run = await analyzer.start({ limit: 20 })
 
     expect(run).toMatchObject({ status: 'completed', total: 1, completed: 1, skipped: 0 })
     expect(requests.map((request) => request.id)).toEqual(['1', '1'])
@@ -252,7 +293,7 @@ describe('saved job analysis', () => {
       events.push(`${role}:${data.rawData.encryptJobId}`)
       return role === 'filtering' ? filtering : '草稿'
     }
-    const run = await analyzer.start({ modelKey: 'selected', collectNew: true })
+    const run = await analyzer.start({ collectNew: true })
     expect(run).toMatchObject({ status: 'completed', total: 2, completed: 2 })
     expect(events).toEqual([
       'filtering:0',
@@ -283,7 +324,7 @@ describe('saved job analysis', () => {
       allowed = false
       return filtering
     }
-    const run = await analyzer.start({ modelKey: 'selected', collectNew: true })
+    const run = await analyzer.start({ collectNew: true })
     expect(run.status).toBe('failed')
     expect(run.error).toContain('访问限制')
     expect(requests.map((request) => request.role)).toEqual(['filtering'])
@@ -294,7 +335,7 @@ describe('saved job analysis', () => {
   it('does not begin collection with invalid model or resume configuration', async () => {
     const { analyzer, host } = fixture()
     host.resumes.currentResume.value = null
-    await expect(analyzer.start({ modelKey: 'selected', collectNew: true })).rejects.toThrow('简历')
+    await expect(analyzer.start({ collectNew: true })).rejects.toThrow('简历')
     expect(requests).toEqual([])
   })
 
@@ -305,7 +346,7 @@ describe('saved job analysis', () => {
         expect(saves).toHaveLength(Number(data.rawData.encryptJobId))
       return role === 'filtering' ? filtering : '招呼语草稿'
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 20 })
+    const run = await analyzer.start({ limit: 20 })
     expect(run).toMatchObject({ status: 'completed', total: 20, completed: 20, failed: 0 })
     expect(records.filter((record) => record.analysisStatus === 'ready')).toHaveLength(20)
     expect(records[0]).toMatchObject({
@@ -325,16 +366,17 @@ describe('saved job analysis', () => {
     records[2].sendStatus = 'queued'
     records[3].detailStatus = 'pending'
     records[4].detail.jobInfo.postDescription = '  '
-    const run = await analyzer.start({ modelKey: 'selected', limit: 20 })
+    const run = await analyzer.start({ limit: 20 })
     expect(run.total).toBe(1)
     expect(requests.map((request) => request.id)).toEqual(['5', '5'])
   })
 
-  it('uses the selected model for cloned prompts and does not mutate configuration', async () => {
-    const { analyzer, host } = fixture(1)
+  it('uses the globally configured model without adding prompt overrides or mutating configuration', async () => {
+    const { analyzer, host, records } = fixture(1)
     const before = JSON.stringify(host.conf)
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
-    expect(agentConfigs.map((config) => config.config.model)).toEqual(['selected', 'selected'])
+    await analyzer.start({ limit: 1 })
+    expect(agentConfigs.every(({ config }) => !Object.hasOwn(config, 'model'))).toBe(true)
+    expect(records[0].analysis.modelKey).toBe('selected')
     expect(agentConfigs.map((config) => config.config.enable)).toEqual([true, true])
     expect(JSON.stringify(host.conf)).toBe(before)
   })
@@ -353,7 +395,7 @@ describe('saved job analysis', () => {
       }
       return filtering
     }
-    await analyzer.start({ modelKey: 'selected', limit: 2 })
+    await analyzer.start({ limit: 2 })
     expect(chatSnapshots).toEqual(['主简历正文 A'])
     expect(records[0].analysis).toMatchObject({ resumeId: 'resume-a', resumeName: '主简历' })
     expect(records[1].analysis).toMatchObject({ resumeId: 'resume-a', resumeName: '主简历' })
@@ -364,7 +406,7 @@ describe('saved job analysis', () => {
     async (data) => {
       const { analyzer, host, records } = fixture(1)
       Object.assign(host.models.modelData.value[0].data, data)
-      await expect(analyzer.start({ modelKey: 'selected', limit: 1 })).rejects.toThrow(/配置/)
+      await expect(analyzer.start({ limit: 1 })).rejects.toThrow(/配置/)
       expect(requests).toEqual([])
       expect(records[0].analysisStatus).toBe('pending')
       expect(analyzer.busy.value).toBe(false)
@@ -376,7 +418,7 @@ describe('saved job analysis', () => {
     const low = JSON.parse(filtering)
     low.dimensions[0].score = 4
     respond = async () => JSON.stringify(low)
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(records[0]).toMatchObject({
       analysisStatus: 'ready',
       analysis: { rating: 56, passed: false },
@@ -392,7 +434,7 @@ describe('saved job analysis', () => {
   ])('rejects invalid model JSON %s without marking ready', async (text) => {
     const { analyzer, records } = fixture(1)
     respond = async () => text
-    const run = await analyzer.start({ modelKey: 'selected', limit: 1 })
+    const run = await analyzer.start({ limit: 1 })
     expect(run.failed).toBe(1)
     expect(records[0].analysisStatus).toBe('failed')
     expect(records[0].analysisFailureReason).toBeTruthy()
@@ -405,7 +447,7 @@ describe('saved job analysis', () => {
       throw new TypeError('Failed to fetch')
     }
 
-    const run = await analyzer.start({ modelKey: 'selected', limit: 1 })
+    const run = await analyzer.start({ limit: 1 })
 
     expect(run).toMatchObject({ status: 'failed', failed: 1, error: 'Failed to fetch' })
     expect(records[0]).toMatchObject({
@@ -420,17 +462,17 @@ describe('saved job analysis', () => {
       if (role === 'greetings') throw new Error('temporary model failure')
       return filtering
     }
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(records[0]).toMatchObject({
       analysisStatus: 'failed',
       analysis: { rating: 76 },
       analysisFailureReason: 'temporary model failure',
     })
     respond = async (role) => (role === 'filtering' ? filtering : '重试成功的草稿')
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(records[0]).toMatchObject({ analysisStatus: 'ready', finalGreeting: '重试成功的草稿' })
     const requestCount = requests.length
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(requests).toHaveLength(requestCount)
   })
 
@@ -447,11 +489,11 @@ describe('saved job analysis', () => {
         release = resolve
       })
     }
-    const pending = analyzer.start({ modelKey: 'selected', limit: 2 })
+    const pending = analyzer.start({ limit: 2 })
     await entered
     analyzer.stop()
     expect(analyzer.run.value.status).toBe('stopping')
-    await expect(analyzer.start({ modelKey: 'selected', limit: 1 })).rejects.toThrow()
+    await expect(analyzer.start({ limit: 1 })).rejects.toThrow()
     release(filtering)
     const run = await pending
     expect(run).toMatchObject({ status: 'stopped', failed: 0, completed: 0, skipped: 1 })
@@ -462,6 +504,27 @@ describe('saved job analysis', () => {
     expect(records[1].analysisStatus).toBe('pending')
     expect(requests.map((request) => request.role)).toEqual(['filtering'])
   })
+
+  it.each(['claimJobAnalysis', 'getJobLibrary'])(
+    'does not start greetings when stopped during %s after filtering',
+    async (boundary) => {
+      const { analyzer, records, host } = fixture(1)
+      const original = host[boundary]
+      host[boundary] = async (...args) => {
+        const result = await original(...args)
+        if (requests.some((request) => request.role === 'filtering')) analyzer.stop()
+        return result
+      }
+
+      const run = await analyzer.start({ limit: 1 })
+
+      expect(requests.map((request) => request.role)).toEqual(['filtering'])
+      expect(run).toMatchObject({ status: 'stopped', completed: 0, failed: 0, skipped: 1 })
+      expect(records[0].analysisStatus).toBe('pending')
+      expect(records[0].analysis.rating).toBe(76)
+      expect(records[0].finalGreeting).toBeUndefined()
+    },
+  )
 
   it('saves a valid in-flight greeting after stop and keeps the lock through its save', async () => {
     const { analyzer, records, host } = fixture(2)
@@ -482,7 +545,7 @@ describe('saved job analysis', () => {
       expect(analyzer.busy.value).toBe(true)
       return save(...args)
     }
-    const pending = analyzer.start({ modelKey: 'selected', limit: 2 })
+    const pending = analyzer.start({ limit: 2 })
     await entered
     analyzer.stop()
     release('停止时已完成的有效草稿')
@@ -501,7 +564,7 @@ describe('saved job analysis', () => {
       records[1].analysisStatus = 'ready'
       return filtering
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 2 })
+    const run = await analyzer.start({ limit: 2 })
     expect(run.skipped).toBe(2)
     expect(requests).toHaveLength(1)
     expect(records[0].analysis).toBeUndefined()
@@ -512,7 +575,7 @@ describe('saved job analysis', () => {
     respond = async () => {
       throw Object.assign(new Error('model authorization failed'), { statusCode: 401 })
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 2 })
+    const run = await analyzer.start({ limit: 2 })
     expect(run).toMatchObject({ status: 'failed', failed: 1, error: 'model authorization failed' })
     expect(records[0].analysisStatus).toBe('failed')
     expect(records[1].analysisStatus).toBe('pending')
@@ -524,7 +587,7 @@ describe('saved job analysis', () => {
     respond = async () => {
       throw new Error('请求错误 401: Unauthorized')
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 2 })
+    const run = await analyzer.start({ limit: 2 })
     expect(run.status).toBe('failed')
     expect(requests).toHaveLength(1)
     expect(records[0].analysisFailureReason).toContain('401')
@@ -535,7 +598,7 @@ describe('saved job analysis', () => {
     host.saveJobAnalysis = async () => {
       throw new Error('保存超时')
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 2 })
+    const run = await analyzer.start({ limit: 2 })
     expect(run).toMatchObject({ status: 'failed', error: '保存超时' })
     expect(requests).toHaveLength(2)
     expect(analyzer.busy.value).toBe(false)
@@ -546,7 +609,7 @@ describe('saved job analysis', () => {
     host.getJobLibrary = async () => {
       throw new Error('本地读取失败')
     }
-    const run = await analyzer.start({ modelKey: 'selected', limit: 2 })
+    const run = await analyzer.start({ limit: 2 })
     expect(run).toMatchObject({ status: 'failed', error: '本地读取失败' })
     expect(analyzer.busy.value).toBe(false)
     expect(requests).toEqual([])
@@ -555,7 +618,7 @@ describe('saved job analysis', () => {
   it('rejects a missing current resume before any model request', async () => {
     const { analyzer, host } = fixture()
     host.resumes.currentResume.value = null
-    await expect(analyzer.start({ modelKey: 'selected', limit: 2 })).rejects.toThrow('简历')
+    await expect(analyzer.start({ limit: 2 })).rejects.toThrow('简历')
     expect(requests).toEqual([])
   })
 
@@ -565,17 +628,17 @@ describe('saved job analysis', () => {
       const { analyzer, host } = fixture()
       host.resumes.currentResume.value = resume
       host.conf.formData.resumeText = '旧配置中保留的简历'
-      await expect(analyzer.start({ modelKey: 'selected', limit: 1 })).rejects.toThrow('简历')
+      await expect(analyzer.start({ limit: 1 })).rejects.toThrow('简历')
       expect(requests).toEqual([])
     },
   )
 
   it('uses the new selection for the next batch without rewriting saved analysis', async () => {
     const { analyzer, host, records } = fixture(2)
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     const history = jsonClone(records[0])
     host.resumes.currentResume.value = { id: 'resume-b', name: '备用简历', content: '正文 B' }
-    await analyzer.start({ modelKey: 'selected', limit: 1 })
+    await analyzer.start({ limit: 1 })
     expect(chatSnapshots).toEqual(['主简历正文 A', '正文 B'])
     expect(records[0]).toEqual(history)
     expect(records[1].analysis).toMatchObject({ resumeId: 'resume-b', resumeName: '备用简历' })
@@ -588,15 +651,17 @@ describe('saved job analysis', () => {
       if (kind === 'workflow') host.workflow.status.value = 'running'
       else if (kind === 'gatheringBusy' || kind === 'realtimeBusy') host[kind].value = true
       else host.hasPendingCollectionStorage = true
-      await expect(analyzer.start({ modelKey: 'selected', limit: 20 })).rejects.toThrow()
+      await expect(analyzer.start({ limit: 20 })).rejects.toThrow()
       expect(requests).toEqual([])
     },
   )
 
   it('refuses unknown models and invalid batch sizes without touching records', async () => {
-    const { analyzer, records } = fixture()
-    await expect(analyzer.start({ modelKey: 'missing', limit: 20 })).rejects.toThrow()
-    await expect(analyzer.start({ modelKey: 'selected', limit: 0 })).rejects.toThrow()
+    const { analyzer, records, host } = fixture()
+    host.models.getDefaultModelKey = () => 'missing'
+    await expect(analyzer.start({ limit: 20 })).rejects.toThrow()
+    host.models.getDefaultModelKey = () => 'selected'
+    await expect(analyzer.start({ limit: 0 })).rejects.toThrow()
     expect(records.every((record) => record.analysisStatus === 'pending')).toBe(true)
     expect(requests).toEqual([])
   })
@@ -604,7 +669,7 @@ describe('saved job analysis', () => {
   it('analyzes only the requested saved job and keeps the current resume snapshot', async () => {
     const { analyzer, records } = fixture(3)
 
-    const run = await analyzer.analyzeOne('1', 'selected')
+    const run = await analyzer.analyzeOne('1')
 
     expect(run).toMatchObject({ status: 'completed', total: 1, completed: 1 })
     expect(requests.map((request) => request.id)).toEqual(['1', '1'])
@@ -621,7 +686,7 @@ describe('saved job analysis', () => {
     const { analyzer, records } = fixture(1)
     records[0].detailStatus = 'pending'
 
-    await expect(analyzer.analyzeOne(records[0].encryptJobId, 'selected')).rejects.toThrow('补全')
+    await expect(analyzer.analyzeOne(records[0].encryptJobId)).rejects.toThrow('补全')
     expect(requests).toEqual([])
     expect(records[0].analysisStatus).toBe('pending')
   })
@@ -637,9 +702,7 @@ describe('saved job analysis', () => {
     const { analyzer, records, saves } = fixture(1)
     Object.assign(records[0], patch)
 
-    await expect(analyzer.analyzeOne(records[0].encryptJobId, 'selected')).rejects.toThrow(
-      '不能覆盖',
-    )
+    await expect(analyzer.analyzeOne(records[0].encryptJobId)).rejects.toThrow('不能覆盖')
 
     expect(requests).toEqual([])
     expect(saves).toEqual([])
@@ -648,7 +711,7 @@ describe('saved job analysis', () => {
   it('reports a missing saved job instead of completing an empty single-job run', async () => {
     const { analyzer } = fixture(1)
 
-    await expect(analyzer.analyzeOne('missing', 'selected')).rejects.toThrow('未找到')
+    await expect(analyzer.analyzeOne('missing')).rejects.toThrow('未找到')
     expect(requests).toEqual([])
   })
 })

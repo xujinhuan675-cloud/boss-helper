@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import { defaultFormData } from '../composables/conf/info'
+import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 import { jsonClone } from '../utils/deepmerge'
 import { parseObject, validateConfig, validateModels } from './settingsValidation'
 
@@ -53,11 +54,11 @@ describe('workbench settings import boundaries', () => {
     expect(() => validateModels(value)).toThrow()
   })
 
-  it('rejects invalid numeric ranges, timing and passing scores', () => {
+  it('rejects invalid native filters, timing and passing scores', () => {
     const config = jsonClone(defaultFormData)
-    config.salaryRange.value = [20, 10, false]
-    expect(() => validateConfig(config)).toThrow('薪资')
-    config.salaryRange.value = [10, 20, false]
+    config.nativeSearch = nativeSearchFromUrl('https://www.zhipin.com/web/geek/jobs?salary=invalid')
+    expect(() => validateConfig(config)).toThrow('原生筛选')
+    config.nativeSearch = nativeSearchFromUrl('https://www.zhipin.com/web/geek/jobs?salary=405')
     config.delayCollectionDetailMin = 10
     expect(() => validateConfig(config)).toThrow('间隔')
     config.delayCollectionDetailMin = 1

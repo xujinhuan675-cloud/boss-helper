@@ -332,7 +332,7 @@ describe('offline batch analysis panel', () => {
     },
   )
 
-  it('passes the current configured model and quantity, then refreshes and emits completed', async () => {
+  it('passes the quantity without a model override, then refreshes and emits completed', async () => {
     const state = mount()
     await settled()
     state.limit = 7
@@ -346,7 +346,7 @@ describe('offline batch analysis panel', () => {
     const task = state.start()
     try {
       await settled()
-      expect(starts).toEqual([{ modelKey: 'filter', limit: 7 }])
+      expect(starts).toEqual([{ limit: 7 }])
       expect(reads).toBe(1)
       expect(completed).toBe(0)
     } finally {

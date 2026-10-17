@@ -40,6 +40,7 @@ function context() {
     conf: { confInit: async () => {}, formData: { resumeText: '' } },
     resumes: { init: async () => {} },
     models: { initModel: async () => {} },
+    loadKeywordRotation: async () => {},
   }
 }
 
@@ -54,6 +55,7 @@ describe('executor message boundary', () => {
     { type: 'selectJob', key: '' },
     { type: 'collect', method: 'sendMessage' },
     { type: 'saveKeywords', input: null },
+    { type: 'applyNativeFilters', filters: { url: 'https://example.com' } },
   ])('rejects malformed or reflected commands: %j', (command) => {
     expect(isExecutorCommand(command)).toBe(false)
   })
@@ -90,6 +92,46 @@ describe('executor message boundary', () => {
 })
 
 describe('headless executor bridge', () => {
+  it('rejects native filter navigation during active tasks or pending saves', async () => {
+    for (const busy of [
+      'gatheringBusy',
+      'keywordRotationSaving',
+      'keywordExtractionBusy',
+      'keywordRotationBusy',
+      'realtimeBusy',
+      'analysis',
+      'workflow',
+      'pending',
+    ]) {
+      const ctx = context()
+      let navigated = false
+      ctx.applyNativeFilters = async () => {
+        navigated = true
+      }
+      if (busy === 'analysis') ctx.savedAnalyzer.busy.value = true
+      else if (busy === 'workflow') ctx.workflow = { status: ref('running') }
+      else if (busy === 'pending') ctx.hasPendingCollectionStorage = true
+      else ctx[busy].value = true
+      const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+      await expect(
+        bridge.command({
+          type: 'applyNativeFilters',
+          filters: {
+            query: 'AI',
+            city: '',
+            jobType: '',
+            salary: '405',
+            experience: [],
+            degree: [],
+            stage: [],
+            scale: [],
+            industry: [],
+          },
+        }),
+      ).rejects.toThrow('active tasks')
+      expect(navigated).toBe(false)
+    }
+  })
   it.each(['collectAnalyze', 'completeDetails'])(
     'rejects the removed %s task at both executor boundaries',
     async (type) => {

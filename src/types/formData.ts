@@ -1,3 +1,5 @@
+import type { NativeSearchFilters } from '../entrypoints/boss/nativeSearch'
+
 export interface Statistics {
   date: string
   success: number
@@ -18,9 +20,7 @@ export interface FormData {
   jobTitle: FormDataSelect
   jobContent: FormDataSelect
   hrPosition: FormDataSelect
-  jobAddress: FormDataSelect
-  salaryRange: FormSalaryRangeInput
-  companySizeRange: FormDataRangeInput
+  nativeSearch: NativeSearchFilters | null
   customGreeting: FormDataInput
   deliveryLimit: FormDataInputNumber
   greetingVariable: FormDataCheckbox
@@ -41,11 +41,6 @@ export interface FormData {
     key: string
     origins: string
     straightDistance: number
-    drivingDistance: number
-    drivingDuration: number
-    walkingDistance: number
-    walkingDuration: number
-    enable: boolean
   }
   record: { model?: string[]; enable: boolean }
   // animation?: "frame" | "card" | "together";
@@ -75,32 +70,14 @@ export interface FormInfoAi {
 }
 
 export interface FormDataSelect {
-  include: boolean
   value: string[]
   options: string[]
-  enable: boolean
+  include?: boolean
+  enable?: boolean
 }
 
 export interface FormDataInput {
   value: string | Array<CustomGreetingItem>
-  enable: boolean
-}
-
-export type FormDataRange = [number, number, boolean]
-
-export interface FormDataRangeInput {
-  value: FormDataRange
-  enable: boolean
-}
-
-export interface FormSalaryRangeInput {
-  // 宽松/严格 默认宽松false
-  value: FormDataRange // 8-13K
-  advancedValue: {
-    H: FormDataRange // 45-75元/时
-    D: FormDataRange // 360-600元/天
-    M: FormDataRange // 8000-13000元/月
-  }
   enable: boolean
 }
 
@@ -118,7 +95,6 @@ export type Prompt = Array<{
 }>
 
 export interface FormDataAi {
-  model?: string
   prompt: Prompt
   enable: boolean
 }

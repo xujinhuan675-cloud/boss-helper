@@ -77,8 +77,7 @@ const advancedGreetinSaveLoading = ref(false)
 async function advancedGreetinSave(close: () => void) {
   advancedGreetinSaveLoading.value = true
   try {
-    for (const index in advancedGreetingValue.value) {
-      const item = advancedGreetingValue.value[index]
+    for (const item of advancedGreetingValue.value) {
       if (item.type === 'image') {
         if (item.model instanceof File) {
           const file = item.model as File
@@ -89,7 +88,7 @@ async function advancedGreetinSave(close: () => void) {
           })
           item.image = uploadedImage.key
         }
-        advancedGreetingValue.value[index] = { ...item, model: undefined }
+        item.model = undefined
       }
     }
     conf.formData.customGreeting.value = JSON.parse(

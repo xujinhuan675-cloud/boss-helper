@@ -269,7 +269,7 @@ function download(filtered: boolean) {
   try {
     exportJson(
       data,
-      `boss-helper-job-library${filtered ? '-filtered' : ''}-${new Date().toISOString().slice(0, 10)}`,
+      `OfferHunt-job-library${filtered ? '-filtered' : ''}-${new Date().toISOString().slice(0, 10)}`,
     )
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error)
@@ -695,9 +695,9 @@ async function copyGreeting() {
                     class="py-2"
                   >
                     <dt class="flex flex-wrap justify-between gap-2 font-medium">
-                      <span>{{ MATCH_DIMENSIONS[index].label }}</span>
+                      <span>{{ MATCH_DIMENSIONS[index]?.label }}</span>
                       <span
-                        >{{ item.score ?? '待确认' }}/{{ MATCH_DIMENSIONS[index].maxScore }}</span
+                        >{{ item.score ?? '待确认' }}/{{ MATCH_DIMENSIONS[index]?.maxScore }}</span
                       >
                     </dt>
                     <dd class="mt-1 text-muted break-words">{{ item.reason }}</dd>

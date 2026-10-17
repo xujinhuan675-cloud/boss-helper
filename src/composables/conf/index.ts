@@ -16,6 +16,31 @@ export * from './info'
 const formDataPresetKey = 'local:FormDataPrese'
 const formDataPresetsKey = 'local:FormDataPreses'
 
+function removeRetiredRanges(config: Partial<FormData>) {
+  delete config.salaryRange
+  delete config.companySizeRange
+}
+
+function removeRetiredFilters(config: Partial<FormData>) {
+  delete config.jobAddress
+  for (const key of ['company', 'jobTitle', 'jobContent', 'hrPosition'] as const) {
+    const filter = config[key]
+    if (filter && isPlainObject(filter)) {
+      delete filter.include
+      delete filter.enable
+    }
+  }
+  if (config.amap && isPlainObject(config.amap)) {
+    const amap = config.amap as Record<string, unknown>
+    if (amap.enable === false) amap.straightDistance = 0
+    delete amap.enable
+    delete amap.drivingDistance
+    delete amap.drivingDuration
+    delete amap.walkingDistance
+    delete amap.walkingDuration
+  }
+}
+
 export const appearanceConf = useStorageAsync(
   'appearance-conf',
   {
@@ -60,20 +85,6 @@ watchThrottled(
 
 const FROM_VERSION: [string, (from: Partial<FormData>) => Partial<FormData>][] = [
   [
-    '20250826',
-    (from) => {
-      if (from.salaryRange && typeof from.salaryRange.value === 'string') {
-        const [min, max] = (from.salaryRange.value as string).split('-').map(Number)
-        from.salaryRange.value = [min ?? 0, max ?? 0, false]
-      }
-      if (from.companySizeRange && typeof from.companySizeRange.value === 'string') {
-        const [min, max] = (from.companySizeRange.value as string).split('-').map(Number)
-        from.companySizeRange.value = [min ?? 0, max ?? 0, false]
-      }
-      return from
-    },
-  ],
-  [
     '20260521',
     (from) => {
       if (from.aiFiltering?.prompt) {
@@ -108,12 +119,6 @@ const FROM_VERSION: [string, (from: Partial<FormData>) => Partial<FormData>][] =
           prompt: defaultFormData.aiGreeting.prompt,
         }
       }
-      if (from.jobAddress) {
-        from.jobAddress = {
-          ...from.jobAddress,
-          include: true,
-        }
-      }
       return from
     },
   ],
@@ -146,7 +151,6 @@ export const useConf = () => {
       from.aiFiltering = {
         ...jsonClone(defaultFormData.aiFiltering),
         enable: from.aiFiltering.enable ?? defaultFormData.aiFiltering.enable,
-        model: from.aiFiltering.model,
       }
     }
     try {
@@ -166,6 +170,12 @@ export const useConf = () => {
       })
       throw err
     }
+    for (const key of ['aiFiltering', 'aiGreeting', 'aiReply'] as const) {
+      const prompt = from[key]
+      if (isPlainObject(prompt)) Reflect.deleteProperty(prompt, 'model')
+    }
+    removeRetiredRanges(from)
+    removeRetiredFilters(from)
     return from
   }
 
@@ -198,12 +208,29 @@ export const useConf = () => {
       if (!isPlainObject(rawConfig)) throw new Error('配置格式异常；已保留原数据')
       let from = rawConfig as Partial<FormData>
       const previousFiltering = JSON.stringify(from.aiFiltering)
+      const hasRetiredRanges =
+        'salaryRange' in from ||
+        'companySizeRange' in from ||
+        'jobAddress' in from ||
+        ['company', 'jobTitle', 'jobContent', 'hrPosition'].some(
+          (key) => isPlainObject(from[key]) && ('include' in from[key] || 'enable' in from[key]),
+        ) ||
+        (isPlainObject(from.amap) &&
+          [
+            'enable',
+            'drivingDistance',
+            'drivingDuration',
+            'walkingDistance',
+            'walkingDuration',
+          ].some((key) => key in from.amap!))
       from = (await formDataHandler(from)) ?? from
       const data = deepmerge<FormData>(defaultFormData, from)
-      if (JSON.stringify(from.aiFiltering) !== previousFiltering)
+      if (JSON.stringify(from.aiFiltering) !== previousFiltering || hasRetiredRanges)
         await counter.storageSet(storageKey, jsonClone(data))
       formDataPreset.value = rawFormDataPreset
       formDataPresets.value = rawFormDataPresets
+      removeRetiredRanges(formData)
+      removeRetiredFilters(formData)
       Object.assign(formData, data)
     } catch (e) {
       toast.add({
@@ -219,6 +246,8 @@ export const useConf = () => {
 
   async function confSaving() {
     try {
+      removeRetiredRanges(formData)
+      removeRetiredFilters(formData)
       await counter.storageSet(formDataKey(), jsonClone(formData))
       await counter.storageSet(formDataPresetKey, jsonClone(formDataPreset.value))
       await counter.storageSet(formDataPresetsKey, jsonClone(formDataPresets.value))
@@ -242,6 +271,8 @@ export const useConf = () => {
   async function confReload() {
     const from = await formDataHandler(await counter.storageGet(formDataKey(), {}))
     const v = deepmerge<FormData>(defaultFormData, from)
+    removeRetiredRanges(formData)
+    removeRetiredFilters(formData)
     deepmerge(formData, v, { clone: false })
     formData.aiFiltering = v.aiFiltering
     logger.debug('formData已重置')
@@ -254,12 +285,14 @@ export const useConf = () => {
   async function confExport() {
     const from = await formDataHandler(await counter.storageGet(formDataKey(), {}))
     const data = deepmerge<FormData>(defaultFormData, from)
+    removeRetiredFilters(data)
     exportJson(data, '打招呼配置')
   }
 
   async function confImport() {
     let jsonData = await importJson<Partial<FormData>>()
     jsonData = (await formDataHandler(jsonData)) ?? jsonData
+    removeRetiredRanges(formData)
     deepmerge(formData, jsonData, { clone: false })
     if (jsonData.aiFiltering) formData.aiFiltering = jsonClone(jsonData.aiFiltering)
     toast.add({
@@ -333,6 +366,7 @@ export const useConf = () => {
 
       await counter.storageSet(formDataPresetKey, formDataPreset.value)
       await counter.storageSet(formDataPresetsKey, formDataPresets.value)
+      removeRetiredRanges(formData)
       await counter.storageSet(formDataKey(), jsonClone(formData))
 
       toast.add({

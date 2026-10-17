@@ -54,6 +54,81 @@ beforeEach(() => {
 })
 
 describe('percentage scoring configuration', () => {
+  it('normalizes retired address, keyword modes and commute settings', async () => {
+    const legacy = jsonClone(defaults)
+    legacy.jobAddress = { value: ['downtown'], enable: true, include: true, options: [] }
+    legacy.jobTitle = { value: ['intern'], options: [], enable: true, include: true }
+    legacy.amap = {
+      key: 'key',
+      origins: '1,2',
+      straightDistance: 10,
+      drivingDistance: 30,
+      drivingDuration: 45,
+      walkingDistance: 5,
+      walkingDuration: 60,
+      enable: false,
+    }
+    saved.set('local:web-geek-job-FormData', legacy)
+    const conf = useConf()
+    Object.assign(conf.formData, legacy)
+    await conf.confInit()
+
+    expect(conf.formData).not.toHaveProperty('jobAddress')
+    expect(conf.formData.jobTitle).toEqual({ value: ['intern'], options: [] })
+    expect(conf.formData.amap).toEqual({ key: 'key', origins: '1,2', straightDistance: 0 })
+    expect(saved.get('local:web-geek-job-FormData')).not.toHaveProperty('jobAddress')
+  })
+
+  it('removes retired local ranges from active settings and persisted presets', async () => {
+    const config = jsonClone(defaults)
+    config.salaryRange = { value: [8, 13, false], enable: true }
+    config.companySizeRange = { value: [500, 2000, true], enable: true }
+    saved.set('local:web-geek-job-FormData', config)
+    const conf = useConf()
+    Object.assign(conf.formData, config)
+    await conf.confInit()
+    for (const key of ['salaryRange', 'companySizeRange']) {
+      expect(conf.formData).not.toHaveProperty(key)
+      expect(saved.get('local:web-geek-job-FormData')).not.toHaveProperty(key)
+    }
+    expect(conf.formData.company).toEqual(config.company)
+    await conf.confSaving()
+    expect(saved.get('local:web-geek-job-FormData')).not.toHaveProperty('salaryRange')
+  })
+  it('strips retired ranges from older imports regardless of their format', async () => {
+    const config = await useConf().prepareConfig({
+      salaryRange: { value: '8-13' },
+      companySizeRange: null,
+    })
+    expect(config).not.toHaveProperty('salaryRange')
+    expect(config).not.toHaveProperty('companySizeRange')
+  })
+  it.each(['confReload', 'confImport'])(
+    'removes retired fields from active settings through %s',
+    async (method) => {
+      const legacy = { ...jsonClone(defaults), salaryRange: null, companySizeRange: '500-2000' }
+      saved.set('local:web-geek-job-FormData', legacy)
+      imported = legacy
+      const conf = useConf()
+      Object.assign(conf.formData, legacy)
+      await conf[method]()
+      expect(conf.formData).not.toHaveProperty('salaryRange')
+      expect(conf.formData).not.toHaveProperty('companySizeRange')
+      await conf.confSaving()
+      expect(saved.get('local:web-geek-job-FormData')).not.toHaveProperty('salaryRange')
+      expect(saved.get('local:web-geek-job-FormData')).not.toHaveProperty('companySizeRange')
+    },
+  )
+  it('preserves active and stored settings if retired-field cleanup cannot be persisted', async () => {
+    const legacy = { ...jsonClone(defaults), salaryRange: { value: '8-13' } }
+    saved.set('local:web-geek-job-FormData', legacy)
+    const conf = useConf()
+    const before = jsonClone(conf.formData)
+    storageWriteError = new Error('cleanup write failed')
+    await expect(conf.confInit()).rejects.toThrow('cleanup write failed')
+    expect(jsonClone(conf.formData)).toEqual(before)
+    expect(saved.get('local:web-geek-job-FormData')).toEqual(legacy)
+  })
   it.each([
     ['local:FormDataPrese', null],
     ['local:FormDataPrese', []],
@@ -151,12 +226,27 @@ describe('percentage scoring configuration', () => {
         score: 70,
         scoringVersion: 'weighted-v1',
         enable: true,
-        model: 'my-model',
         prompt: defaults.aiFiltering.prompt,
       })
       await conf.confSaving()
       expect(saved.get('local:web-geek-job-FormData').aiFiltering.score).toBe(70)
       expect(saved.get('local:web-geek-job-FormData').aiFiltering.legacyScore).toBeUndefined()
+    },
+  )
+
+  it.each(['confInit', 'confReload', 'confImport'])(
+    'removes legacy prompt model overrides through %s without changing prompt content',
+    async (method) => {
+      const legacy = jsonClone(defaults)
+      for (const key of ['aiFiltering', 'aiGreeting', 'aiReply']) legacy[key].model = 'old-model'
+      imported = legacy
+      saved.set('local:web-geek-job-FormData', legacy)
+      const conf = useConf()
+      await conf[method]()
+      for (const key of ['aiFiltering', 'aiGreeting', 'aiReply']) {
+        expect(conf.formData[key].model).toBeUndefined()
+        expect(jsonClone(conf.formData[key].prompt)).toEqual(defaults[key].prompt)
+      }
     },
   )
 

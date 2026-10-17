@@ -4,7 +4,13 @@ import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from 'bun:te
 import { nextTick, reactive, ref } from 'vue'
 
 import { defaultFormData } from '../composables/conf/info'
+import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
 import { mergeJobRecords, JOB_LIBRARY_STORAGE_KEY } from '../entrypoints/boss/jobStore'
+import {
+  createKeywordRotationPlan,
+  DEFAULT_JOB_KEYWORDS,
+  KEYWORD_ROTATION_STORAGE_KEY,
+} from '../entrypoints/boss/keywordRotation'
 import { jsonClone } from '../utils/deepmerge'
 
 const stored = new Map()
@@ -20,10 +26,22 @@ const tabs = [
 ]
 let send = async () => ({ ok: true, data: { ready: true, error: '' } })
 const calls = []
+const panelCalls = []
+const createdTabs = []
+let panelError = ''
 mock.module('#imports', () => ({
   browser: {
+    runtime: { getURL: (path) => `chrome-extension://test${path}` },
+    sidePanel: {
+      open: async (options) => {
+        if (panelError) throw new Error(panelError)
+        panelCalls.push(options)
+      },
+    },
     tabs: {
+      getCurrent: async () => ({ id: 21, windowId: 7 }),
       query: async () => tabs,
+      create: async (options) => createdTabs.push(options),
       sendMessage: async (id, request) => {
         calls.push([id, request.command])
         return send(id, request)
@@ -54,6 +72,7 @@ const conf = {
 mock.module('@/composables/conf', () => ({ useConf: () => conf }))
 const models = {
   modelData: ref([]),
+  getDefaultModelKey: () => models.modelData.value[0]?.key,
   saveModel: async (value) => {
     stored.set('conf-model', value)
     models.modelData.value = value
@@ -62,8 +81,17 @@ const models = {
 mock.module('@/composables/useModel', () => ({
   confModelKey: 'conf-model',
   useModel: () => models,
+  isCompleteModel: (model) =>
+    [model?.data?.api_key, model?.data?.base_url, model?.data?.model].every(
+      (field) => typeof field === 'string' && !!field.trim(),
+    ),
 }))
-const resumes = { resumes: ref([]), currentResumeId: ref(null), init: async () => {} }
+const resumes = {
+  resumes: ref([]),
+  currentResumeId: ref(null),
+  currentResume: ref(null),
+  init: async () => {},
+}
 mock.module('@/composables/useResume', () => ({
   RESUME_STORAGE_KEY: 'local:boss-helper:resumes:v1',
   useResumes: () => resumes,
@@ -73,11 +101,52 @@ mock.module('@/composables/useStatistics', () => ({
   statisticsKey: 'local:history',
 }))
 let modelReadError = false
+const library = new JobLibraryStorage({
+  getItem: async (key) => jsonClone(stored.get(key) ?? null),
+  setItem: async (key, value) => {
+    stored.set(key, jsonClone(value))
+  },
+})
+const modelCalls = []
+mock.module('@/composables/useModel/chatModel', () => ({
+  ChatModel: class {
+    createAgent() {
+      return true
+    }
+    async chat(role, data) {
+      modelCalls.push({ role, jd: data.jobData.jobDescription })
+      return {
+        text:
+          role === 'greetings'
+            ? '你好，期待沟通。'
+            : JSON.stringify({
+                dimensions: [
+                  { key: 'responsibilities', score: 30, reason: '匹配' },
+                  { key: 'skills', score: 25, reason: '匹配' },
+                  { key: 'experience', score: 20, reason: '匹配' },
+                  { key: 'industry', score: 10, reason: '匹配' },
+                  { key: 'preferences', score: 10, reason: '匹配' },
+                ],
+                strengths: [],
+                gaps: [],
+                hardRequirements: [],
+                uncertainties: [],
+              }),
+      }
+    }
+  },
+}))
 mock.module('@/message', () => ({
   counter: {
+    updateJobLibrary: (mutation) => library.update(mutation),
+    claimJobAnalysis: (id, token, duration) => library.claimAnalysis(id, token, duration),
+    releaseJobAnalysis: (id, token) => library.releaseAnalysis(id, token),
     storageGet: async (key, fallback) => {
       if (key === 'conf-model' && modelReadError) throw new Error('storage read failed')
       return jsonClone(stored.get(key) ?? fallback)
+    },
+    storageSet: async (key, value) => {
+      stored.set(key, jsonClone(value))
     },
   },
 }))
@@ -94,6 +163,228 @@ beforeAll(async () => {
 afterAll(() => interval.mockRestore())
 
 describe('workbench synchronization and mutation boundary', () => {
+  test('analyzes saved JD without any BOSS tab or executor message', async () => {
+    const original = [...tabs]
+    const savedModels = stored.get('conf-model')
+    const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    try {
+      tabs.length = 0
+      await store.refreshTabs()
+      stored.set('conf-model', [
+        {
+          key: 'model',
+          name: '模型',
+          data: { api_key: 'test', base_url: 'https://model.invalid/v1', model: 'saved-model' },
+        },
+      ])
+      resumes.currentResume.value = { id: 'resume', name: '主简历', content: '完整简历正文' }
+      const records = mergeJobRecords(
+        [],
+        [{ encryptJobId: 'offline', jobName: '产品经理' }],
+        '产品',
+        'batch',
+      ).records
+      Object.assign(records[0], {
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: '已采集的完整 JD' } },
+      })
+      stored.set(JOB_LIBRARY_STORAGE_KEY, records)
+      calls.length = 0
+      modelCalls.length = 0
+      await store.perform(() => store.startSavedAnalysis({ limit: 1 }))
+      for (let i = 0; i < 100 && store.getWorkbenchState().analysisBusy; i++) await settle()
+      expect(calls).toEqual([])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings'])
+      expect(modelCalls.every((call) => call.jd === '已采集的完整 JD')).toBe(true)
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
+        analysisStatus: 'ready',
+        finalGreeting: '你好，期待沟通。',
+      })
+      expect(store.getWorkbenchState().analysisRun).toMatchObject({
+        status: 'completed',
+        completed: 1,
+      })
+    } finally {
+      tabs.splice(0, tabs.length, ...original)
+      stored.set('conf-model', savedModels ?? [])
+      stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      resumes.currentResume.value = null
+      await store.refreshTabs()
+    }
+  })
+
+  test('saves native filters offline with a warning and synchronizes the same saved selection on reconnect', async () => {
+    const filters = {
+      query: 'AI产品经理',
+      city: '101020100',
+      jobType: '1901',
+      salary: '405',
+      experience: ['104', '105'],
+      degree: [],
+      stage: ['803'],
+      scale: [],
+      industry: [],
+    }
+    const originalSend = send
+    try {
+      send = async () => {
+        throw new Error('offline')
+      }
+      await store.refreshRuntime()
+      await store.saveConfig({ nativeSearch: filters })
+      expect(stored.get('config').nativeSearch).toEqual(filters)
+      expect(store.getWorkbenchState().settingsWarning).toContain('尚未同步')
+      const sent = []
+      send = async (_id, request) => {
+        sent.push(request.command)
+        return { ok: true, data: { ready: true, error: '' } }
+      }
+      await store.refreshRuntime()
+      await store.saveConfig({ nativeSearch: filters })
+      expect(sent).toContainEqual({ type: 'applyNativeFilters', filters })
+      expect(store.getWorkbenchState().settingsWarning).toBe('')
+      send = async (_id, request) =>
+        request.command.type === 'applyNativeFilters'
+          ? { ok: false, error: 'busy' }
+          : { ok: true, data: { ready: true, error: '' } }
+      await expect(store.saveConfig({ nativeSearch: filters })).rejects.toThrow('尚未同步')
+      expect(stored.get('config').nativeSearch).toEqual(filters)
+    } finally {
+      send = originalSend
+      stored.delete('config')
+      await conf.confInit()
+      await store.refreshRuntime()
+    }
+  })
+  test('opens the native task panel and reports browser refusal', async () => {
+    const opening = store.openTaskPanel()
+    expect(panelCalls).toEqual([{ tabId: 21 }])
+    await opening
+    panelError = 'browser refused panel'
+    try {
+      await store.openTaskPanel()
+      expect(store.getWorkbenchState().error).toBe(panelError)
+    } finally {
+      panelError = ''
+    }
+  })
+
+  test('opens the existing task page when the browser has no side panel', async () => {
+    const { browser } = await import('#imports')
+    const panel = browser.sidePanel
+    browser.sidePanel = undefined
+    try {
+      await store.openTaskPanel()
+      expect(createdTabs.at(-1)).toEqual({ url: 'chrome-extension://test/sidepanel.html' })
+    } finally {
+      browser.sidePanel = panel
+    }
+  })
+
+  test('excludes chat and detail pages from executor targets', async () => {
+    const original = [...tabs]
+    try {
+      tabs.splice(
+        0,
+        tabs.length,
+        { id: 9, title: 'chat', url: 'https://www.zhipin.com/web/geek/chat', active: true },
+        { id: 10, title: 'detail', url: 'https://www.zhipin.com/job_detail/one.html' },
+        { id: 11, title: 'jobs', url: 'https://www.zhipin.com/web/geek/job-recommend?city=1' },
+      )
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().tabs.map((tab) => tab.id)).toEqual([11])
+      expect(store.getWorkbenchState().tabId).toBe(11)
+      tabs.splice(0, tabs.length, tabs[0])
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().tabId).toBeNull()
+      expect(store.getWorkbenchState().runtime).toBeNull()
+    } finally {
+      tabs.splice(0, tabs.length, ...original)
+      await store.refreshTabs()
+    }
+  })
+
+  test('selects the default model from the latest storage and rejects removed models', async () => {
+    const model = (key) => ({
+      key,
+      name: key,
+      data: { api_key: 'key', base_url: 'https://example.com/v1', model: 'test' },
+    })
+    stored.set('conf-model', [model('one'), model('two'), model('external')])
+    await store.perform(() => store.selectDefaultModel('two'))
+    expect(stored.get('conf-model').map((item) => item.key)).toEqual(['two', 'one', 'external'])
+    const saved = jsonClone(stored.get('conf-model'))
+    await expect(store.perform(() => store.selectDefaultModel('removed'))).rejects.toThrow(
+      '已在其他窗口变更',
+    )
+    expect(stored.get('conf-model')).toEqual(saved)
+    await settle()
+    stored.set('conf-model', [])
+  })
+
+  test('loads and saves editable keywords without a connected BOSS executor', async () => {
+    expect(store.getWorkbenchState().keywords).toBe(DEFAULT_JOB_KEYWORDS.join('\n'))
+    send = async () => {
+      throw new Error('page unavailable')
+    }
+    await store.refreshRuntime()
+    expect(store.getWorkbenchState().connected).toBe(false)
+    const plan = createKeywordRotationPlan('已保存岗位\n停用岗位', {
+      baseSearchUrl: tabs[0].url,
+      city: '',
+      salary: '',
+    })
+    plan.status = 'idle'
+    plan.items[1].enabled = false
+    stored.set(KEYWORD_ROTATION_STORAGE_KEY, plan)
+    events.storage({ [KEYWORD_ROTATION_STORAGE_KEY.replace('local:', '')]: {} }, 'local')
+    await settle()
+    expect(store.getWorkbenchState().keywords).toBe('已保存岗位')
+    calls.length = 0
+    await store.perform(() => store.saveKeywords(' 手动岗位 \nAI产品经理\n手动岗位'))
+    await settle()
+    expect(store.getWorkbenchState().keywords).toBe('手动岗位\nAI产品经理')
+    expect(stored.get(KEYWORD_ROTATION_STORAGE_KEY)).toMatchObject({
+      status: 'idle',
+      baseSearchUrl: tabs[0].url,
+      items: [{ keyword: '手动岗位' }, { keyword: 'AI产品经理' }],
+    })
+    expect(calls).toEqual([])
+    const saved = jsonClone(stored.get(KEYWORD_ROTATION_STORAGE_KEY))
+    await expect(store.perform(() => store.saveKeywords(' \n'))).rejects.toThrow('关键词')
+    expect(stored.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(saved)
+    saved.status = 'running'
+    stored.set(KEYWORD_ROTATION_STORAGE_KEY, saved)
+    await expect(store.perform(() => store.saveKeywords('覆盖'))).rejects.toThrow('轮换')
+    expect(stored.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(saved)
+    send = async () => ({ ok: true, data: { ready: true, error: '' } })
+    await store.refreshRuntime()
+  })
+  test('reconnects an unready executor before starting a task and keeps saved keywords on reconnect', async () => {
+    send = async (_id, request) =>
+      request.command.type === 'snapshot'
+        ? { ok: true, data: { ready: false, error: 'page not ready', keywords: 'stale' } }
+        : { ok: true }
+    await store.refreshRuntime()
+    const keywords = store.getWorkbenchState().keywords
+    expect(store.getWorkbenchState().connected).toBe(false)
+    calls.length = 0
+    await store.command({ type: 'collect' })
+    expect(calls.slice(0, 2).map(([, command]) => command.type)).toEqual([
+      'reloadSettings',
+      'collect',
+    ])
+    send = async () => ({ ok: true, data: { ready: true, error: '', keywords: 'stale' } })
+    await store.refreshRuntime()
+    expect(store.getWorkbenchState().keywords).toBe(keywords)
+    send = async (_id, request) =>
+      request.command.type === 'extractKeywords'
+        ? { ok: true, data: ['提取岗位', 'AI产品经理'] }
+        : { ok: true, data: { ready: true, error: '', keywords: 'stale' } }
+    await store.command({ type: 'extractKeywords', input: 'resume' })
+    expect(store.getWorkbenchState().keywords).toBe('提取岗位\nAI产品经理')
+    send = async () => ({ ok: true, data: { ready: true, error: '' } })
+  })
   test('rejects concurrent work and preserves a rejected save as an error', async () => {
     let release
     const running = store.perform(
@@ -145,6 +436,37 @@ describe('workbench synchronization and mutation boundary', () => {
       store.perform(() => store.saveConfig({ resumeText: 'wrong target' }, 'default')),
     ).rejects.toThrow('预设')
     expect(stored.get('config')).toEqual(before)
+    await settle()
+  })
+  test('saves filters, task settings and greeting edits without overwriting other pages', async () => {
+    const initial = jsonClone(defaultFormData)
+    stored.set('config', initial)
+    const company = { ...initial.company, enable: true, value: ['目标公司'] }
+    const notification = { value: false }
+    const aiGreeting = { ...initial.aiGreeting, enable: true }
+    const customGreeting = { enable: true, value: '您好，我对这个岗位很感兴趣' }
+    const greetingVariable = { value: true }
+
+    await store.perform(() => store.saveConfig({ company }))
+    await store.perform(() => store.saveConfig({ notification }))
+    await store.perform(() => store.saveConfig({ aiGreeting, customGreeting, greetingVariable }))
+
+    expect(stored.get('config')).toMatchObject({
+      company,
+      notification,
+      aiGreeting,
+      customGreeting,
+      greetingVariable,
+    })
+    const saved = jsonClone(stored.get('config'))
+    await expect(
+      store.perform(() =>
+        store.saveConfig({
+          customGreeting: { enable: true, value: [{ type: 'image', image: 123 }] },
+        }),
+      ),
+    ).rejects.toThrow('招呼语')
+    expect(stored.get('config')).toEqual(saved)
     await settle()
   })
   test('reacts to cross-page model storage updates and keeps invalid storage intact', async () => {

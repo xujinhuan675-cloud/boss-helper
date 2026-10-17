@@ -17,6 +17,7 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: system-ui, sans-serif;
+  font-size: var(--text-base);
   letter-spacing: 0;
 }
 * {
@@ -28,6 +29,12 @@ textarea,
 select {
   font: inherit;
 }
+input,
+textarea,
+select,
+.select__value {
+  font-size: var(--text-base);
+}
 pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -35,12 +42,6 @@ pre {
 }
 .workbench-shell {
   min-height: 100dvh;
-}
-.execution-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 12px;
 }
 .workbench-tabs {
   display: grid;
@@ -55,20 +56,63 @@ pre {
   height: calc(100dvh - 64px);
   padding: 20px 12px;
   border-right: 1px solid var(--border);
+  border-radius: 0;
   background: var(--surface);
 }
 .workbench-tabs > .tabs__list-container .tabs__list {
   width: 100%;
   gap: 4px;
+  padding: 0;
 }
 .workbench-tabs > .tabs__list-container .tabs__tab {
   justify-content: start;
   width: 100%;
   gap: 10px;
+  height: auto;
+  min-height: 40px;
   padding: 10px 12px;
+  text-align: start;
+}
+.workbench-nav-item {
+  border-radius: var(--radius);
+  color: var(--foreground);
+  text-decoration: none;
+}
+.switch-row {
+  width: 100%;
+}
+.switch-row [data-slot='switch-content'] {
+  display: flex;
+  width: 100%;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  gap: 12px;
+}
+.switch-row [data-slot='label'] {
+  min-width: 0;
+  flex: 1;
+}
+@media (hover: hover) {
+  .workbench-nav-item:hover,
+  .workbench-nav-item[data-hovered='true'] {
+    background: var(--default);
+    opacity: 1;
+    text-decoration: none;
+  }
+}
+.workbench-nav-item:active,
+.workbench-nav-item[data-pressed='true'] {
+  background: var(--default);
+  text-decoration: none;
+}
+.workbench-tabs > .tabs__list-container .tabs__indicator {
+  border-radius: var(--radius);
+  background: var(--default);
+  box-shadow: none;
 }
 .workbench-panel {
   min-width: 0;
+  margin: 0;
   padding: 28px;
 }
 .workbench-panel > section {
@@ -83,6 +127,37 @@ pre {
 }
 .field-grid > * {
   min-width: 0;
+}
+.accordion__item + .accordion__item {
+  margin-top: 12px;
+}
+.accordion__trigger {
+  padding-inline: 0;
+  color: var(--foreground);
+  font-size: var(--text-base);
+  font-weight: 600;
+  text-align: start;
+}
+.accordion__body-inner {
+  padding: 8px 0 24px;
+  color: var(--foreground);
+}
+.settings-advanced > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 8px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  list-style: none;
+}
+.settings-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.settings-advanced[open] > summary svg {
+  transform: rotate(180deg);
 }
 .job-detail {
   overflow-wrap: anywhere;

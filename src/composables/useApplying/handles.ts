@@ -5,7 +5,7 @@ import { sameCompanyKey, sameHrKey } from '../../entrypoints/boss/requests'
 import { DEFAULT_MATCH_THRESHOLD, getFilteringDecision, validateMatchThreshold } from './scoring'
 import type { JobStatus, TaskContext, TaskResult } from './type'
 import { defineTaskHandler } from './type'
-import { loadSet, parseFiltering, rangeMatch, rangeMatchFormat, saveSet } from './utils'
+import { loadSet, parseFiltering, saveSet } from './utils'
 
 export class DependencyMissingError extends Error {
   constructor(public taskId: string) {
@@ -36,7 +36,6 @@ function amapHandler<C extends HelperContext<C, T, S>, T, S>(
   ctx: TaskContext<C, T, S>,
   id: string,
   distance: number,
-  duration: number,
   amap?: { ok: boolean; distance: number; duration: number },
 ): TaskResult | void {
   if (!amap || amap.ok === false) {
@@ -45,11 +44,6 @@ function amapHandler<C extends HelperContext<C, T, S>, T, S>(
   if (distance > 0 && amap.distance > distance * 1000) {
     return taskResult.skip(
       `${id}距离超标: ${amap.distance / 1000} 设定: ${ctx.helper.conf.formData.amap.straightDistance}`,
-    )
-  }
-  if (duration > 0 && amap.duration > duration * 60) {
-    return taskResult.skip(
-      `${id}时间超标: ${amap.duration / 60} 设定: ${ctx.helper.conf.formData.amap.drivingDuration}`,
     )
   }
 }
@@ -149,23 +143,13 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
   )
 
   jobTitle = defineTaskHandler<C, T, S>('岗位名', (ctx) => {
-    if (!ctx.helper.conf.formData.jobTitle.enable) {
-      return
-    }
+    const keywords = ctx.helper.conf.formData.jobTitle.value.filter((item) => item.trim())
+    if (!keywords.length) return
     return async (_ctx, { jobData: data }) => {
       const text = data.jobName.toLowerCase()
       if (!text) return taskResult.skip('岗位名为空')
-      for (const x of ctx.helper.conf.formData.jobTitle.value) {
-        if (text.includes(x.toLowerCase())) {
-          if (ctx.helper.conf.formData.jobTitle.include) {
-            return
-          }
-          return taskResult.skip(`岗位名含有排除关键词 [${x}]`)
-        }
-      }
-      if (ctx.helper.conf.formData.jobTitle.include) {
-        return taskResult.skip('岗位名不包含关键词')
-      }
+      const match = keywords.find((keyword) => text.includes(keyword.toLowerCase()))
+      if (match) return taskResult.skip(`岗位名含有排除关键词 [${match}]`)
     }
   })
 
@@ -181,133 +165,36 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
   })
 
   company = defineTaskHandler<C, T, S>('公司名', (ctx) => {
-    if (!ctx.helper.conf.formData.company.enable) return
+    const keywords = ctx.helper.conf.formData.company.value.filter((item) => item.trim())
+    if (!keywords.length) return
     return async (_ctx, { jobData: data }) => {
       const text = data.brand.name
       if (!text) return taskResult.skip('公司名为空')
-
-      for (const x of ctx.helper.conf.formData.company.value) {
-        if (!x) {
-          continue
-        }
-        if (text.includes(x)) {
-          if (ctx.helper.conf.formData.company.include) {
-            return
-          }
-          return taskResult.skip(`公司名含有排除关键词 [${x}]`)
-        }
-      }
-      if (ctx.helper.conf.formData.company.include) {
-        return taskResult.skip('公司名不包含关键词')
-      }
+      const match = keywords.find((keyword) => text.includes(keyword))
+      if (match) return taskResult.skip(`公司名含有排除关键词 [${match}]`)
     }
   })
 
-  salaryRange = defineTaskHandler<C, T, S>('薪资范围', (ctx) => {
-    if (!ctx.helper.conf.formData.salaryRange.enable) {
-      return
-    }
-    const arr = [
-      ['元/时', ctx.helper.conf.formData.salaryRange.advancedValue.H],
-      ['元/天', ctx.helper.conf.formData.salaryRange.advancedValue.D],
-      ['元/月', ctx.helper.conf.formData.salaryRange.advancedValue.M],
-      ['K', ctx.helper.conf.formData.salaryRange.value],
-    ] as const
-    return async (_ctx, { jobData: data }) => {
-      const text = data.salary
-      for (const key of arr) {
-        if (text.includes(key[0])) {
-          if (!rangeMatch(text, key[1])) {
-            return taskResult.skip(
-              `不匹配的薪资范围 ${text}, 预期: ${rangeMatchFormat(key[1], key[0])}`,
-            )
-          }
-        }
-      }
-    }
-  })
-
-  companySizeRange = defineTaskHandler<C, T, S>('公司规模', (ctx) => {
-    if (!ctx.helper.conf.formData.companySizeRange.enable) {
-      return
-    }
-    return async (ctx, { jobData: data }) => {
-      const text = data.brand.scale
-      if (!rangeMatch(text, ctx.helper.conf.formData.companySizeRange.value)) {
-        return taskResult.skip(
-          `不匹配的公司规模 ${text}, 预期: ${rangeMatchFormat(ctx.helper.conf.formData.companySizeRange.value, '人')}`,
-        )
-      }
-    }
-  })
   jobContent = defineTaskHandler<C, T, S>('工作内容', (ctx) => {
-    if (!ctx.helper.conf.formData.jobContent.enable) {
-      return
-    }
+    const keywords = ctx.helper.conf.formData.jobContent.value.filter((item) => item.trim())
+    if (!keywords.length) return
     return async (ctx, { jobData }) => {
       const content = jobData.jobDescription.toLowerCase()
-      for (const x of ctx.helper.conf.formData.jobContent.value) {
-        if (!x) {
-          continue
-        }
+      for (const x of keywords) {
         const re = new RegExp(`(?<!(不|无).{0,5})${x.toLowerCase()}(?!系统|软件|工具|服务)`)
-        if (content != null && re.test(content)) {
-          if (ctx.helper.conf.formData.jobContent.include) {
-            return
-          }
+        if (content != null && re.test(content))
           return taskResult.skip(`工作内容含有排除关键词 [${x}]`)
-        }
-      }
-      if (ctx.helper.conf.formData.jobContent.include) {
-        return taskResult.skip('工作内容中不包含关键词')
       }
     }
   })
 
   hrPosition = defineTaskHandler<C, T, S>('Hr职位', (ctx) => {
-    if (!ctx.helper.conf.formData.hrPosition.enable) {
-      return
-    }
+    const keywords = ctx.helper.conf.formData.hrPosition.value.filter((item) => item.trim())
+    if (!keywords.length) return
     return async (_, { jobData }) => {
       const content = jobData.boss.title
-      for (const x of ctx.helper.conf.formData.hrPosition.value) {
-        if (!x) {
-          continue
-        }
-        if (content != null && content.trim() === x) {
-          if (ctx.helper.conf.formData.hrPosition.include) {
-            return
-          }
-          return taskResult.skip(`Hr职位在黑名单中: ${content}`)
-        }
-      }
-      if (ctx.helper.conf.formData.hrPosition.include) {
-        return taskResult.skip(`Hr职位不在白名单中: ${content}`)
-      }
-    }
-  })
-
-  jobAddress = defineTaskHandler<C, T, S>('工作地址', (ctx) => {
-    if (!ctx.helper.conf.formData.jobAddress.enable) {
-      return
-    }
-    return async (_, { jobData }) => {
-      if (ctx.helper.conf.formData.jobAddress.value.length === 0 || !jobData.address) {
-        return
-      }
-      const content = jobData.address.toLowerCase()
-      for (const x of ctx.helper.conf.formData.jobAddress.value) {
-        if (!x) {
-          continue
-        }
-        if (content.includes(x.toLowerCase())) {
-          if (ctx.helper.conf.formData.jobAddress.include) {
-            return
-          }
-          return taskResult.skip(`工作地址含有排除关键词 [${x}]`)
-        }
-      }
-      return taskResult.skip(`工作地址不包含关键词: ${content}`)
+      const match = keywords.find((keyword) => content != null && content.trim() === keyword)
+      if (match) return taskResult.skip(`Hr职位在排除关键词中: ${match}`)
     }
   })
 
@@ -335,7 +222,7 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
           json: true,
         })
       ) {
-        throw new HelperConfigError('aiFiltering.model', 'AI筛选模型未配置')
+        throw new HelperConfigError('aiFiltering', 'AI筛选模型未配置')
       }
       return async (ctx, data) => {
         const content = await ctx.helper.chatModel.chat('filtering', data).then((r) => r.text)
@@ -431,7 +318,7 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
         return
       }
       if (!ctx.helper.chatModel.createAgent(ctx.helper.conf.formData.aiGreeting, 'greetings')) {
-        throw new HelperConfigError('aiGreeting.model', 'AI招呼模型未配置')
+        throw new HelperConfigError('aiGreeting', 'AI招呼模型未配置')
       }
       return async (ctx, data) => {
         const msg = await ctx.helper.chatModel.chat('greetings', data).then((r) => r.text)
@@ -442,9 +329,8 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
   )
 
   amap = defineTaskHandler<C, T, S>('高德地图', (ctx) => {
-    if (!ctx.helper.conf.formData.amap.enable) {
-      return
-    }
+    const maxDistance = ctx.helper.conf.formData.amap.straightDistance
+    if (maxDistance <= 0) return
     return async (ctx, { jobData, state }) => {
       state.amap ??= {}
 
@@ -460,29 +346,7 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
       if (state.amap == null || state.amap.distance == null) {
         return taskResult.skip('api数据异常')
       }
-      return [
-        amapHandler(
-          ctx,
-          '直线',
-          ctx.helper.conf.formData.amap.straightDistance,
-          0,
-          state.amap.distance.straight,
-        ),
-        amapHandler(
-          ctx,
-          '驾车',
-          ctx.helper.conf.formData.amap.drivingDistance,
-          ctx.helper.conf.formData.amap.drivingDuration,
-          state.amap.distance.driving,
-        ),
-        amapHandler(
-          ctx,
-          '步行',
-          ctx.helper.conf.formData.amap.walkingDistance,
-          ctx.helper.conf.formData.amap.walkingDuration,
-          state.amap.distance.walking,
-        ),
-      ]
+      return amapHandler(ctx, '直线', maxDistance, state.amap.distance.straight)
     }
   })
 }

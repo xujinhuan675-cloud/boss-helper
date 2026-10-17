@@ -74,3 +74,22 @@ describe('workflow matching gate', () => {
     expect(() => new TaskRegistry().aiFiltering().task(ctx)).toThrow('通过分数')
   })
 })
+
+describe('keyword exclusion filters', () => {
+  it('does not filter when the keyword list is blank', () => {
+    const ctx = { helper: { conf: { formData: { jobTitle: { value: [] } } } } }
+    expect(new TaskRegistry().jobTitle().task(ctx)).toBeUndefined()
+  })
+
+  it.each([
+    ['jobTitle', { jobName: 'Senior Engineer' }, 'engineer'],
+    ['company', { brand: { name: 'Example Agency' } }, 'Agency'],
+    ['jobContent', { jobDescription: 'Work at a staffing agency' }, 'agency'],
+    ['hrPosition', { boss: { title: 'Recruiter' } }, 'Recruiter'],
+  ])('excludes matching %s keywords without an enable switch', async (key, jobData, keyword) => {
+    const ctx = { helper: { conf: { formData: { [key]: { value: [keyword] } } } } }
+    const result = await new TaskRegistry()[key]().task(ctx)(ctx, { jobData })
+    expect(result.isSkip).toBe(true)
+    expect(result.reason).toContain('排除关键词')
+  })
+})
