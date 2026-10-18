@@ -36,17 +36,6 @@ export function validateModels(value: unknown): asserts value is ModelConf[] {
     throw new Error('模型配置格式无效，原有配置已保留')
 }
 
-export function parseObject(text: string, label: string): Record<string, unknown> {
-  let value: unknown
-  try {
-    value = JSON.parse(text)
-  } catch {
-    throw new Error(`${label}不是有效的 JSON`)
-  }
-  if (!isPlainObject(value)) throw new Error(`${label}必须为 JSON 对象`)
-  return value
-}
-
 export function validateConfig(config: FormData) {
   if (config.nativeSearch !== null && !isNativeSearchFilters(config.nativeSearch))
     throw new Error('BOSS 原生筛选配置格式无效')

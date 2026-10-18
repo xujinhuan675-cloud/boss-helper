@@ -32,6 +32,8 @@ export type JobLibraryMutation =
   | { type: 'analysis'; jobId: string; patch: JobAnalysisPatch }
   | { type: 'funnel'; jobId: string; stage: FunnelStage | null }
   | { type: 'processing'; jobId: string; status: ProcessingStatus }
+  | { type: 'delete'; jobId: string }
+  | { type: 'deleteMany'; jobIds: string[] }
 
 type LibraryStorage = {
   getItem<T>(key: `local:${string}` | `session:${string}`): Promise<T | null>
@@ -77,6 +79,25 @@ export class JobLibraryStorage {
         newCount = merged.newCount
         duplicateCount = merged.duplicateCount
         updated ||= items.length > 0
+      } else if (mutation.type === 'delete') {
+        if (typeof mutation.jobId !== 'string' || !mutation.jobId.trim())
+          throw new Error('缺少岗位 ID')
+        const index = records.findIndex((record) => record.encryptJobId === mutation.jobId)
+        if (index < 0) throw new Error('未找到已保存岗位')
+        records.splice(index, 1)
+        updated = true
+      } else if (mutation.type === 'deleteMany') {
+        if (
+          !Array.isArray(mutation.jobIds) ||
+          !mutation.jobIds.length ||
+          mutation.jobIds.some((jobId) => typeof jobId !== 'string' || !jobId.trim())
+        )
+          throw new Error('缺少岗位 ID')
+        const ids = new Set(mutation.jobIds)
+        const next = records.filter((record) => !ids.has(record.encryptJobId))
+        if (next.length === records.length) throw new Error('未找到已保存岗位')
+        records = next
+        updated = true
       } else if (mutation.type !== 'normalize') {
         const record = records.find((item) => item.encryptJobId === mutation.jobId)
         if (!record) throw new Error('未找到已保存岗位')

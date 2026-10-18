@@ -12,18 +12,15 @@ import {
   TextArea,
   TextField,
 } from '@heroui/react'
-import { ChevronDown, Download, LocateFixed, Plus, RotateCcw, Save, Trash2 } from 'lucide-react'
+import { LocateFixed, Plus, RotateCcw, Save, Trash2 } from 'lucide-react'
 import { useRef, useState } from 'react'
 
 import { defaultFormData } from '@/composables/conf/info'
 import { counter } from '@/message'
 import type { FormData } from '@/types/formData'
 import { isPlainObject, jsonClone } from '@/utils/deepmerge'
-import { exportJson } from '@/utils/jsonImportExport'
 
-import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
-import { NativeFilters } from './NativeFilters'
 import { validateConfig } from './settingsValidation'
 import { command, reloadExecutorSettings, saveConfig, services } from './store'
 import { useWorkbench } from './useWorkbench'
@@ -192,7 +189,7 @@ function TimeInterval({
   return (
     <section
       aria-label={label}
-      className="grid min-w-0 grid-cols-[minmax(0,1fr)_96px] items-end gap-4"
+      className="grid min-w-0 grid-cols-[minmax(0,1fr)_72px] items-end gap-3"
     >
       <Slider
         aria-label={label}
@@ -202,10 +199,10 @@ function TimeInterval({
         step={step}
         isDisabled={disabled}
         onChange={(next) => update(next as number)}
-        className="min-w-0"
+        className="min-w-0 grid-rows-[auto_1.5rem]"
       >
         <Label>{label}</Label>
-        <Slider.Track>
+        <Slider.Track className="self-center">
           <Slider.Fill />
           <Slider.Thumb />
         </Slider.Track>
@@ -220,8 +217,8 @@ function TimeInterval({
         onChange={update}
         className="min-w-0"
       >
-        <NumberField.Group>
-          <NumberField.Input className="min-w-0 text-center" />
+        <NumberField.Group className="h-6 min-w-0">
+          <NumberField.Input className="h-full w-full min-w-0 px-2 py-0 text-center leading-none" />
         </NumberField.Group>
       </NumberField>
     </section>
@@ -239,10 +236,6 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
   const [clearingCache, setClearingCache] = useState(false)
   const runtime = state.runtime
   const config = { ...state.config, ...draft }
-  const selectedUrl = runtime?.url || state.tabs.find((tab) => tab.id === state.tabId)?.url
-  const nativeSearch =
-    config.nativeSearch ??
-    nativeSearchFromUrl(selectedUrl || 'https://www.zhipin.com/web/geek/jobs')
   const dirty = Object.keys(draft).length > 0
   const presetConflict = dirty && draftPreset.current !== state.preset
   const busy =
@@ -299,14 +292,13 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
   }
 
   async function save() {
-    if (busy || (!dirty && !filters)) return
+    if (busy || !dirty) return
     setError('')
     try {
       const next = preparedConfig()
       const patch = Object.fromEntries(
         Object.keys(draft).map((key) => [key, next[key]]),
       ) as Partial<FormData>
-      if (filters) patch.nativeSearch = nativeSearch
       if (
         await act(() => {
           assertDraftPreset()
@@ -393,20 +385,20 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
   return (
     <section className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">{filters ? '岗位筛选' : '任务设置'}</h1>
+        <h1 className="text-xl font-semibold">{filters ? '筛选规则' : '任务设置'}</h1>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" isDisabled={busy || !dirty} onPress={discardDraft}>
             <RotateCcw size={16} />
             放弃修改
           </Button>
           <Button
-            isDisabled={busy || (!dirty && !filters) || presetConflict}
+            isDisabled={busy || !dirty || presetConflict}
             onPress={() => {
               void save()
             }}
           >
             <Save size={16} />
-            {filters ? '保存并同步 BOSS' : '保存配置'}
+            保存配置
           </Button>
         </div>
       </div>
@@ -428,14 +420,6 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
           <Alert.Content>
             <Alert.Title>操作未完成</Alert.Title>
             <Alert.Description>{error}</Alert.Description>
-          </Alert.Content>
-        </Alert>
-      )}
-      {filters && state.settingsWarning && (
-        <Alert status="warning">
-          <Alert.Content>
-            <Alert.Title>筛选尚未同步</Alert.Title>
-            <Alert.Description>{state.settingsWarning}</Alert.Description>
           </Alert.Content>
         </Alert>
       )}
@@ -474,17 +458,6 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
           </Button>
         </div>
       </div>
-      {filters && (
-        <NativeFilters
-          value={nativeSearch}
-          onChange={(value) => change('nativeSearch', value)}
-          disabled={busy || presetConflict}
-          canRead={!!selectedUrl}
-          onRead={() => {
-            if (selectedUrl) change('nativeSearch', nativeSearchFromUrl(selectedUrl))
-          }}
-        />
-      )}
       <Accordion
         allowsMultipleExpanded
         defaultExpandedKeys={filters ? [] : ['timing', 'rotation', 'collection']}
@@ -590,11 +563,8 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                     }
                   />
                 </div>
-                <details className="settings-advanced">
-                  <summary>
-                    执行间隔 <ChevronDown size={16} aria-hidden="true" />
-                  </summary>
-                  <div className="field-grid mt-4">
+                <div className="space-y-4">
+                  <div className="field-grid">
                     {deliveryTimingKeys.map((key) => (
                       <TimeInterval
                         key={key}
@@ -614,17 +584,18 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                       />
                     ))}
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="mt-4"
-                    isDisabled={busy}
-                    onPress={() => restoreGroup(['deliveryLimit', ...deliveryTimingKeys])}
-                  >
-                    <RotateCcw size={14} />
-                    恢复本组默认值
-                  </Button>
-                </details>
+                  <div className="flex justify-end">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      isDisabled={busy}
+                      onPress={() => restoreGroup(['deliveryLimit', ...deliveryTimingKeys])}
+                    >
+                      <RotateCcw size={14} />
+                      恢复本组默认值
+                    </Button>
+                  </div>
+                </div>
               </Accordion.Body>
             </Accordion.Panel>
           </Accordion.Item>
@@ -667,11 +638,8 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                     </Switch.Content>
                   </Switch>
                 </div>
-                <details className="settings-advanced">
-                  <summary>
-                    轮换间隔与批次 <ChevronDown size={16} aria-hidden="true" />
-                  </summary>
-                  <div className="field-grid mt-4">
+                <div className="space-y-4">
+                  <div className="field-grid">
                     <TimeRange
                       label="关键词间隔"
                       minutes
@@ -706,17 +674,18 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                       onChange={(value) => change('keywordRotationBatchSize', value)}
                     />
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="mt-4"
-                    isDisabled={busy}
-                    onPress={() => restoreGroup(rotationKeys)}
-                  >
-                    <RotateCcw size={14} />
-                    恢复本组默认值
-                  </Button>
-                </details>
+                  <div className="flex justify-end">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      isDisabled={busy}
+                      onPress={() => restoreGroup(rotationKeys)}
+                    >
+                      <RotateCcw size={14} />
+                      恢复本组默认值
+                    </Button>
+                  </div>
+                </div>
               </Accordion.Body>
             </Accordion.Panel>
           </Accordion.Item>
@@ -731,11 +700,8 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
             </Accordion.Heading>
             <Accordion.Panel>
               <Accordion.Body className="space-y-4">
-                <details className="settings-advanced">
-                  <summary>
-                    调整采集间隔 <ChevronDown size={16} aria-hidden="true" />
-                  </summary>
-                  <div className="field-grid mt-4">
+                <div className="space-y-4">
+                  <div className="field-grid">
                     <TimeRange
                       label="滚动间隔"
                       scaleMax={10}
@@ -755,17 +721,18 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                       }
                     />
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="mt-4"
-                    isDisabled={busy}
-                    onPress={() => restoreGroup(collectionTimingKeys)}
-                  >
-                    <RotateCcw size={14} />
-                    恢复本组默认值
-                  </Button>
-                </details>
+                  <div className="flex justify-end">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      isDisabled={busy}
+                      onPress={() => restoreGroup(collectionTimingKeys)}
+                    >
+                      <RotateCcw size={14} />
+                      恢复本组默认值
+                    </Button>
+                  </div>
+                </div>
               </Accordion.Body>
             </Accordion.Panel>
           </Accordion.Item>
@@ -827,7 +794,7 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
           <Accordion.Item id="data">
             <Accordion.Heading>
               <Accordion.Trigger>
-                记录、缓存与配置文件
+                通知、记录与缓存
                 <Accordion.Indicator />
               </Accordion.Trigger>
             </Accordion.Heading>
@@ -886,24 +853,13 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                 </div>
                 <Button
                   variant="secondary"
-                  className="self-start"
+                  className="self-end"
                   isDisabled={busy || !state.connected}
                   onPress={() => setClearingCache(true)}
                 >
                   <Trash2 size={16} />
                   清空筛选缓存
                 </Button>
-                <Separator />
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    isDisabled={busy}
-                    onPress={() => exportJson(jsonClone(state.config), '打招呼配置')}
-                  >
-                    <Download size={16} />
-                    导出已保存配置
-                  </Button>
-                </div>
               </Accordion.Body>
             </Accordion.Panel>
           </Accordion.Item>

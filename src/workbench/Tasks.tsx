@@ -1,10 +1,19 @@
 /** @jsxImportSource react */
-import { Alert, Button, Chip, Label, Link, ProgressBar, Switch } from '@heroui/react'
 import {
-  ArrowUpRight,
-  ChevronDown,
-  ChevronRight,
-  ChevronUp,
+  Accordion,
+  Button,
+  Chip,
+  Label,
+  Link,
+  ListBox,
+  ProgressBar,
+  Select,
+  Switch,
+  TextArea,
+  TextField,
+} from '@heroui/react'
+import {
+  ArrowUp,
   ExternalLink,
   ListRestart,
   Pause,
@@ -15,13 +24,15 @@ import {
   Square,
   WandSparkles,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
-import { isCompleteModel } from '@/composables/useModel'
 import { getJobFunnel } from '@/entrypoints/boss/jobStore'
 
-import { ConfirmDialog, IconButton, SelectField, act } from './components'
+import { ConfirmDialog, IconButton, act } from './components'
+import { JobAI } from './JobAI'
+import { SearchFilters } from './NativeFilters'
 import type { ExecutorCommand } from './protocol'
+import { statisticsHistory } from './statistics'
 import { command, selectResume } from './store'
 import { useWorkbench } from './useWorkbench'
 
@@ -54,7 +65,8 @@ export function Tasks() {
   const state = useWorkbench()
   const runtime = state.runtime
   const [deliveryConfirm, setDeliveryConfirm] = useState(false)
-  const [configExpanded, setConfigExpanded] = useState(true)
+  const [messageDraft, setMessageDraft] = useState<string | null>(null)
+  useEffect(() => setMessageDraft(null), [runtime?.pendingMessage, state.tabId])
   const busy = !!(
     runtime?.gatheringBusy ||
     runtime?.analysisBusy ||
@@ -66,58 +78,73 @@ export function Tasks() {
   )
   const disabled = state.loading || state.saving
   const startDisabled = disabled || busy || !state.connected
-  const availableModels = state.models.filter(isCompleteModel)
   const funnel = getJobFunnel(state.records)
+  const deliveredToday = statisticsHistory(state.today, state.statistics, 1)[0]?.success ?? 0
   const run = runtime?.gatheringKind === 'detail' ? runtime.detailRun : runtime?.collectionRun
   const rotation = runtime?.keywordRotation
+  const rotationBusy = !!runtime?.keywordRotationBusy
+  const rotationKeyword = rotation?.items[rotation.cursor]?.keyword
   const execute = (type: ExecutorCommand['type']) => {
     void act(() => command({ type } as ExecutorCommand))
   }
 
   return (
     <section className="space-y-6">
-      <nav
-        aria-label="岗位统计入口"
-        className="grid grid-cols-2 gap-x-4 gap-y-5 border-b border-border pb-5"
-      >
-        {[
-          { label: '已采集', count: funnel.collected, query: '' },
-          { label: '已匹配', count: funnel.matched, query: '?stage=matched' },
-          { label: '已投递', count: funnel.applied, query: '?stage=applied' },
-          { label: '今日匹配', count: funnel.matchedToday, query: '?matched=today' },
-        ].map(({ label, count, query }) => (
-          <Link
-            key={label}
-            href={`./workbench.html${query}#jobs`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`查看${label}岗位，共 ${count} 个`}
-            className="workbench-nav-item block w-full min-w-0 p-2"
-          >
-            <span className="flex items-center justify-between gap-2 text-sm text-muted">
-              {label}
-              <ArrowUpRight size={15} aria-hidden="true" className="shrink-0" />
-            </span>
-            <span className="mt-1 block text-2xl font-semibold tabular-nums">{count}</span>
-          </Link>
-        ))}
-      </nav>
+      <SearchFilters disabled={disabled || busy} />
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold">任务操作</h2>
-          <Chip size="sm" color={busy ? 'accent' : 'default'}>
-            {!state.connected ? '未连接' : busy ? '运行中' : '待命'}
-          </Chip>
+          {busy && (
+            <Chip size="sm" color="accent">
+              运行中
+            </Chip>
+          )}
         </div>
-        <div className="grid grid-cols-1 gap-2">
+        <Select
+          aria-label="当前简历"
+          value={state.resumes.currentResumeId ?? '__none__'}
+          isDisabled={disabled || busy}
+          fullWidth
+          className="min-w-0"
+          onChange={(key) => {
+            const id = String(key ?? '__none__')
+            void act(() => selectResume(id === '__none__' ? null : id), '当前简历已更新')
+          }}
+        >
+          <Select.Trigger className="resume-select-trigger">
+            <span className="shrink-0 text-sm">当前简历</span>
+            <Select.Value className="min-w-0 flex-1 truncate text-right text-sm text-muted" />
+            <Select.Indicator />
+          </Select.Trigger>
+          <Select.Popover>
+            <ListBox>
+              {[{ id: '__none__', name: '不使用简历' }, ...state.resumes.resumes].map((resume) => (
+                <ListBox.Item key={resume.id} id={resume.id} textValue={resume.name}>
+                  <span className="min-w-0 break-words">{resume.name}</span>
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+              ))}
+            </ListBox>
+          </Select.Popover>
+        </Select>
+        <div className="grid grid-cols-2 gap-2">
           <Button
+            className="col-span-2"
             fullWidth
-            variant="primary"
-            isDisabled={startDisabled || !state.keywords.trim()}
-            onPress={() => execute('rotate')}
+            variant={rotationBusy ? 'danger-soft' : 'primary'}
+            isDisabled={
+              rotationBusy
+                ? disabled || !state.connected || !!runtime?.keywordRotationSaving
+                : startDisabled || !state.keywords.trim()
+            }
+            onPress={() => execute(rotationBusy ? 'stopRotation' : 'rotate')}
           >
-            <ListRestart size={16} />
-            {rotation?.status === 'paused' ? '继续轮换' : '轮换采集并分析'}
+            {rotationBusy ? <Square size={16} /> : <ListRestart size={16} />}
+            {rotationBusy
+              ? '停止轮换'
+              : rotation && ['paused', 'stopped', 'failed'].includes(rotation.status)
+                ? '继续轮换'
+                : '轮换采集并分析'}
           </Button>
           <Button
             fullWidth
@@ -150,14 +177,8 @@ export function Tasks() {
             </Button>
           )}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-          <span>
-            今日投递 {state.today?.success ?? 0} / {state.config.deliveryLimit.value}
-          </span>
-          <span>
-            本页 {runtime?.workflow?.current ?? 0} / {runtime?.workflow?.total ?? 0}
-          </span>
-          {runtime?.workflow?.status === 'stop' && (
+        {runtime?.workflow?.status === 'stop' && (
+          <div className="flex justify-end">
             <Button
               size="sm"
               variant="ghost"
@@ -167,8 +188,8 @@ export function Tasks() {
               <RotateCcw size={14} />
               重置进度
             </Button>
-          )}
-        </div>
+          </div>
+        )}
         <Switch
           className="switch-row"
           isSelected={runtime?.autoCaptureEnabled ?? false}
@@ -185,22 +206,10 @@ export function Tasks() {
           </Switch.Content>
         </Switch>
         {rotation && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <span className="min-w-0 break-words">
-              关键词轮换 · {statusNames[rotation.status] || rotation.status}
-            </span>
-            {runtime?.keywordRotationBusy && (
-              <Button
-                size="sm"
-                variant="danger-soft"
-                isDisabled={disabled}
-                onPress={() => execute('stopRotation')}
-              >
-                <Square size={14} />
-                停止轮换
-              </Button>
-            )}
-          </div>
+          <p className="text-sm text-muted break-words" aria-live="polite">
+            {statusNames[rotation.status] || rotation.status}
+            {rotationKeyword ? ` · 当前关键词：${rotationKeyword}` : ''}
+          </p>
         )}
         {rotation?.error && (
           <p className="text-sm text-danger" role="alert">
@@ -214,7 +223,7 @@ export function Tasks() {
           </output>
         )}
         {run && (
-          <div className="space-y-3 border-t border-border pt-4">
+          <div className="space-y-3 pt-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
               <span>{runtime?.gatheringKind === 'detail' ? '详情补全' : '岗位采集'}</span>
               <Chip size="sm">{statusNames[run.status] || run.status}</Chip>
@@ -248,7 +257,7 @@ export function Tasks() {
             )}
           </div>
         )}
-        {runtime?.gatheringBusy && (
+        {runtime?.gatheringBusy && !rotationBusy && (
           <div className="flex gap-2">
             <Button
               className="flex-1"
@@ -273,12 +282,12 @@ export function Tasks() {
           </div>
         )}
         {runtime?.analysisRun && (
-          <div className="space-y-2 border-t border-border pt-4">
+          <div className="space-y-2 pt-4">
             <div className="flex flex-wrap justify-between gap-2">
               <h3 className="text-sm font-medium">
                 AI 分析 · {statusNames[runtime.analysisRun.status] || runtime.analysisRun.status}
               </h3>
-              {runtime.analysisBusy && (
+              {runtime.analysisBusy && !rotationBusy && (
                 <Button
                   size="sm"
                   variant="danger-soft"
@@ -317,18 +326,101 @@ export function Tasks() {
           </div>
         )}
       </div>
-      <div className="space-y-3 border-t border-border pt-5">
+      <nav aria-label="岗位统计入口" className="grid grid-cols-3 gap-2">
+        {[
+          { label: '已采集', count: funnel.collected, today: funnel.collectedToday, query: '' },
+          {
+            label: '已匹配',
+            count: funnel.matched,
+            today: funnel.matchedToday,
+            query: '?stage=matched',
+          },
+          {
+            label: '已投递',
+            count: funnel.applied,
+            today: deliveredToday,
+            query: '?stage=applied',
+          },
+        ].map(({ label, count, today, query }) => (
+          <Link
+            key={label}
+            href={`./workbench.html${query}#jobs`}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`查看${label}岗位，共 ${count} 个`}
+            className="workbench-nav-item flex w-full min-w-0 flex-wrap items-center gap-1 p-1"
+          >
+            <span className="text-xs text-muted">{label}</span>
+            <span className="text-sm font-semibold tabular-nums break-all">{count}</span>
+            {today > 0 && (
+              <Chip
+                size="sm"
+                color="success"
+                variant="soft"
+                className="tabular-nums"
+                aria-label={`今日${label.slice(1)} ${today} 个`}
+                title={`今日${label.slice(1)} ${today} 个`}
+              >
+                <ArrowUp size={12} aria-hidden="true" />
+                <Chip.Label>{today}</Chip.Label>
+              </Chip>
+            )}
+          </Link>
+        ))}
+      </nav>
+      {!!runtime?.pendingMessage?.trim() && (
+        <Accordion>
+          <Accordion.Item id="pending-message">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                待发送消息
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="space-y-3">
+                <TextField
+                  value={messageDraft ?? runtime?.pendingMessage ?? ''}
+                  onChange={setMessageDraft}
+                  isDisabled={!state.connected || disabled}
+                >
+                  <Label>待发送消息草稿</Label>
+                  <TextArea rows={4} />
+                </TextField>
+                <div className="flex justify-end">
+                  <Button
+                    variant="secondary"
+                    isDisabled={!state.connected || disabled || messageDraft === null}
+                    onPress={() => {
+                      void act(
+                        () => command({ type: 'setPendingMessage', value: messageDraft ?? '' }),
+                        '草稿已保存',
+                      ).then((ok) => {
+                        if (ok) setMessageDraft(null)
+                      })
+                    }}
+                  >
+                    <Save size={16} />
+                    保存草稿
+                  </Button>
+                </div>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        </Accordion>
+      )}
+      <div className="space-y-3 pt-5">
         <h2 className="text-base font-semibold">
           当前页面岗位{' '}
           <span className="text-muted">{state.connected ? (runtime?.jobs.length ?? 0) : '-'}</span>
         </h2>
         {!state.connected || !runtime?.jobs.length ? (
-          <output className="flex min-h-20 items-center text-sm text-muted">
+          <output className="block text-sm text-muted">
             {state.connected
               ? '当前列表暂无岗位'
               : state.tabId !== null && !state.connectionError && !runtime?.error
                 ? '正在连接岗位页'
-                : '尚未连接 BOSS 岗位页'}
+                : '连接 BOSS 标签页后查看'}
           </output>
         ) : (
           <ul aria-label="当前页面岗位" className="max-h-80 divide-y divide-border overflow-y-auto">
@@ -383,14 +475,23 @@ export function Tasks() {
             ))}
           </ul>
         )}
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-4">
-          <div>
-            <h2 className="text-base font-semibold">最近运行</h2>
-            <p className="mt-1 text-xs text-muted">显示采集、分析、投递等最近事件</p>
-          </div>
-          <Link href="./workbench.html#logs" target="_blank" rel="noreferrer" className="text-sm">
-            查看日志 <ArrowUpRight size={14} />
-          </Link>
+        <Accordion>
+          <Accordion.Item id="job-ai">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                AI 过程
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="max-h-96 overflow-y-auto">
+                <JobAI />
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        </Accordion>
+        <div className="flex items-center justify-between gap-2 pt-4">
+          <h2 className="text-base font-semibold">最近运行</h2>
         </div>
         {runtime?.logs.length ? (
           <ul className="space-y-2 text-sm">
@@ -415,73 +516,10 @@ export function Tasks() {
           </ul>
         ) : (
           <p className="text-sm text-muted">
-            {state.connected ? '暂无运行记录' : '尚未连接岗位页'}
+            {state.connected ? '暂无运行记录' : '连接 BOSS 标签页后查看'}
           </p>
         )}
       </div>
-      <div className="space-y-3 border-t border-border pt-5">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-base font-semibold">当前配置</h2>
-          <IconButton
-            label={configExpanded ? '收起当前配置' : '展开当前配置'}
-            onPress={() => setConfigExpanded((expanded) => !expanded)}
-          >
-            {configExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </IconButton>
-        </div>
-        {configExpanded && (
-          <>
-            <SelectField
-              label="当前简历"
-              value={state.resumes.currentResumeId ?? '__none__'}
-              options={[
-                { value: '__none__', label: '不使用简历' },
-                ...state.resumes.resumes.map((resume) => ({
-                  value: resume.id,
-                  label: resume.name,
-                })),
-              ]}
-              disabled={disabled || busy}
-              onChange={(id) => {
-                void act(() => selectResume(id === '__none__' ? null : id), '当前简历已更新')
-              }}
-            />
-            <nav aria-label="当前配置" className="-mx-3 space-y-1 text-sm">
-              {[
-                {
-                  id: 'models',
-                  label: '模型与提示词',
-                  value: availableModels[0]?.name || '未配置',
-                },
-                { id: 'filters', label: '岗位筛选', value: '' },
-                { id: 'settings', label: '任务设置', value: '' },
-              ].map(({ id, label, value }) => (
-                <Link
-                  key={id}
-                  href={`./workbench.html#${id}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="workbench-nav-item flex min-h-10 w-full items-center justify-between gap-3 px-3 py-2.5"
-                >
-                  <span className="shrink-0">{label}</span>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-muted">{value}</span>
-                    <ChevronRight size={16} aria-hidden="true" className="shrink-0 text-muted" />
-                  </span>
-                </Link>
-              ))}
-            </nav>
-          </>
-        )}
-      </div>
-      {!state.tabs.length && (
-        <Alert>
-          <Alert.Content>
-            <Alert.Title>尚未连接 BOSS 岗位页</Alert.Title>
-            <Alert.Description>本地岗位、简历和配置仍可在工作台查看。</Alert.Description>
-          </Alert.Content>
-        </Alert>
-      )}
       <ConfirmDialog
         open={deliveryConfirm}
         onClose={() => setDeliveryConfirm(false)}

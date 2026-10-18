@@ -1,4 +1,4 @@
-// @ts-nocheck -- Bun test type declarations are absent in this repository.
+// @ts-nocheck
 import { describe, expect, test } from 'bun:test'
 
 import { isStatistics, statisticsHistory } from './statistics'

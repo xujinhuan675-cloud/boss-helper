@@ -3,6 +3,7 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { createRequire } from 'node:module'
 
+import { defaultFormData } from '../composables/conf/info'
 import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 
 const require = createRequire(new URL('../../packages/devlog-ui/package.json', import.meta.url))
@@ -46,6 +47,21 @@ globalThis.ResizeObserver = class {
   unobserve() {}
   disconnect() {}
 }
+dom.window.Element.prototype.getAnimations = () => []
+
+const state = {
+  config: structuredClone(defaultFormData),
+  preset: 'default',
+  keywords: '产品经理\nAI产品经理',
+  connected: true,
+  runtime: null,
+  tabs: [{ id: 1, url: 'https://www.zhipin.com/web/geek/jobs?query=当前页&city=101010100' }],
+  tabId: 1,
+  settingsWarning: '',
+}
+const saves = []
+let saveError = ''
+mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
 
 let fail = false
 mock.module('@/message', () => ({
@@ -82,11 +98,18 @@ mock.module('@/message', () => ({
     },
   },
 }))
-mock.module('./store', () => ({ perform: async (work) => work() }))
+mock.module('./store', () => ({
+  perform: async (work) => work(),
+  saveConfig: async (patch, preset) => {
+    if (saveError) throw new Error(saveError)
+    saves.push({ patch, preset })
+    state.config = { ...state.config, ...patch }
+  },
+}))
 
 const { act, createElement, useState } = await import('react')
 const { createRoot } = await import('react-dom/client')
-const { NativeFilters } = await import('./NativeFilters')
+const { NativeFilters, SearchFilters } = await import('./NativeFilters')
 let root, container, value
 
 function Form() {
@@ -98,8 +121,7 @@ function Form() {
     value: current,
     onChange: setCurrent,
     disabled: false,
-    canRead: false,
-    onRead() {},
+    keywords: ['产品经理', 'AI产品经理'],
   })
 }
 async function click(element) {
@@ -107,6 +129,10 @@ async function click(element) {
   await act(async () => element.click())
 }
 async function open(label) {
+  if (['工作经验', '公司行业'].includes(label)) {
+    const more = container.querySelector('button[aria-expanded][aria-controls]')
+    if (more?.getAttribute('aria-expanded') === 'false') await click(more)
+  }
   const field = document.querySelector(`[aria-label="${label}"]`)
   await click((field.closest('[data-slot="combo-box"]') ?? field).querySelector('button') ?? field)
 }
@@ -114,6 +140,13 @@ const option = (text) =>
   [...document.querySelectorAll('[role="option"]')].find((el) => el.textContent === text)
 beforeEach(async () => {
   fail = false
+  saveError = ''
+  saves.length = 0
+  state.preset = 'default'
+  state.connected = true
+  state.runtime = null
+  state.keywords = '产品经理\nAI产品经理'
+  state.config = structuredClone(defaultFormData)
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -179,4 +212,102 @@ test('retries failed metadata loading without changing filters', async () => {
   await open('工作经验')
   await click(option('选项一'))
   expect(value.experience).toEqual(['101'])
+})
+
+const button = (text) =>
+  [...container.querySelectorAll('button')].find((el) => el.textContent === text)
+const renderSearch = (disabled = false) =>
+  act(async () => root.render(createElement(SearchFilters, { disabled })))
+async function expandFilters() {
+  const toggle = container.querySelector('button[aria-expanded][aria-controls]')
+  expect(toggle).toBeTruthy()
+  if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle)
+  return toggle
+}
+
+test('reads the connected page and applies only native filters with the originating preset', async () => {
+  await renderSearch()
+  await expandFilters()
+  await click(container.querySelector('[aria-label="读取 BOSS 当前筛选"]'))
+  await open('职位关键词')
+  await click(option('AI产品经理'))
+  await click(button('应用到 BOSS'))
+  expect(saves).toEqual([
+    {
+      patch: { nativeSearch: { ...nativeSearchFromUrl(state.tabs[0].url), query: 'AI产品经理' } },
+      preset: 'default',
+    },
+  ])
+})
+
+test('keeps a failed filter draft and blocks saving it after another window changes the preset', async () => {
+  await renderSearch()
+  await expandFilters()
+  await open('职位关键词')
+  await click(option('AI产品经理'))
+  saveError = '同步失败'
+  await click(button('应用到 BOSS'))
+  expect(saves).toEqual([])
+  expect(container.querySelector('[aria-label="职位关键词"]').textContent).toContain('AI产品经理')
+  state.preset = 'another'
+  await renderSearch()
+  expect(button('应用到 BOSS').disabled).toBe(true)
+  expect(container.textContent).toContain('配置预设已变更')
+  await click(container.querySelector('[aria-label="放弃筛选修改"]'))
+  expect(container.querySelector('[aria-label="职位关键词"]').textContent).not.toContain(
+    'AI产品经理',
+  )
+  saveError = ''
+  await renderSearch(true)
+  expect(button('应用到 BOSS').disabled).toBe(true)
+})
+
+test('keeps one filter heading and reveals actions only inside the expanded panel', async () => {
+  await renderSearch()
+  expect([...container.querySelectorAll('h2, h3')].map((el) => el.textContent)).toEqual(['筛选'])
+  const toggle = await expandFilters()
+  expect(toggle.querySelector('span.font-semibold')?.textContent).toBe('筛选')
+  expect(toggle.classList.contains('w-full')).toBe(true)
+  expect(toggle.classList.contains('justify-between')).toBe(true)
+  expect([...container.querySelectorAll('h2, h3')].map((el) => el.textContent)).toEqual(['筛选'])
+  const panel = document.getElementById(toggle.getAttribute('aria-controls'))
+  expect(panel.contains(button('应用到 BOSS'))).toBe(true)
+  expect(panel.contains(container.querySelector('[aria-label="放弃筛选修改"]'))).toBe(true)
+  expect(panel.contains(container.querySelector('[aria-label="读取 BOSS 当前筛选"]'))).toBe(true)
+  await open('职位关键词')
+  await click(option('AI产品经理'))
+  await click(toggle)
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  expect([...container.querySelectorAll('h2, h3')].map((el) => el.textContent)).toEqual(['筛选'])
+  await expandFilters()
+  expect(container.querySelector('[aria-label="职位关键词"]').textContent).toContain('AI产品经理')
+})
+
+test('uses saved rotation keywords instead of an unrelated native query and follows active rotation', async () => {
+  state.config.nativeSearch = nativeSearchFromUrl(
+    'https://www.zhipin.com/web/geek/jobs?query=旧搜索词',
+  )
+  await renderSearch()
+  const selector = () => container.querySelector('[aria-label="职位关键词"]')
+  expect(selector()?.textContent).toContain('产品经理')
+  expect(container.querySelector('input[maxlength="100"]')).toBeNull()
+  await open('职位关键词')
+  expect([...document.querySelectorAll('[role="option"]')].map((el) => el.textContent)).toEqual([
+    '产品经理',
+    'AI产品经理',
+  ])
+  await click(option('AI产品经理'))
+  await expandFilters()
+  await click(button('应用到 BOSS'))
+  expect(saves[0].patch.nativeSearch.query).toBe('AI产品经理')
+  expect(state.keywords).toBe('产品经理\nAI产品经理')
+  state.runtime = {
+    keywordRotationBusy: true,
+    keywordRotation: { cursor: 0, items: [{ keyword: '产品经理' }, { keyword: 'AI产品经理' }] },
+  }
+  await renderSearch(true)
+  expect(selector().textContent).toContain('产品经理')
+  state.runtime.keywordRotation.cursor = 1
+  await renderSearch(true)
+  expect(selector().textContent).toContain('AI产品经理')
 })

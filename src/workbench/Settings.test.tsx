@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-// @ts-nocheck -- Bun test type declarations are absent in this repository.
+// @ts-nocheck
 import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { createRequire } from 'node:module'
 
@@ -7,6 +7,7 @@ import { act, createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { defaultFormData } from '../composables/conf/info'
+import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 import * as deepmerge from '../utils/deepmerge'
 
 const require = createRequire(new URL('../../packages/devlog-ui/package.json', import.meta.url))
@@ -65,21 +66,22 @@ const state = {
   tabId: null,
   settingsWarning: '配置已保存，尚未同步到 BOSS',
 }
-mock.module('@/composables/conf/info', () => ({ defaultFormData }))
-mock.module('@/utils/deepmerge', () => deepmerge)
-mock.module('@/utils/jsonImportExport', () => ({ exportJson: () => {} }))
-mock.module('@/message', () => ({
+await mock.module('@/composables/conf/info', () => ({ defaultFormData }))
+await mock.module('@/utils/deepmerge', () => deepmerge)
+await mock.module('@/message', () => ({
   counter: {
     fetchText: async () => {
       throw new Error('offline')
     },
   },
 }))
-mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
-mock.module('./store', () => ({
+await mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
+const savedPatches = []
+await mock.module('./store', () => ({
   perform: async (work) => work(),
   command: async () => {},
   saveConfig: async (patch) => {
+    savedPatches.push(patch)
     state.config = { ...state.config, ...patch }
   },
   reloadExecutorSettings: async () => {},
@@ -90,6 +92,7 @@ const { Settings } = await import('./Settings')
 let root
 let container
 beforeEach(() => {
+  savedPatches.length = 0
   state.config = structuredClone(defaultFormData)
   state.runtime = null
   container = document.createElement('div')
@@ -116,7 +119,7 @@ async function fill(input, value) {
   })
 }
 
-test('replaces numeric ranges with native filters above optional local rules', () => {
+test('keeps durable rules and commute settings without live BOSS search controls', () => {
   const html = renderToStaticMarkup(createElement(Settings, { page: 'filters' }))
   for (const label of [
     '工作城市',
@@ -129,10 +132,11 @@ test('replaces numeric ranges with native filters above optional local rules', (
     '公司行业',
     '保存并同步 BOSS',
   ])
-    expect(html).toContain(label)
+    expect(html).not.toContain(label)
   for (const label of ['月薪（K）下限', '公司人数上限', '严格匹配', '同步时薪、日薪与月薪'])
     expect(html).not.toContain(label)
-  expect(html.indexOf('BOSS 原生筛选')).toBeLessThan(html.indexOf('本地筛选规则'))
+  expect(html).toContain('筛选规则')
+  expect(html).toContain('保存配置')
   for (const label of [
     '工作地址',
     '匹配方式',
@@ -145,7 +149,25 @@ test('replaces numeric ranges with native filters above optional local rules', (
     expect(html).not.toContain(label)
   expect(html).toContain('公司名称排除关键词')
   expect(html).toContain('最大直线距离（公里）')
-  expect(html).toContain('尚未同步到 BOSS')
+  expect(html).not.toContain('尚未同步到 BOSS')
+})
+
+test('saves local-rule edits without reapplying the saved native search', async () => {
+  state.config.nativeSearch = nativeSearchFromUrl(
+    'https://www.zhipin.com/web/geek/jobs?query=原关键词',
+  )
+  await act(async () => root.render(createElement(Settings, { page: 'filters' })))
+  const input = container.querySelector('textarea')
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(
+      input,
+      '排除公司',
+    )
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await click(button('保存配置'))
+  expect(savedPatches).toHaveLength(1)
+  expect(savedPatches[0]).not.toHaveProperty('nativeSearch')
 })
 
 test('keeps native filters out of task timing settings', () => {
@@ -154,16 +176,14 @@ test('keeps native filters out of task timing settings', () => {
   expect(html).not.toContain('BOSS 原生筛选')
 })
 
-test('keeps common controls visible and all detailed timing controls collapsed', async () => {
+test('keeps timing controls visible without nested collapsible sections', async () => {
   await render()
-  const advanced = [...container.querySelectorAll('details')]
-  expect(advanced).toHaveLength(3)
-  expect(advanced.every((element) => !element.open)).toBe(true)
-  const common = [...container.querySelectorAll('[data-slot="number-field-input"]')].filter(
-    (input) => !input.closest('details'),
-  )
-  expect(common.map((input) => input.value)).toEqual(['120', '10'])
+  expect(container.querySelectorAll('details')).toHaveLength(0)
+  expect(container.querySelectorAll('[data-slot="number-field-input"]')).toHaveLength(7)
   expect(container.querySelectorAll('input[type="range"]')).toHaveLength(12)
+  expect(container.textContent).not.toContain('导出已保存配置')
+  for (const label of ['执行间隔', '轮换间隔与批次', '调整采集间隔'])
+    expect(container.textContent).not.toContain(label)
   for (const label of ['关键词间隔', '批次休息', '滚动间隔', '详情采集间隔']) {
     const range = container.querySelector(`section[aria-label="${label}"]`)
     expect(range.querySelectorAll('[data-slot="number-field-input"]')).toHaveLength(0)
@@ -175,7 +195,6 @@ test('converts a single minute interval input back to seconds and syncs its slid
   await render()
   const interval = container.querySelector('section[aria-label="翻页间隔（分钟）"]')
   expect(interval).toBeTruthy()
-  interval.closest('details').open = true
   const input = interval.querySelector('[data-slot="number-field-input"]')
   await fill(input, '7.5')
   expect(Number(interval.querySelector('input[type="range"]').value)).toBe(7.5)
@@ -188,9 +207,10 @@ test('restores only the chosen group and keeps custom timings in other groups', 
   state.config.delayCollectionScrollMax = 27.4
   state.config.keywordRotationDailyLimit = 37
   await render()
-  const rotation = container.querySelector('section[aria-label="关键词间隔"]').closest('details')
-  rotation.open = true
-  await click(button('恢复本组默认值', rotation))
+  const resets = [...container.querySelectorAll('button')].filter(
+    (element) => element.textContent === '恢复本组默认值',
+  )
+  await click(resets[1])
   await click(button('保存配置'))
   expect(state.config.keywordRotationDailyLimit).toBe(10)
   expect(state.config.delayDeliveryInterval).toBe(17.3)
@@ -206,12 +226,10 @@ test('preserves custom ranges beyond the usual slider scale during unrelated edi
   const upper = interval.querySelectorAll('input[type="range"]')[1]
   expect(Number(upper.value)).toBe(20000)
   expect(Number(upper.max)).toBeGreaterThanOrEqual(20000)
-  const common = [...container.querySelectorAll('[data-slot="number-field-input"]')].filter(
-    (input) => !input.closest('details'),
-  )
-  await fill(common[1], '11')
+  const deliveryLimit = container.querySelector('[data-slot="number-field-input"]')
+  await fill(deliveryLimit, '121')
   await click(button('保存配置'))
-  expect(state.config.keywordRotationDailyLimit).toBe(11)
+  expect(state.config.deliveryLimit.value).toBe(121)
   expect(state.config.delayKeywordRotationMin).toBe(5000)
   expect(state.config.delayKeywordRotationMax).toBe(20000)
 })
@@ -219,7 +237,6 @@ test('preserves custom ranges beyond the usual slider scale during unrelated edi
 test('updates ranges with the keyboard and prevents thumbs crossing', async () => {
   await render()
   const interval = container.querySelector('section[aria-label="关键词间隔"]')
-  interval.closest('details').open = true
   const [lower, upper] = interval.querySelectorAll('input[type="range"]')
   const key = (value) =>
     act(async () =>

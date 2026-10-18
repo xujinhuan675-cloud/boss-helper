@@ -29,6 +29,7 @@ import {
 import { SavedJobAnalyzer } from '../entrypoints/boss/savedAnalysis'
 import type { SavedAnalysisRun } from '../entrypoints/boss/savedAnalysis'
 import { jsonClone } from '../utils/deepmerge'
+import { diagnostic } from '../utils/diagnostics'
 import { requestExecutor } from './client'
 import type { ExecutorCommand, ExecutorSnapshot } from './protocol'
 import { validateConfig, validateModels } from './settingsValidation'
@@ -162,6 +163,14 @@ export async function updateSavedJob(
   await refreshLibrary()
 }
 
+export async function deleteSavedJob(jobId: string) {
+  await counter.updateJobLibrary({ type: 'delete', jobId })
+}
+
+export async function deleteSavedJobs(jobIds: string[]) {
+  await counter.updateJobLibrary({ type: 'deleteMany', jobIds })
+}
+
 watch(
   [
     services.conf.formData,
@@ -199,6 +208,7 @@ export async function perform<T>(work: () => Promise<T>): Promise<T> {
     await settingsRefresh
     return await work()
   } catch (error) {
+    diagnostic('workbench.action', { error })
     update({ error: message(error) })
     throw error
   } finally {
@@ -217,6 +227,7 @@ export async function refreshLibrary() {
       libraryError: '',
     })
   } catch (error) {
+    diagnostic('library.read', { error })
     update({ libraryError: message(error) })
   }
 }
@@ -235,6 +246,7 @@ async function refreshKeywords() {
         : DEFAULT_JOB_KEYWORDS.join('\n'),
     })
   } catch (error) {
+    diagnostic('keywords.read', { error })
     update({ error: message(error) })
   }
 }
@@ -286,10 +298,14 @@ export async function refreshRuntime() {
           ...(chatJobKey ? { chatJobKey } : {}),
         }),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('执行器尚未响应，请确认 BOSS 页面已加载')),
-            5000,
-          )
+          timer = setTimeout(() => {
+            const error = new Error('执行器尚未响应，请确认 BOSS 页面已加载')
+            diagnostic('executor.snapshot.timeout', {
+              error,
+              context: { tabId: target, timeoutMs: 5000 },
+            })
+            reject(error)
+          }, 5000)
         }),
       ])) as ExecutorSnapshot
     } finally {
@@ -396,13 +412,14 @@ export async function saveConfig(
   await reloadExecutorSettings()
   if (patch.nativeSearch) {
     if (!state.connected) {
-      update({ settingsWarning: '配置已保存，尚未同步到 BOSS；连接岗位页后请再次保存并同步。' })
+      update({ settingsWarning: '配置已保存，尚未同步到 BOSS；连接岗位页后请点击“应用到 BOSS”。' })
       return
     }
     try {
       await command({ type: 'applyNativeFilters', filters: next.nativeSearch! })
       update({ settingsWarning: '' })
     } catch (error) {
+      diagnostic('settings.applyNativeFilters', { error })
       const warning = `配置已保存，尚未同步到 BOSS：${message(error)}`
       update({ settingsWarning: warning })
       throw new Error(warning)
@@ -414,7 +431,8 @@ export async function reloadExecutorSettings() {
   try {
     await command({ type: 'reloadSettings' })
     update({ settingsWarning: '' })
-  } catch {
+  } catch (error) {
+    diagnostic('settings.reloadExecutor', { error })
     update({
       settingsWarning: '配置已保存；执行器将在下一次启动任务前重新读取。当前任务继续使用原配置。',
     })
@@ -494,6 +512,7 @@ async function refreshSettings() {
       services.models.modelData.value = jsonClone(models)
       await services.resumes.init(services.conf.formData.resumeText)
     } catch (error) {
+      diagnostic('settings.refresh', { error })
       update({ error: message(error) })
     } finally {
       settingsRefresh = undefined

@@ -7,11 +7,14 @@ import { JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
 
 let data
 let library
+let writes
 beforeEach(() => {
   data = new Map()
+  writes = 0
   library = new JobLibraryStorage({
     getItem: async (key) => structuredClone(data.get(key) ?? null),
     setItem: async (key, value) => {
+      writes++
       data.set(key, structuredClone(value))
     },
   })
@@ -76,6 +79,56 @@ test('checks the latest review, sending, exclusion and completed analysis before
     expect((await analyze()).updated).toBe(false)
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual([record])
   }
+})
+
+test('deletes one saved job and leaves the other records intact', async () => {
+  data.set(
+    JOB_LIBRARY_STORAGE_KEY,
+    mergeJobRecords([], [{ encryptJobId: 'one' }, { encryptJobId: 'two' }], '产品', 'batch')
+      .records,
+  )
+
+  const result = await library.update({ type: 'delete', jobId: 'one' })
+
+  expect(result.updated).toBe(true)
+  expect(result.records.map((record) => record.encryptJobId)).toEqual(['two'])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY).map((record) => record.encryptJobId)).toEqual(['two'])
+})
+
+test('deletes multiple saved jobs in one storage update', async () => {
+  data.set(
+    JOB_LIBRARY_STORAGE_KEY,
+    mergeJobRecords(
+      [],
+      [{ encryptJobId: 'one' }, { encryptJobId: 'two' }, { encryptJobId: 'three' }],
+      '产品',
+      'batch',
+    ).records,
+  )
+
+  const result = await library.update({ type: 'deleteMany', jobIds: ['one', 'three'] })
+
+  expect(result.updated).toBe(true)
+  expect(result.records.map((record) => record.encryptJobId)).toEqual(['two'])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY).map((record) => record.encryptJobId)).toEqual(['two'])
+  expect(writes).toBe(1)
+})
+
+test('rejects malformed bulk deletions without writing and keeps storage unchanged on write failure', async () => {
+  const original = structuredClone(data.get(JOB_LIBRARY_STORAGE_KEY))
+  for (const jobIds of [[], ['one', ''], ['one', null], 'one']) {
+    await expect(library.update({ type: 'deleteMany', jobIds })).rejects.toThrow('缺少岗位 ID')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(original)
+  }
+  expect(writes).toBe(0)
+  const failing = new JobLibraryStorage({
+    getItem: async () => structuredClone(data.get(JOB_LIBRARY_STORAGE_KEY)),
+    setItem: async () => {
+      throw new Error('disk full')
+    },
+  })
+  await expect(failing.update({ type: 'deleteMany', jobIds: ['one'] })).rejects.toThrow('disk full')
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(original)
 })
 
 test('preserves invalid storage and recovers the queue after a rejected mutation', async () => {

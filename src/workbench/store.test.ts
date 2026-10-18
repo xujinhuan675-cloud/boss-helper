@@ -163,6 +163,31 @@ beforeAll(async () => {
 afterAll(() => interval.mockRestore())
 
 describe('workbench synchronization and mutation boundary', () => {
+  test('bulk deletes saved jobs through background storage without executor messages', async () => {
+    const original = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    try {
+      stored.set(
+        JOB_LIBRARY_STORAGE_KEY,
+        mergeJobRecords(
+          [],
+          [{ encryptJobId: 'one' }, { encryptJobId: 'two' }, { encryptJobId: 'three' }],
+          'AI',
+          'batch',
+        ).records,
+      )
+      calls.length = 0
+      await store.perform(() => store.deleteSavedJobs(['one', 'three']))
+      await store.refreshLibrary()
+      expect(store.getWorkbenchState().records.map((record) => record.encryptJobId)).toEqual([
+        'two',
+      ])
+      expect(calls).toEqual([])
+    } finally {
+      stored.set(JOB_LIBRARY_STORAGE_KEY, original ?? [])
+      await store.refreshLibrary()
+    }
+  })
+
   test('analyzes saved JD without any BOSS tab or executor message', async () => {
     const original = [...tabs]
     const savedModels = stored.get('conf-model')

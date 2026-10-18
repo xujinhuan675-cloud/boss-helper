@@ -4,7 +4,7 @@ import { describe, expect, it } from 'bun:test'
 import { defaultFormData } from '../composables/conf/info'
 import { nativeSearchFromUrl } from '../entrypoints/boss/nativeSearch'
 import { jsonClone } from '../utils/deepmerge'
-import { parseObject, validateConfig, validateModels } from './settingsValidation'
+import { validateConfig, validateModels } from './settingsValidation'
 
 describe('workbench settings import boundaries', () => {
   it.each([
@@ -76,13 +76,5 @@ describe('workbench settings import boundaries', () => {
     config.company.value = []
     config.customGreeting.value = [{ type: 'image', image: '' }]
     expect(() => validateConfig(config)).toThrow('图片')
-  })
-
-  it('requires objects for advanced configuration while preserving nested values', () => {
-    expect(parseObject('{"extra_headers":{"X-Test":"value"}}', '高级配置')).toEqual({
-      extra_headers: { 'X-Test': 'value' },
-    })
-    expect(() => parseObject('[]', '高级配置')).toThrow('对象')
-    expect(() => parseObject('{', '高级配置')).toThrow('JSON')
   })
 })

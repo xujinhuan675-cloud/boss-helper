@@ -87,7 +87,7 @@ export function Resumes() {
             <Table.Header>
               <Table.Column isRowHeader>简历</Table.Column>
               <Table.Column>更新时间</Table.Column>
-              <Table.Column>管理</Table.Column>
+              <Table.Column className="text-right">管理</Table.Column>
             </Table.Header>
             <Table.Body
               renderEmptyState={() => <p className="p-4 text-sm text-muted">还没有简历</p>}
@@ -103,8 +103,8 @@ export function Resumes() {
                     )}
                   </Table.Cell>
                   <Table.Cell>{new Date(resume.updatedAt).toLocaleString('zh-CN')}</Table.Cell>
-                  <Table.Cell>
-                    <div className="flex items-center gap-1">
+                  <Table.Cell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
                       <IconButton
                         label={`编辑 ${resume.name}`}
                         disabled={busy}

@@ -43,13 +43,13 @@ pre {
 .workbench-shell {
   min-height: 100dvh;
 }
-.workbench-tabs {
+.workbench-layout {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
   min-height: calc(100dvh - 64px);
   gap: 0;
 }
-.workbench-tabs > .tabs__list-container {
+.workbench-navigation {
   position: sticky;
   top: 64px;
   align-self: start;
@@ -58,13 +58,20 @@ pre {
   border-right: 1px solid var(--border);
   border-radius: 0;
   background: var(--surface);
+  overflow-y: auto;
 }
-.workbench-tabs > .tabs__list-container .tabs__list {
-  width: 100%;
+.workbench-nav-group + .workbench-nav-group {
+  margin-top: 24px;
+}
+.workbench-nav-links {
+  display: flex;
+  flex-direction: column;
   gap: 4px;
-  padding: 0;
+  margin-top: 8px;
 }
-.workbench-tabs > .tabs__list-container .tabs__tab {
+.workbench-navigation .workbench-nav-item {
+  display: flex;
+  align-items: center;
   justify-content: start;
   width: 100%;
   gap: 10px;
@@ -92,6 +99,16 @@ pre {
   min-width: 0;
   flex: 1;
 }
+.connection-status-dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--background);
+  border-radius: 999px;
+  background: var(--danger);
+}
 @media (hover: hover) {
   .workbench-nav-item:hover,
   .workbench-nav-item[data-hovered='true'] {
@@ -105,10 +122,13 @@ pre {
   background: var(--default);
   text-decoration: none;
 }
-.workbench-tabs > .tabs__list-container .tabs__indicator {
-  border-radius: var(--radius);
+.workbench-nav-item[aria-current='page'] {
   background: var(--default);
-  box-shadow: none;
+  font-weight: 600;
+}
+.workbench-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .workbench-panel {
   min-width: 0;
@@ -128,6 +148,115 @@ pre {
 .field-grid > * {
   min-width: 0;
 }
+.models-page .tabs__list-container,
+.models-page .tabs__panel {
+  min-width: 0;
+}
+.models-page button:not(.tabs__tab),
+.models-page .select__trigger,
+.models-page .number-field__group,
+.models-page textarea {
+  border-radius: 6px;
+}
+.prompt-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 32px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.prompt-enable {
+  width: 260px;
+  max-width: 100%;
+}
+.prompt-score {
+  width: 160px;
+  max-width: 100%;
+}
+.prompt-workspace {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 24px;
+  min-height: 360px;
+}
+.prompt-messages {
+  min-width: 0;
+  padding-right: 16px;
+  border-right: 1px solid var(--border);
+}
+.prompt-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.prompt-message {
+  width: 100%;
+  height: auto;
+  min-height: 60px;
+  flex-direction: column;
+  align-items: start;
+  justify-content: center;
+  gap: 3px;
+  padding: 10px 12px;
+  white-space: normal;
+  text-align: start;
+}
+.prompt-message[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--accent-soft-foreground);
+}
+.prompt-editor {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+.prompt-editor-heading,
+.prompt-editor-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.prompt-editor-heading {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.prompt-role {
+  width: 128px;
+  min-width: 0;
+}
+.prompt-content {
+  flex: 1;
+  min-width: 0;
+}
+.prompt-content textarea {
+  min-height: 320px;
+  height: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  box-shadow: none;
+  line-height: 1.8;
+  resize: vertical;
+}
+.prompt-empty {
+  padding-block: 20px;
+}
+.prompt-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-block: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
 .accordion__item + .accordion__item {
   margin-top: 12px;
 }
@@ -142,29 +271,37 @@ pre {
   padding: 8px 0 24px;
   color: var(--foreground);
 }
-.settings-advanced > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-block: 8px;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  list-style: none;
-}
-.settings-advanced > summary::-webkit-details-marker {
-  display: none;
-}
-.settings-advanced[open] > summary svg {
-  transform: rotate(180deg);
-}
 .job-detail {
   overflow-wrap: anywhere;
 }
 .sidepanel {
   max-width: 720px;
   margin-inline: auto;
+}
+.sidepanel-header-controls {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+}
+.sidepanel-tab-select {
+  flex: 1 1 8rem;
+  max-width: 8rem;
+}
+.resume-select-trigger {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: auto;
+  min-height: 40px;
+  padding: 8px 0;
+  background: transparent;
+  box-shadow: none;
+}
+.resume-select-trigger .select__indicator {
+  position: static;
+  flex: none;
 }
 .sidepanel .field-grid {
   grid-template-columns: minmax(0, 1fr);
@@ -176,23 +313,48 @@ pre {
   gap: 16px;
 }
 @media (max-width: 760px) {
-  .workbench-tabs {
+  .prompt-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .prompt-messages {
+    padding: 0 0 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .prompt-message-list {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .prompt-message {
+    flex: 1 1 130px;
+    width: auto;
+  }
+  .workbench-layout {
     display: flex;
     flex-direction: column;
   }
-  .workbench-tabs > .tabs__list-container {
+  .workbench-navigation {
     position: static;
     width: 100%;
     height: auto;
     padding: 8px 12px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-  }
-  .workbench-tabs > .tabs__list-container .tabs__list {
-    flex-direction: row;
+    display: flex;
+    gap: 20px;
     overflow-x: auto;
   }
-  .workbench-tabs > .tabs__list-container .tabs__tab {
+  .workbench-nav-group {
+    flex-shrink: 0;
+  }
+  .workbench-nav-group + .workbench-nav-group {
+    margin-top: 0;
+  }
+  .workbench-nav-links {
+    flex-direction: row;
+  }
+  .workbench-navigation .workbench-nav-item {
     width: auto;
     flex-shrink: 0;
     padding: 9px 10px;
@@ -205,9 +367,6 @@ pre {
   }
   .job-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .job-filters > .search-field {
-    grid-column: 1 / -1;
   }
 }
 @media (max-width: 440px) {
