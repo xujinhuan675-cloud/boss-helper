@@ -7,6 +7,7 @@ import type { ResponseType } from '@/utils/request'
 
 import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
 import type { JobLibraryMutation } from '../entrypoints/boss/jobLibraryStorage'
+import { diagnostic, traceDiagnostic } from '../utils/diagnostics'
 
 const jobLibrary = new JobLibraryStorage(storage)
 
@@ -39,18 +40,29 @@ export class BackgroundCounter {
   }
 
   async fetchText(args: { url: string; data: RequestInit; timeout: number }) {
-    const signal = AbortSignal.timeout(args.timeout)
-    const res = await fetch(args.url, {
-      ...args.data,
-      signal,
-      mode: 'cors',
-      credentials: 'omit',
-    })
-    return {
-      status: res.status,
-      contentType: res.headers.get('content-type') ?? '',
-      text: await res.text(),
-    }
+    return traceDiagnostic(
+      'network.fetchText',
+      async () => {
+        const signal = AbortSignal.timeout(args.timeout)
+        const res = await fetch(args.url, {
+          ...args.data,
+          signal,
+          mode: 'cors',
+          credentials: 'omit',
+        })
+        if (!res.ok)
+          diagnostic('network.http', {
+            level: 'error',
+            context: { endpoint: args.url, statusCode: res.status },
+          })
+        return {
+          status: res.status,
+          contentType: res.headers.get('content-type') ?? '',
+          text: await res.text(),
+        }
+      },
+      { endpoint: args.url, timeoutMs: args.timeout },
+    )
   }
 
   async request(args: {
@@ -59,27 +71,32 @@ export class BackgroundCounter {
     timeout: number
     responseType: ResponseType
   }) {
-    console.log('request', args)
-    const signal = AbortSignal.timeout(args.timeout * 1000)
+    return traceDiagnostic(
+      'network.request',
+      async () => {
+        const signal = AbortSignal.timeout(args.timeout * 1000)
 
-    const res = await fetch(args.url, {
-      ...args.data,
-      signal,
-      mode: 'cors',
-      credentials: 'include',
-    }).then(async (res) => {
-      console.log('request res', res)
+        const res = await fetch(args.url, {
+          ...args.data,
+          signal,
+          mode: 'cors',
+          credentials: 'include',
+        }).then(async (res) => {
+          if (!res.ok || res.status >= 400) {
+            const errorText = await res.text()
+            throw Object.assign(new Error(`状态码: ${res.status}: ${errorText}`), {
+              statusCode: res.status,
+            })
+          }
 
-      if (!res.ok || res.status >= 400) {
-        const errorText = await res.text()
-        throw new Error(`状态码: ${res.status}: ${errorText}`)
-      }
+          const result = args.responseType === 'json' ? await res.json() : await res.text()
 
-      const result = args.responseType === 'json' ? await res.json() : await res.text()
-
-      return result
-    })
-    return res
+          return result
+        })
+        return res
+      },
+      { endpoint: args.url, timeoutMs: args.timeout * 1000 },
+    )
   }
 
   async notify(args: Browser.notifications.NotificationCreateOptions) {
@@ -140,14 +157,18 @@ export class BackgroundCounter {
 interface MessageMeta {
   url: string
   injector: 'content' | 'popup'
+  tabId?: number
+  frameId?: number
 }
 
 export class ProvideBackgroundAdapter implements Adapter<MessageMeta> {
   sendMessage: SendMessage<MessageMeta> = async (message) => {
     switch (message.meta.injector) {
       case 'content': {
-        const tabs = await browser.tabs.query({ url: message.meta.url })
-        void tabs.map((tab) => browser.tabs.sendMessage(tab.id!, message))
+        if (message.meta.tabId === undefined) throw new Error('Missing reply tab')
+        await browser.tabs.sendMessage(message.meta.tabId, message, {
+          frameId: message.meta.frameId ?? 0,
+        })
         break
       }
       case 'popup': {
@@ -162,7 +183,10 @@ export class ProvideBackgroundAdapter implements Adapter<MessageMeta> {
     }
   }
   onMessage: OnMessage<MessageMeta> = (callback) => {
-    const handler = (message?: Partial<Message<MessageMeta>>) => {
+    const handler = (
+      message: Partial<Message<MessageMeta>> | undefined,
+      sender: Browser.runtime.MessageSender,
+    ) => {
       if (!message?.meta) {
         return callback(message)
       }
@@ -171,6 +195,8 @@ export class ProvideBackgroundAdapter implements Adapter<MessageMeta> {
         meta: {
           ...message.meta,
           injector: message?.sender?.name as MessageMeta['injector'],
+          tabId: sender.tab?.id,
+          frameId: sender.frameId,
         },
       })
     }
@@ -182,7 +208,7 @@ export class ProvideBackgroundAdapter implements Adapter<MessageMeta> {
 export class InjectBackgroundAdapter implements Adapter<MessageMeta> {
   constructor(public name: MessageMeta['injector'] = 'content') {}
   sendMessage: SendMessage<MessageMeta> = (message) => {
-    void browser.runtime.sendMessage(browser.runtime.id, {
+    return browser.runtime.sendMessage(browser.runtime.id, {
       ...message,
       meta: { url: document.location.href, injector: this.name },
     } satisfies Message<MessageMeta>)

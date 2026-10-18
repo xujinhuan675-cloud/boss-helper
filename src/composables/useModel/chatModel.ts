@@ -18,6 +18,7 @@ import { renderTemplate } from '@/utils/ai'
 import { jsonClone } from '@/utils/deepmerge'
 
 import type { ModelConf } from '.'
+import { diagnostic, traceDiagnostic } from '../../utils/diagnostics'
 import { MATCH_SCORING_PROMPT } from '../useApplying/scoring'
 import type { WorkflowData } from '../useApplying/type'
 import type { HelperContext } from '../useHelper'
@@ -177,10 +178,15 @@ export class ChatModel {
     const entry = this.agents.get(agentName)
     if (!entry) throw new Error(`Agent ${agentName} not found`)
     const [agent, modelConf, model] = entry
-    const result = await agent.generate({
-      messages: jsonClone(model.prompt),
-      timeout: modelConf.data?.other?.timeout ?? 60000,
-    })
+    const result = await traceDiagnostic(
+      `model.generate.${agentName}`,
+      () =>
+        agent.generate({
+          messages: jsonClone(model.prompt),
+          timeout: modelConf.data?.other?.timeout ?? 60000,
+        }),
+      { endpoint: modelConf.data?.base_url },
+    )
     return result.text
   }
 
@@ -282,6 +288,10 @@ ${data.jobData.jobDescription}`,
     // })
 
     state.status = 'streaming'
+    state.error = undefined
+    const started = performance.now()
+    let phase = 'initialize'
+    let requestFailure: unknown
 
     const msg: Message = {
       id: this.generateId[agentName](),
@@ -295,48 +305,40 @@ ${data.jobData.jobDescription}`,
       },
     }
     let index = -1
-    const stream = await agent.stream({
-      timeout,
-      messages,
-      onStart: (m) => {
-        logger.debug('Chat start', m, stream)
-      },
-      onStepStart: (m) => {
-        logger.debug('Chat onStepStart', m)
-      },
-      onStepEnd: (message) => {
-        if (index > 0) {
-          state.replaceMessage(index, {
-            ...msg,
-            parts: message.content as typeof msg.parts,
-            metadata: {
-              usage: message.usage,
-              providerMetadata: message.providerMetadata,
-            },
-          })
-        }
-        state.status = 'ready'
-      },
-      onEnd: (m) => {
-        logger.debug('Chat ended', m)
-      },
-    })
-
-    state.pushMessage(msg)
-    index = state.messages.findIndex((m) => m.id === msg.id)
-
     try {
+      const stream = await agent.stream({
+        timeout,
+        messages,
+        onStepEnd: (message) => {
+          if (index > 0) {
+            state.replaceMessage(index, {
+              ...msg,
+              parts: message.content as typeof msg.parts,
+              metadata: {
+                usage: message.usage,
+                providerMetadata: message.providerMetadata,
+              },
+            })
+          }
+          state.status = 'ready'
+        },
+      })
+
+      state.pushMessage(msg)
+      index = state.messages.findIndex((m) => m.id === msg.id)
+
+      phase = 'stream'
       for await (const chunk of stream.toUIMessageStream({
         originalMessages: state.messages,
         sendReasoning: true,
         onError: (err) => {
+          requestFailure = err
           if (err instanceof Error) {
             if (APICallError.isInstance(err)) {
               return `请求错误 ${err.statusCode}: ${err.message}`
             }
             return err.message
           }
-          logger.error('Unknown error during chat streaming', err)
           return `Unknown error: ${err}`
         },
       })) {
@@ -374,7 +376,7 @@ ${data.jobData.jobDescription}`,
           }
 
           case 'abort': {
-            logger.error('Chat abort', chunk.reason)
+            state.error = new Error('模型请求已中止')
             break
           }
         }
@@ -384,15 +386,26 @@ ${data.jobData.jobDescription}`,
         }
         // logger.debug('Received message chunk', chunk)
       }
-      state.status = 'ready'
+      state.status = state.error ? 'error' : 'ready'
+      if (state.error) throw state.error
+      diagnostic(`model.chat.${agentName}`, {
+        durationMs: performance.now() - started,
+        context: { endpoint: modelConf.data?.base_url },
+      })
+      return stream
     } catch (e) {
       state.status = 'error'
       state.error = e as Error
-      logger.error('Error during chat streaming', e)
-    }
-
-    if (state.error) {
-      throw state.error
+      diagnostic(`model.chat.${agentName}`, {
+        error: e,
+        durationMs: performance.now() - started,
+        context: {
+          phase,
+          endpoint: modelConf.data?.base_url,
+          statusCode: (requestFailure as { statusCode?: number } | undefined)?.statusCode,
+        },
+      })
+      throw e
     }
 
     // for await (const chunk of readUIMessageStream({ // BUG: 无法正确处理消息
@@ -404,6 +417,5 @@ ${data.jobData.jobDescription}`,
     // })) {
     //   msgs.replaceMessage(index, chunk)
     // }
-    return stream
   }
 }

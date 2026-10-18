@@ -8,6 +8,7 @@ import {
   validateMatchThreshold,
 } from '../../composables/useApplying/scoring'
 import { jsonClone } from '../../utils/deepmerge'
+import { diagnostic } from '../../utils/diagnostics'
 import { isJobExcluded } from './jobStore'
 import type { BossJobLibraryRecord } from './jobStore'
 import type { BossHelperCtx } from './runtime'
@@ -142,6 +143,7 @@ export class SavedJobAnalyzer {
     this.busy.value = true
     this.run.value = { status: 'running', total: 0, completed: 0, failed: 0, skipped: 0 }
     const run = this.run.value
+    const started = performance.now()
     try {
       const chat = new ChatModel(this.host, resumeText)
       if (
@@ -303,6 +305,12 @@ export class SavedJobAnalyzer {
       run.status = this.stopping ? 'stopped' : 'failed'
       run.error = error instanceof Error ? error.message : String(error)
     } finally {
+      diagnostic('analysis.finish', {
+        level: run.status === 'failed' || run.failed > 0 ? 'error' : undefined,
+        error: run.error,
+        durationMs: performance.now() - started,
+        context: { status: run.status, count: run.completed },
+      })
       delete run.currentJob
       this.busy.value = false
       this.collecting.value = false

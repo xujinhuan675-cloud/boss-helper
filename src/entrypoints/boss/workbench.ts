@@ -2,6 +2,7 @@ import type { LogData } from '@/composables/useHelper/type'
 import type { ExecutorLog, ExecutorSnapshot, RuntimeBridge } from '@/workbench/protocol'
 
 import { reloadSettings } from '../../index'
+import { diagnostic } from '../../utils/diagnostics'
 import { isExecutorCommand } from '../../workbench/protocol'
 import type { BossHelperCtx } from './runtime'
 
@@ -13,11 +14,12 @@ export function createExecutorBridge(
   initialize?: () => Promise<void>,
 ): RuntimeBridge {
   let selectedJob: string | null = null
-  function start(task: () => Promise<unknown>) {
+  function start(operation: string, task: () => Promise<unknown>) {
     void Promise.resolve()
       .then(task)
       .catch((error) => {
         state.lastError = error instanceof Error ? error.message : String(error)
+        diagnostic(`task.${operation}`, { error })
       })
     return { accepted: true }
   }
@@ -87,9 +89,11 @@ export function createExecutorBridge(
       try {
         switch (command.type) {
           case 'collect':
-            return start(() => ctx.collectOnly())
+            return start('collect', () => ctx.collectOnly())
           case 'rotate':
-            return start(() => ctx.startKeywordRotation(ctx.keywordRotationKeywords.value))
+            return start('rotate', () =>
+              ctx.startKeywordRotation(ctx.keywordRotationKeywords.value),
+            )
           case 'stopRotation':
             return await ctx.stopKeywordRotation()
           case 'pauseGathering':
@@ -99,9 +103,9 @@ export function createExecutorBridge(
           case 'stopGathering':
             return ctx.stopGathering()
           case 'analyze':
-            return start(() => ctx.savedAnalyzer.start({ limit: command.limit }))
+            return start('analyze', () => ctx.savedAnalyzer.start({ limit: command.limit }))
           case 'analyzeOne':
-            return start(async () => {
+            return start('analyzeOne', async () => {
               let record = (await ctx.getJobLibrary()).find(
                 (item) => item.encryptJobId === command.jobId,
               )
@@ -119,7 +123,7 @@ export function createExecutorBridge(
           case 'stopAnalysis':
             return ctx.savedAnalyzer.stop()
           case 'startDelivery':
-            return start(() => ctx.start())
+            return start('startDelivery', () => ctx.start())
           case 'stopDelivery':
             return ctx.stop()
           case 'resetDelivery':
@@ -134,7 +138,7 @@ export function createExecutorBridge(
           case 'clearLogs':
             return ctx.logs.clear()
           case 'sendGreeting':
-            return start(() => ctx.sendSavedGreeting(command.jobId))
+            return start('sendGreeting', () => ctx.sendSavedGreeting(command.jobId))
           case 'setFunnel':
             return await ctx.updateJobFunnelStage(command.jobId, command.stage)
           case 'setProcessing':
@@ -173,8 +177,9 @@ export function createExecutorBridge(
             return
         }
       } catch (error) {
-        state.lastError = error instanceof Error ? error.message : String(error)
-        throw error
+        const event = diagnostic(`command.${command.type}`, { error })
+        state.lastError = event.error || '执行失败'
+        throw new Error(`${state.lastError} [${event.id}]`, { cause: error })
       }
     },
   }

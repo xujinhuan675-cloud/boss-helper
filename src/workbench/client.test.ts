@@ -1,9 +1,28 @@
 // @ts-nocheck -- Bun test type declarations are absent in this repository.
 import { describe, expect, test } from 'bun:test'
 
+import { clearDiagnostics, getDiagnostics } from '../utils/diagnostics'
 import { requestExecutor } from './client'
 
 describe('extension executor client', () => {
+  test('records the selected tab and failed command without the command payload', async () => {
+    clearDiagnostics()
+    await expect(
+      requestExecutor(
+        async () => {
+          throw new Error('no receiver')
+        },
+        42,
+        { type: 'extractKeywords', input: 'private resume' },
+      ),
+    ).rejects.toThrow('no receiver')
+    expect(getDiagnostics().at(-1)).toMatchObject({
+      operation: 'executor.extractKeywords',
+      context: { tabId: 42 },
+      level: 'error',
+    })
+    expect(JSON.stringify(getDiagnostics())).not.toContain('private resume')
+  })
   test('does not mistake an old content script response for a connected executor', async () => {
     await expect(requestExecutor(async () => undefined, 3, { type: 'snapshot' })).rejects.toThrow(
       '刷新',

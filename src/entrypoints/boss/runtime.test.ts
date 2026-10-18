@@ -9,6 +9,7 @@ import { counter, initCounter } from '../../message'
 import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
 import { parseGptJson } from '../../utils/ai'
 import deepmerge, { jsonClone } from '../../utils/deepmerge'
+import { getDiagnostics, clearDiagnostics } from '../../utils/diagnostics'
 import { JobLibraryStorage } from './jobLibraryStorage'
 import {
   AUTO_CAPTURE_STORAGE_KEY,
@@ -30,6 +31,7 @@ const conf = {
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
 let getRoot = async () => ({})
+let nativePage
 mock.module('@/composables/conf', () => ({ appearanceConf: ref({}), useConf: () => conf }))
 mock.module('@/composables/useModel', () => ({ ChatModel: class {}, useModel: () => ({}) }))
 mock.module('@/composables/useResume', () => ({ useResumes: () => ({}) }))
@@ -52,6 +54,7 @@ mock.module('@/composables/useApplying/type', () => ({
 }))
 mock.module('@/composables/useVue', () => ({
   getRootVue: () => getRoot(),
+  waitForVue: async () => nativePage,
   useHookVueData:
     (_selector: string, key: string, _target: unknown, callback?: unknown) => async () => {
       if (key === 'jobList' && typeof callback === 'function') {
@@ -180,6 +183,17 @@ describe('native filter synchronization', () => {
     expect(new URL(location.href).searchParams.get('experience')).toBe('104,105')
     expect(new URL(location.href).searchParams.has('page')).toBe(false)
     expect(ctx._jobList.value).toEqual([item('new')])
+    expect(nativePage.formData).toMatchObject({
+      query: '产品经理',
+      city: '101010100',
+      salary: '405',
+      experience: ['104', '105'],
+      degree: ['203'],
+    })
+    expect(nativePage.filterConfig.salary.value).toBe('405')
+    expect(nativePage.requests).toEqual([
+      expect.objectContaining({ salary: '405', query: '产品经理' }),
+    ])
     expect(ctx.keywordRotation.value.baseSearchUrl).toContain('salary=405')
     expect(ctx.keywordRotation.value.baseSearchUrl).not.toContain('query=')
     expect(ctx.keywordRotation.value.filterSnapshot).toEqual({ city: '101010100', salary: '405' })
@@ -189,6 +203,111 @@ describe('native filter synchronization', () => {
     ])
     expect(ctx.keywordRotation.value.items[1]).toMatchObject({ enabled: false, status: 'skipped' })
     expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(jsonClone(ctx.keywordRotation.value))
+  })
+
+  it('reapplies an unchanged URL to stale native state and clears removed filters', async () => {
+    const ctx = context()
+    location.href = 'https://www.zhipin.com/web/geek/jobs?query=AI&city=101020100'
+    nativePage.formData = {
+      query: 'old',
+      salary: '405',
+      experience: ['105'],
+      city: '101010100',
+      multiBusinessDistrict: 'old-district',
+      encryptExpectId: 'saved-expect',
+    }
+    ctx.rootVue = {
+      $router: {
+        push: async () => {
+          throw new Error('NavigationDuplicated')
+        },
+      },
+    }
+    await ctx.applyNativeFilters({
+      query: 'AI',
+      city: '101020100',
+      jobType: '',
+      salary: '',
+      experience: [],
+      degree: [],
+      stage: [],
+      scale: [],
+      industry: [],
+    })
+    expect(nativePage.requests).toHaveLength(1)
+    expect(nativePage.requests[0]).toMatchObject({
+      query: 'AI',
+      city: '101020100',
+      encryptExpectId: 'saved-expect',
+    })
+    expect(nativePage.requests[0].salary ?? '').toBe('')
+    expect(nativePage.requests[0].experience ?? []).toEqual([])
+    expect(nativePage.requests[0].multiBusinessDistrict).toBeUndefined()
+    expect(nativePage.filterConfig.salary.value).toBe('')
+  })
+
+  it('waits for the debounced native search response before marking filters applied', async () => {
+    const ctx = context()
+    location.href = 'https://www.zhipin.com/web/geek/jobs?query=AI&salary=405'
+    await ctx.saveKeywordRotationKeywords('AI')
+    const before = jsonClone(data.get(KEYWORD_ROTATION_STORAGE_KEY))
+    const jobs = nativePage.jobList
+    let finishSearch
+    const started = new Promise<void>((resolve) => {
+      nativePage.onSearch = () => {
+        finishSearch = () => {
+          nativePage.jobList = []
+          nativePage.loading = false
+        }
+        resolve()
+      }
+    })
+    ctx.rootVue = { $router: { push: async () => {} } }
+    const applying = ctx.applyNativeFilters({
+      query: 'AI',
+      city: '',
+      jobType: '',
+      salary: '405',
+      experience: [],
+      degree: [],
+      stage: [],
+      scale: [],
+      industry: [],
+    })
+    await started
+    expect(nativePage.jobList).toBe(jobs)
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(before)
+    finishSearch()
+    await applying
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY).status).toBe('idle')
+  })
+
+  it('rejects native state that discards a requested filter without rebasing the plan', async () => {
+    const ctx = context()
+    location.href = 'https://www.zhipin.com/web/geek/jobs?query=AI&salary=405'
+    await ctx.saveKeywordRotationKeywords('AI')
+    const before = jsonClone(data.get(KEYWORD_ROTATION_STORAGE_KEY))
+    const initParams = nativePage.initParams.bind(nativePage)
+    nativePage.initParams = async () => {
+      await initParams()
+      delete nativePage.formData.salary
+      nativePage.filterConfig.salary.value = ''
+    }
+    ctx.rootVue = { $router: { push: async () => {} } }
+    await expect(
+      ctx.applyNativeFilters({
+        query: 'AI',
+        city: '',
+        jobType: '',
+        salary: '405',
+        experience: [],
+        degree: [],
+        stage: [],
+        scale: [],
+        industry: [],
+      }),
+    ).rejects.toThrow('筛选')
+    expect(data.get(KEYWORD_ROTATION_STORAGE_KEY)).toEqual(before)
   })
 
   it('does not overwrite a keyword plan when the router rejects the navigation', async () => {
@@ -243,6 +362,49 @@ beforeEach(() => {
   }
   createWorkflow = async () => ({})
   getRoot = async () => ({})
+  nativePage = {
+    formData: {},
+    filterConfig: {},
+    jobList: [],
+    loading: false,
+    requests: [],
+    async initParams() {
+      const params = new URL(location.href).searchParams
+      for (const key of [
+        'city',
+        'jobType',
+        'salary',
+        'experience',
+        'degree',
+        'stage',
+        'scale',
+        'industry',
+        'multiBusinessDistrict',
+      ]) {
+        if (params.has(key))
+          this.formData[key] = ['experience', 'degree', 'stage', 'scale', 'industry'].includes(key)
+            ? params.get(key).split(',')
+            : params.get(key)
+      }
+      for (const key of [
+        'city',
+        'jobType',
+        'salary',
+        'experience',
+        'degree',
+        'stage',
+        'scale',
+        'industry',
+      ]) {
+        this.filterConfig[key] = { value: this.formData[key] ?? '' }
+      }
+    },
+    async $nextTick() {},
+    onSearch() {
+      this.requests.push(jsonClone(this.formData))
+      this.jobList = []
+    },
+  }
   initializeBusiness = async () => {}
   visualDelayCalls = 0
   modelRequests = []
@@ -1699,6 +1861,22 @@ it('captures passive job-list updates when auto capture is enabled', async () =>
   ])
 })
 
+it('stops queued or active background detail completion when auto capture is disabled', async () => {
+  const ctx = context()
+  let stopped = 0
+  ctx['backgroundDetailQueued'] = true
+  ctx['detailPromise'] = Promise.resolve()
+  ctx.stopGathering = () => {
+    stopped++
+  }
+
+  await ctx.setAutoCaptureEnabled(false)
+
+  expect(ctx.autoCaptureEnabled.value).toBe(false)
+  expect(ctx['backgroundDetailQueued']).toBe(false)
+  expect(stopped).toBe(1)
+})
+
 it('persists auto capture and restores it before the first mounted job list', async () => {
   const enabled = context()
   await enabled.setAutoCaptureEnabled(true)
@@ -2050,6 +2228,7 @@ describe('collection runtime with the existing storage bridge', () => {
     ['login_required', '登录过期，请先登录'],
     ['network_error', '网络异常'],
   ])('records %s without scrolling or reporting completion', async (status, text) => {
+    clearDiagnostics()
     const ctx = context()
     document.body.innerText = text
     Object.assign(ctx, {
@@ -2058,6 +2237,19 @@ describe('collection runtime with the existing storage bridge', () => {
       },
     })
     expect((await ctx.collectOnly()).status).toBe(status)
+    expect(getDiagnostics()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: 'collection.finish',
+          level: 'error',
+          context: expect.objectContaining({ status }),
+        }),
+        expect.objectContaining({
+          operation: 'page.restriction',
+          context: expect.objectContaining({ evidenceSource: 'page-text', status }),
+        }),
+      ]),
+    )
     expect(desktopNotifications).toHaveLength(1)
     expect(desktopNotifications[0]).toContain('停止')
     expect(desktopNotifications[0]).toContain(
@@ -2500,7 +2692,7 @@ describe('slow collected detail batches', () => {
     Object.assign(ctx, {
       savedAnalyzer: {
         start: async () => {
-          analyzed.push(new URL(location.href).searchParams.get('query') ?? '')
+          analyzed.push(nativePage.formData.query ?? '')
           return { status: 'completed' }
         },
       },
@@ -2765,7 +2957,7 @@ describe('keyword rotation pacing', () => {
     }
     expect(await ctx.startKeywordRotation('A')).toMatchObject({
       status: 'failed',
-      error: '额度保存失败',
+      error: expect.stringContaining('额度保存失败'),
     })
     expect(started).toEqual([])
     expect(data.has(KEYWORD_ROTATION_USAGE_STORAGE_KEY)).toBe(false)

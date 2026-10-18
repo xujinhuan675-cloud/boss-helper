@@ -1,14 +1,12 @@
 import { defineProxy } from 'comctx'
 import { computed, reactive, ref } from 'vue'
 
-import { useConf } from '@/composables/conf'
 import type { WorkflowData } from '@/composables/useApplying/type'
 import { createLazyObject, isInitialized } from '@/composables/useApplying/type'
 import type { JobData } from '@/composables/useHelper'
 import { HelperContext } from '@/composables/useHelper'
-import type { AlertItem, ConfigAccordionItem } from '@/composables/useHelper/type'
 import { ChatModel } from '@/composables/useModel/chatModel'
-import { getRootVue, useHookVueData, useHookVueFn } from '@/composables/useVue'
+import { getRootVue, useHookVueData, useHookVueFn, waitForVue } from '@/composables/useVue'
 import { run } from '@/index'
 import { counter } from '@/message'
 import type { FormDataInput } from '@/types/formData'
@@ -18,7 +16,9 @@ import { logger } from '@/utils/logger'
 
 import { defaultFormData } from '../../composables/conf/info'
 import { MATCH_SCORING_VERSION } from '../../composables/useApplying/scoring'
+import { observeProvider } from '../../message/bridge'
 import { ProvideContentScriptAdapter } from '../../message/contentScriptShare'
+import { diagnostic } from '../../utils/diagnostics'
 import { EXECUTOR_NAMESPACE } from '../../workbench/protocol'
 import { GeekChatClientManager } from './chat'
 import type { BoosJobData } from './delivery'
@@ -56,7 +56,7 @@ import {
   resetKeywordRotationPlan,
 } from './keywordRotation'
 import type { KeywordRotationPlan, KeywordRotationUsage } from './keywordRotation'
-import { buildNativeSearchUrl } from './nativeSearch'
+import { buildNativeSearchUrl, nativeSearchFromUrl } from './nativeSearch'
 import type { NativeSearchFilters } from './nativeSearch'
 import { getBossData, uploadImage } from './requests'
 import { SavedJobAnalyzer } from './savedAnalysis'
@@ -236,7 +236,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         (field) => typeof field === 'string' && !!field.trim(),
       )
     ) {
-      throw new Error('请先在 AI 页配置模型、接口地址与 API Key')
+      throw new Error('请先在“模型与提示词”页配置模型、接口地址与 API Key')
     }
     this.keywordExtractionBusy.value = true
     try {
@@ -295,11 +295,16 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     await this.loadKeywordRotation()
     this._jobList.value = []
     this.jobList.value = []
-    await router.push({
-      path: target.pathname,
-      query: Object.fromEntries(target.searchParams.entries()),
-      hash: '',
-    })
+    const currentRoute = new URL(location.href)
+    const targetRoute = new URL(target.href)
+    currentRoute.searchParams.sort()
+    targetRoute.searchParams.sort()
+    if (currentRoute.href !== targetRoute.href)
+      await router.push({
+        path: target.pathname,
+        query: Object.fromEntries(target.searchParams.entries()),
+        hash: '',
+      })
     const current = new URL(normalizeSearchUrl(location.href))
     const expected = new URL(normalizeSearchUrl(target.href))
     current.searchParams.sort()
@@ -309,6 +314,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       new URL(location.href).searchParams.get('query') !== target.searchParams.get('query')
     )
       throw new Error('BOSS 未应用筛选条件，请重试同步')
+    await this.syncNativeSearch(target)
     const plan = this.keywordRotation.value
     if (plan) {
       const next = resetKeywordRotationPlan(plan)
@@ -320,6 +326,44 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     return target.href
   }
 
+  private async syncNativeSearch(target: URL) {
+    const page = await waitForVue(
+      '#wrap .page-jobs-main',
+      (component) =>
+        typeof component.initParams === 'function' &&
+        typeof component.onSearch === 'function' &&
+        !!component.formData,
+      '原生筛选组件',
+    )
+    const { encryptExpectId, expectInfo, mixExpectType } = page.formData
+    // BOSS only reads filter codes on creation; route changes update the search input alone.
+    page.formData = {
+      encryptExpectId,
+      expectInfo,
+      mixExpectType,
+      query: target.searchParams.get('query') ?? '',
+    }
+    await page.initParams()
+    await page.$nextTick()
+    for (const [key, expected] of Object.entries(nativeSearchFromUrl(target.href))) {
+      if (key === 'city' && !expected) continue
+      const actual = page.formData[key]
+      if (String(actual ?? '') !== String(expected))
+        throw new Error(`BOSS 未应用筛选条件（${key}），请重试同步`)
+      if (key !== 'query' && String(page.filterConfig?.[key]?.value ?? '') !== String(expected))
+        throw new Error(`BOSS 原生筛选未同步（${key}），请重试同步`)
+    }
+    const previousJobs = page.jobList
+    page.onSearch()
+    const deadline = Date.now() + 15000
+    while (page.loading || page.jobList === previousJobs) {
+      if (this.detectCollectionIssue())
+        throw new Error('BOSS 要求验证、登录或提示访问异常，筛选同步已停止')
+      if (Date.now() >= deadline) throw new Error('等待 BOSS 筛选结果超时，请重试同步')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+
   private async navigateToKeyword(keyword: string, baseSearchUrl: string) {
     if (normalizeSearchUrl(location.href) !== baseSearchUrl)
       throw new Error('BOSS 原生筛选条件已变化，请重新保存关键词后再运行')
@@ -327,7 +371,10 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     target.searchParams.set('query', keyword)
     target.searchParams.delete('page')
     const current = new URL(location.href)
-    if (current.searchParams.get('query') === keyword) return
+    if (current.searchParams.get('query') === keyword) {
+      await this.syncNativeSearch(target)
+      return
+    }
     this._jobList.value = []
     this.jobList.value = []
     const router = this.rootVue?.$router
@@ -347,7 +394,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       if (normalizeSearchUrl(currentUrl.href) !== baseSearchUrl)
         throw new Error('BOSS 原生筛选条件已变化，轮换已停止')
       if (currentUrl.searchParams.get('query') === keyword) {
-        await new Promise((resolve) => setTimeout(resolve, 250))
+        await this.syncNativeSearch(target)
         return
       }
       await new Promise((resolve) => setTimeout(resolve, 100))
@@ -445,6 +492,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     this.keywordRotationStopRequested = false
     this.keywordRotationError.value = ''
     this.keywordRotationBusy.value = true
+    const started = performance.now()
     this.keywordRotationPromise = (async () => {
       let current = plan
       try {
@@ -541,6 +589,15 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         }
         await this.writeKeywordRotation(current)
       } finally {
+        diagnostic('rotation.finish', {
+          level: current.status === 'failed' ? 'error' : undefined,
+          error: current.error,
+          durationMs: performance.now() - started,
+          context: {
+            status: current.status,
+            count: current.items.filter((item) => item.status === 'completed').length,
+          },
+        })
         this.keywordRotationWaitSeconds.value = 0
         this.keywordRotationBusy.value = false
         this.keywordRotationPromise = null
@@ -723,18 +780,22 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   async setAutoCaptureEnabled(enabled: boolean) {
     await counter.storageSet(AUTO_CAPTURE_STORAGE_KEY, enabled)
     this.autoCaptureEnabled.value = enabled
-    if (enabled) {
-      await this.captureNewJobs(this._jobList.value).catch((error) => {
-        logger.error('自动保存新岗位失败', error)
-        return 0
-      })
+    if (!enabled) {
+      this.backgroundDetailQueued = false
+      if (this.detailPromise) this.stopGathering()
+      return
     }
+    await this.captureNewJobs(this._jobList.value).catch((error) => {
+      logger.error('自动保存新岗位失败', error)
+      return 0
+    })
   }
 
   scheduleBackgroundDetailCompletion() {
     if (!this.mounted || this.backgroundDetailQueued || this.detailPromise) return
     this.backgroundDetailQueued = true
     void Promise.resolve().then(async () => {
+      if (!this.backgroundDetailQueued) return
       this.backgroundDetailQueued = false
       if (
         !this.mounted ||
@@ -832,15 +893,30 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     if (target.scrollTop === beforeTop) target.scrollTop = beforeTop + distance
   }
 
-  private detectCollectionIssue(
-    message = document.body?.innerText ?? '',
-  ): CollectionRun['status'] | undefined {
-    const text = message.replace(/\s+/g, '')
-    if (/验证码|安全验证|滑动验证|人机验证/.test(text)) return 'captcha'
-    if (/登录后|请先登录|登录过期/.test(text)) return 'login_required'
-    if (/操作(过于|太)频繁|访问(过于|太)频繁|访问受限|账号异常|账户异常|稍后再试/.test(text))
-      return 'restricted'
-    if (/网络异常|加载失败|请求失败|服务异常/.test(text)) return 'network_error'
+  private lastDetectedCollectionIssue = ''
+  private detectCollectionIssue(message?: string): CollectionRun['status'] | undefined {
+    const text = (message ?? document.body?.innerText ?? '').replace(/\s+/g, '')
+    const patterns = [
+      ['captcha', /验证码|安全验证|滑动验证|人机验证/],
+      ['login_required', /登录后|请先登录|登录过期/],
+      ['restricted', /操作(过于|太)频繁|访问(过于|太)频繁|访问受限|账号异常|账户异常|稍后再试/],
+      ['network_error', /网络异常|加载失败|请求失败|服务异常/],
+    ] as const
+    for (const [status, pattern] of patterns) {
+      const match = text.match(pattern)
+      if (!match) continue
+      const evidenceSource = message === undefined ? 'page-text' : 'error-message'
+      const signature = `${status}:${evidenceSource}:${match[0]}`
+      if (signature !== this.lastDetectedCollectionIssue) {
+        diagnostic('page.restriction', {
+          level: 'warning',
+          context: { status, matchedTerm: match[0], evidenceSource },
+        })
+        this.lastDetectedCollectionIssue = signature
+      }
+      return status
+    }
+    this.lastDetectedCollectionIssue = ''
     return undefined
   }
 
@@ -969,6 +1045,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     this.collectionAnalysisRun = analyze ? run : null
     this.gatheringKind.value = 'collection'
     this.gatheringBusy.value = true
+    const started = performance.now()
     this.collectionPromise = (async () => {
       let idleRounds = 0
       const handled = new Set<string>()
@@ -1096,6 +1173,12 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           if (run.status === 'completed') run.status = 'unknown_error'
           run.error = error instanceof Error ? error.message : String(error)
         } finally {
+          diagnostic('collection.finish', {
+            level: !['completed', 'stopped'].includes(run.status) ? 'error' : undefined,
+            error: run.error,
+            durationMs: performance.now() - started,
+            context: { status: run.status, phase: run.phase, count: run.newCount },
+          })
           this.collectionAnalysisRun = null
           run.phase = run.status === 'stopped' ? '已停止' : '采集结束'
           run.waitSeconds = undefined
@@ -1140,6 +1223,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         record.failureReason = undefined
       } catch (error) {
         if (run.status === 'stopped') return null
+        diagnostic('detail.capture', { error })
         record.detailStatus = 'failed'
         record.detailRetryCount++
         record.failureReason = error instanceof Error ? error.message : String(error)
@@ -1189,6 +1273,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     this.detailRun.value = run
     this.gatheringKind.value = 'detail'
     this.gatheringBusy.value = true
+    const started = performance.now()
     this.detailPromise = (async () => {
       try {
         this.collectionDelay('Detail')
@@ -1222,6 +1307,13 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         if (run.status !== 'stopped') run.status = 'unknown_error'
         run.error = error instanceof Error ? error.message : String(error)
       } finally {
+        diagnostic('detail.finish', {
+          level:
+            !['completed', 'stopped'].includes(run.status) || run.failed > 0 ? 'error' : undefined,
+          error: run.error,
+          durationMs: performance.now() - started,
+          context: { status: run.status, phase: run.phase, count: run.completed },
+        })
         run.waitSeconds = undefined
         run.phase = run.status === 'stopped' ? '已停止' : '详情批次结束'
         this.detailPromise = null
@@ -1469,255 +1561,6 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       })
     }
   }
-  getConfigItems() {
-    const conf = useConf()
-    return computed<[AlertItem[], (ConfigAccordionItem | false)[]]>(() => {
-      return [
-        [
-          {
-            type: 'alert',
-            id: 'config-alert-1',
-            showIcon: true,
-            title: '首次配置前请先进入帮助模式查看说明',
-            color: 'success',
-            description:
-              '所有配置项均提供说明，获取岗位滚动至约 150 条会自动停止，刷新页面或修改求职期望后可重新获取；如遇 Bug 或帮助内容不清晰，欢迎反馈并提出改进建议。',
-          },
-        ],
-        [
-          {
-            label: '筛选配置',
-            value: 'filter',
-            items: [
-              {
-                type: 'alert',
-                id: 'filter-config-alert-enable',
-                title: '关键词按排除处理，留空时不筛选；输入关键词即可生效。',
-                description: '下面的复选框用于启用其他筛选规则，修改后记得保存。',
-                color: 'success',
-                showIcon: true,
-              },
-              {
-                type: 'div',
-                class: 'grid grid-cols-2 gap-2 mt-2 w-full',
-
-                items: [
-                  {
-                    type: 'select',
-                    key: 'company',
-                  },
-                  {
-                    type: 'select',
-                    key: 'jobTitle',
-                  },
-                  {
-                    type: 'select',
-                    key: 'jobContent',
-                  },
-                  {
-                    type: 'select',
-                    key: 'hrPosition',
-                  },
-                  {
-                    type: 'div',
-                  },
-                ],
-              },
-              {
-                type: 'div',
-                class: 'col-span-full flex flex-wrap gap-2 mt-3',
-                items: [
-                  conf.configLevel.intermediate && {
-                    type: 'checkbox',
-                    key: 'activityFilter',
-                  },
-                  {
-                    type: 'checkbox',
-                    key: 'goldHunterFilter',
-                  },
-                  {
-                    type: 'checkbox',
-                    key: 'friendStatus',
-                  },
-                  {
-                    type: 'checkbox',
-                    key: 'bossGoldMedalHr',
-                  },
-                  conf.configLevel.intermediate && {
-                    type: 'checkbox-expire',
-                    key: 'sameCompanyFilter',
-                  },
-                  conf.configLevel.intermediate && {
-                    type: 'checkbox-expire',
-                    key: 'sameHrFilter',
-                  },
-                ],
-              },
-            ],
-          },
-          conf.configLevel.intermediate && {
-            label: '招呼语配置',
-            value: 'greetings',
-            items: [
-              {
-                type: 'alert',
-                id: 'config-alert-2',
-                showIcon: true,
-                color: 'success',
-                description: '使用自定义招呼语前 推荐禁用boss直聘自带招呼语',
-                actions: [
-                  {
-                    label: '前往',
-                    color: 'neutral',
-                    variant: 'subtle',
-                    onClick: () => {
-                      window.open(
-                        'https://www.zhipin.com/web/geek/notify-set?type=greetSet',
-                        '_blank',
-                      )
-                    },
-                  },
-                ],
-              },
-              { type: 'customGreeting', key: 'customGreeting' },
-            ],
-          },
-          {
-            label: '采集间隔',
-            value: 'collection-delay',
-            items: [
-              {
-                type: 'div',
-                class: 'grid grid-cols-2 gap-3',
-                items: (
-                  [
-                    ['delayCollectionScrollMin', '滚动最短间隔（秒）'],
-                    ['delayCollectionScrollMax', '滚动最长间隔（秒）'],
-                    ['delayCollectionDetailMin', '详情最短间隔（秒）'],
-                    ['delayCollectionDetailMax', '详情最长间隔（秒）'],
-                  ] as const
-                ).map(([key, label]) => ({
-                  type: 'inputNumber' as const,
-                  key,
-                  fieldProps: { label },
-                  inputNumberProps: { min: 0.5, max: 3600, step: 0.5 },
-                })),
-              },
-            ],
-          },
-          {
-            label: '关键词轮换',
-            value: 'keyword-rotation',
-            items: [
-              {
-                type: 'div',
-                class: 'grid grid-cols-1 sm:grid-cols-2 gap-3',
-                items: [
-                  ...(
-                    [
-                      ['delayKeywordRotationMin', '关键词最短间隔（秒）'],
-                      ['delayKeywordRotationMax', '关键词最长间隔（秒）'],
-                      ['delayKeywordRotationBatchMin', '批次最短休息（秒）'],
-                      ['delayKeywordRotationBatchMax', '批次最长休息（秒）'],
-                    ] as const
-                  ).map(([key, label]) => ({
-                    type: 'inputNumber' as const,
-                    key,
-                    fieldProps: { label },
-                    inputNumberProps: { min: 1, max: 86400, step: 60 },
-                  })),
-                  {
-                    type: 'inputNumber',
-                    key: 'keywordRotationBatchSize',
-                    fieldProps: { label: '每批关键词数' },
-                    inputNumberProps: { min: 1, max: 100, step: 1 },
-                  },
-                  {
-                    type: 'inputNumber',
-                    key: 'keywordRotationDailyLimit',
-                    fieldProps: { label: '每日关键词上限' },
-                    inputNumberProps: { min: 1, max: 1000, step: 1 },
-                  },
-                ],
-              },
-              { type: 'checkbox', key: 'keywordRotationAutoResume' },
-            ],
-          },
-          {
-            label: '外观配置',
-            value: 'appearance',
-            items: [{ type: 'appearance', key: 'appearance' }],
-          },
-          conf.configLevel.advanced && {
-            label: '地址配置',
-            value: 'address',
-            items: [{ type: 'address', key: 'address' }],
-          },
-          conf.configLevel.intermediate && {
-            label: '延迟配置',
-            value: 'delay',
-            items: [
-              {
-                type: 'div',
-                class: 'grid grid-cols-2 gap-3',
-                items: [
-                  {
-                    type: 'inputNumber',
-                    key: 'delayDeliveryStarts',
-                    fieldProps: {
-                      label: '投递开始',
-                      'data-help': '点击投递按钮会等待一段时间,默认值10s',
-                    },
-                    inputNumberProps: {
-                      min: 1,
-                      max: 99999,
-                    },
-                  },
-                  {
-                    type: 'inputNumber',
-                    key: 'delayDeliveryInterval',
-                    fieldProps: {
-                      label: '投递间隔',
-                      'data-help': '每个投递的间隔,太快易风控,默认值2s',
-                    },
-                    inputNumberProps: {
-                      min: 1,
-                      max: 99999,
-                    },
-                  },
-                  {
-                    type: 'inputNumber',
-                    key: 'delayDeliveryPageNext',
-                    fieldProps: {
-                      label: '投递翻页',
-                      'data-help': '投递完下一页之后等待的间隔,太快易风控,默认值60s',
-                    },
-                    inputNumberProps: {
-                      min: 1,
-                      max: 99999,
-                    },
-                  },
-                  {
-                    type: 'inputNumber',
-                    key: 'delayMessageSending',
-                    fieldProps: {
-                      label: '消息发送',
-                      'data-help': '在发送消息前允许等待一定的时间让用户来修改或手动发送,默认值2s',
-                    },
-                    inputNumberProps: {
-                      min: 1,
-                      max: 99999,
-                      disable: true,
-                    },
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      ]
-    })
-  }
   override async onJobCardClick(key: string, shouldStop?: () => boolean) {
     // const detail = await requestDetail({
     //   securityId: job.rawData.jobitem.securityId,
@@ -1889,15 +1732,21 @@ export async function runBoss(script: HTMLScriptElement) {
       namespace: EXECUTOR_NAMESPACE,
     },
   )
-  provideExecutor(new ProvideContentScriptAdapter(script))
+  provideExecutor(observeProvider(new ProvideContentScriptAdapter(script), 'boss.executor'))
 
   async function initialize() {
     if (initialization) return initialization
     initialized = false
     routeMount = undefined
+    const started = performance.now()
     initialization = initializeBusiness()
     try {
       await initialization
+      diagnostic('executor.initialize', {
+        level: state.ready ? 'info' : 'error',
+        durationMs: performance.now() - started,
+        error: state.error || undefined,
+      })
     } finally {
       initialization = undefined
     }
@@ -1939,6 +1788,7 @@ export async function runBoss(script: HTMLScriptElement) {
                 }
               })
               .catch((error) => {
+                diagnostic('executor.mount', { error })
                 if (routeMount === mounting) {
                   state.ready = false
                   state.error = error instanceof Error ? error.message : String(error)
@@ -1959,6 +1809,7 @@ export async function runBoss(script: HTMLScriptElement) {
       state.ready = true
       state.error = ''
     } catch (error) {
+      diagnostic('executor.initialize.failure', { error })
       state.ready = false
       state.error = error instanceof Error ? error.message : String(error)
       logger.error('Executor initialization failed', error)

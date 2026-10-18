@@ -1,6 +1,7 @@
 import type { StorageLikeAsync } from '@vueuse/core'
 import { defineProxy } from 'comctx'
 
+import { connectBridge } from './bridge'
 import type { ContentCounter } from './contentScript'
 import { ProvideContentScriptAdapter } from './contentScriptShare'
 
@@ -17,8 +18,9 @@ export function initCounter(
 ) {
   const [, injectCounter] = defineProxy(() => ({}) as ContentCounter, {
     namespace: '__boss-helper-content__',
+    heartbeatTimeout: 3000,
   })
-  _counter = injectCounter(new InjectAdapter(script))
+  _counter = connectBridge(injectCounter, new InjectAdapter(script), 'boss.content')
 }
 
 export const counter = new Proxy({} as ContentCounter, {
@@ -52,16 +54,11 @@ export const counter = new Proxy({} as ContentCounter, {
 
 export const ExtStorage: StorageLikeAsync = {
   async getItem(key) {
-    return new Promise((resolve) => {
-      const t = setInterval(() => {
-        if (_counter) {
-          void counter.storageGet(key).then((value) => {
-            return resolve(value as never)
-          })
-          clearInterval(t)
-        }
-      }, 200)
-    })
+    const deadline = Date.now() + 5000
+    while (!_counter && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    if (!_counter) throw new Error('Configuration bridge did not initialize within 5000ms')
+    return (await counter.storageGet(key)) as never
   },
   async setItem(key, value) {
     await counter.storageSet(key, value)

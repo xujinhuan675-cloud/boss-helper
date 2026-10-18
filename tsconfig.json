@@ -5,6 +5,7 @@
     "jsxImportSource": "vue",
     "allowArbitraryExtensions": true,
     "verbatimModuleSyntax": true,
+    "types": ["bun-types/test", "chrome", "node", "react", "react-dom", "spark-md5"],
     "paths": {
       "@": ["./src"],
       "@/*": ["./src/*"],

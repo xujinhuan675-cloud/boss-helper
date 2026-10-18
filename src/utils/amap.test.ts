@@ -1,7 +1,7 @@
 import { afterEach, expect, it, mock } from 'bun:test'
 
 const conf = { formData: { amap: { origins: '1,2', key: 'key' } } }
-mock.module('@/composables/conf', () => ({ useConf: () => conf }))
+await mock.module('@/composables/conf', () => ({ useConf: () => conf }))
 
 const { amapDistance } = await import('./amap')
 const originalFetch = globalThis.fetch
@@ -13,7 +13,7 @@ afterEach(() => {
 it('requests only straight-line distance', async () => {
   const urls: URL[] = []
   globalThis.fetch = (async (input) => {
-    urls.push(new URL(String(input)))
+    urls.push(new URL(input instanceof Request ? input.url : input))
     return new Response(
       JSON.stringify({ status: '1', results: [{ distance: '1200', duration: '300' }] }),
     )

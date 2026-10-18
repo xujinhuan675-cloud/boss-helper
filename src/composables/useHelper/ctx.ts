@@ -16,7 +16,7 @@ import { logger } from '@/utils/logger'
 
 import type { NetConf } from './netConf'
 import { initNetConf } from './netConf'
-import type { Log, JobData, LogData, ConfigAccordionItem, AlertItem } from './type'
+import type { Log, JobData, LogData } from './type'
 
 export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
   netConf: Ref<NetConf | null>
@@ -86,7 +86,6 @@ export abstract class HelperContext<C extends HelperContext<C, T, S>, T, S> {
 
   abstract loadMoreJob(delay: Promise<any>): Promise<boolean>
   abstract onMount(): Promise<void>
-  abstract getConfigItems(): ComputedRef<[AlertItem[], (ConfigAccordionItem | false)[]]>
 
   abstract start(): Promise<void>
   abstract sendMessage(data: WorkflowData<T, S>, msg: FormDataInput['value']): Promise<void>

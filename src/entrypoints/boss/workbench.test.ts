@@ -3,6 +3,7 @@ import { describe, expect, it, mock } from 'bun:test'
 
 import { ref } from 'vue'
 
+import { clearDiagnostics, diagnostic, getDiagnostics } from '../../utils/diagnostics'
 import { handleExecutorMessage, isExecutorCommand } from '../../workbench/protocol'
 import { createExecutorBridge } from './workbench'
 
@@ -45,6 +46,25 @@ function context() {
 }
 
 describe('executor message boundary', () => {
+  it('keeps model error content redacted across the serialized executor reply', async () => {
+    clearDiagnostics()
+    const ctx = context()
+    const failure = new Error('private resume from provider')
+    diagnostic('model.generate.keywords', { error: failure })
+    ctx.extractKeywordRotationFromResume = async () => {
+      throw failure
+    }
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    const response = await handleExecutorMessage(
+      { type: 'boss-helper:executor', command: { type: 'extractKeywords', input: 'resume' } },
+      { id: 'own' },
+      'own',
+      bridge,
+    )
+    expect(response).toMatchObject({ ok: false, error: expect.stringContaining('Error [') })
+    expect(JSON.stringify(response)).not.toContain('private resume')
+    expect(JSON.stringify(getDiagnostics())).not.toContain('private resume')
+  })
   it.each([
     { type: 'constructor' },
     { type: 'analyze', limit: 0 },

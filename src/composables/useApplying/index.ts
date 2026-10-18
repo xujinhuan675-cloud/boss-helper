@@ -4,6 +4,7 @@ import { shallowRef, ref } from 'vue'
 import { PipelineCacheManager } from '@/composables/usePipelineCache'
 import type { PipelineCacheItem, ProcessorType } from '@/types/pipelineCache'
 
+import { diagnostic } from '../../utils/diagnostics'
 import type { HelperContext } from '../useHelper'
 import { DependencyMissingError } from './handles'
 import type {
@@ -143,6 +144,7 @@ export async function useDeliveryWorkflow<C extends HelperContext<C, T, S>, T, S
           if (result.after) task.after.push(...result.after)
         }
       } catch (e) {
+        diagnostic('workflow.build', { error: e, context: { phase: task.id } })
         errors.set(`${task.id}::${task.label}`, e)
         _resolvedHandlers.set(task.id, async () => {
           throw e
@@ -297,6 +299,7 @@ export async function useDeliveryWorkflow<C extends HelperContext<C, T, S>, T, S
           }
           if (isStop()) break
         } catch (e) {
+          diagnostic('workflow.task', { error: e, context: { phase: t.id } })
           res = {
             isSkip: true,
             status: 'error',
@@ -401,6 +404,7 @@ export async function useDeliveryWorkflow<C extends HelperContext<C, T, S>, T, S
         }
       }
     } catch (e) {
+      diagnostic('workflow.run', { error: e })
       logger.error('投递未知错误', e)
       stepMsg = `未知错误: ${e instanceof Error ? e.message : JSON.stringify(e)}`
     } finally {
@@ -423,6 +427,7 @@ export async function useDeliveryWorkflow<C extends HelperContext<C, T, S>, T, S
             log: logger.withContext({ id: 'workflow-end' }),
           })
         } catch (e) {
+          diagnostic('workflow.end', { error: e, context: { phase: t.id } })
           logger.error('onEnd error', t.id, e)
         }
       }

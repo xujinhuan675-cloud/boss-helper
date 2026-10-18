@@ -3,13 +3,18 @@ import { defineProxy } from 'comctx'
 import { browser, defineBackground } from '#imports'
 import { BackgroundCounter, ProvideBackgroundAdapter } from '@/message/background'
 
+import { observeProvider } from '../message/bridge'
+import { installDiagnosticReceiver, startExtensionDiagnostics } from '../message/diagnostics'
+
 export default defineBackground({
   main() {
+    installDiagnosticReceiver()
+    startExtensionDiagnostics('background')
     const [provideBackgroundCounter] = defineProxy(() => new BackgroundCounter(), {
       namespace: '__boss-helper-background__',
     })
 
-    provideBackgroundCounter(new ProvideBackgroundAdapter())
+    provideBackgroundCounter(observeProvider(new ProvideBackgroundAdapter(), 'background'))
 
     if (browser.sidePanel) {
       void browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })

@@ -8,6 +8,7 @@ import deepmerge, { isPlainObject, jsonClone } from '@/utils/deepmerge'
 import { exportJson, importJson } from '@/utils/jsonImportExport'
 import { logger } from '@/utils/logger'
 
+import { diagnostic } from '../../utils/diagnostics'
 import { MATCH_SCORING_VERSION } from '../useApplying/scoring'
 import { defaultFormData } from './info'
 
@@ -163,6 +164,7 @@ export const useConf = () => {
         from.version = version
       }
     } catch (err) {
+      diagnostic('config.migrate', { error: err })
       logger.error('用户配置初始化失败', err)
       toast.add({
         title: `用户配置初始化失败: ${String(err)}`,
@@ -233,6 +235,7 @@ export const useConf = () => {
       removeRetiredFilters(formData)
       Object.assign(formData, data)
     } catch (e) {
+      diagnostic('config.load', { error: e })
       toast.add({
         title: `配置加载失败: ${String(e)}`,
         color: 'error',
@@ -258,6 +261,7 @@ export const useConf = () => {
       })
       logger.debug('formData保存')
     } catch (error: any) {
+      diagnostic('config.save', { error })
       toast.add({
         title: `保存失败: ${error.message}`,
         color: 'error',

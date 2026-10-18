@@ -1,10 +1,7 @@
 // @ts-nocheck -- Bun test type declarations are absent in this repository.
 import { beforeEach, describe, expect, it, mock } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 
 import { ref } from 'vue'
-import { compileScript, compileTemplate, parse } from 'vue/compiler-sfc'
 
 import { parseGptJson } from '../../utils/ai'
 import { jsonClone } from '../../utils/deepmerge'
@@ -162,27 +159,6 @@ beforeEach(() => {
   agentConfigs = []
   chatSnapshots = []
   respond = async (role) => (role === 'filtering' ? filtering : '已有提示词生成的招呼语')
-})
-
-describe('local batch analysis interface', () => {
-  it.each([
-    '../../components/AI/BatchAnalysis.vue',
-    '../../components/Tabs/AI.vue',
-    '../../components/CollectionControls.vue',
-    '../../components/AI/LLMPromptEdit.vue',
-    '../../components/ChatBox.vue',
-  ])('compiles the Vue script and template for %s', (relativePath) => {
-    const componentPath = fileURLToPath(new URL(relativePath, import.meta.url))
-    const { descriptor } = parse(readFileSync(componentPath, 'utf8'))
-    const script = compileScript(descriptor, { id: componentPath })
-    const template = compileTemplate({
-      source: descriptor.template.content,
-      filename: componentPath,
-      id: componentPath,
-      compilerOptions: { bindingMetadata: script.bindings },
-    })
-    expect(template.errors).toEqual([])
-  })
 })
 
 describe('saved job analysis', () => {

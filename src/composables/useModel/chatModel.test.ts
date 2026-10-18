@@ -29,7 +29,7 @@ const built = await Bun.build({
         build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({
           contents:
             path === 'ai'
-              ? 'export class ToolLoopAgent { constructor(options) { this.options = options } stream(options) { globalThis.__chatMessages = options.messages; return { toUIMessageStream: async function* () { yield* globalThis.__chatChunks ?? [] } } } }; export const Output = {json:()=>({}),text:()=>({})}; export const createIdGenerator = () => () => "test-id"; export const APICallError={}; export const isReasoningUIPart=part=>part.type==="reasoning"; export const isTextUIPart=part=>part.type==="text"'
+              ? 'export class ToolLoopAgent { constructor(options) { this.options = options } stream(options) { if (globalThis.__chatStartError) throw globalThis.__chatStartError; globalThis.__chatMessages = options.messages; return { toUIMessageStream: async function* () { yield* globalThis.__chatChunks ?? [] } } } }; export const Output = {json:()=>({}),text:()=>({})}; export const createIdGenerator = () => () => "test-id"; export const APICallError={}; export const isReasoningUIPart=part=>part.type==="reasoning"; export const isTextUIPart=part=>part.type==="text"'
               : path === 'message'
                 ? 'export const counter = { fetchText: async args => { globalThis.__backgroundFetch = args; return { status: 200, text: "data: [DONE]\\n\\n", contentType: "text/event-stream" } } }'
                 : 'export const createOpenAI = options => { globalThis.__openaiOptions = options; return {chat: model => ({model})} }',
@@ -62,6 +62,51 @@ new Function(
 const { ChatModel } = compiled.exports
 
 describe('model configuration snapshot', () => {
+  it('marks stream initialization failure and allows a successful retry on the same job', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+      resumes: { currentResume: ref(null) },
+    })
+    chat.createAgent({ prompt: [], enable: true }, 'greetings')
+    const data = { jobData: { key: 'retry-job', brand: {}, boss: {} } }
+    globalThis.__chatStartError = new Error('model unavailable')
+    try {
+      await expect(chat.chat('greetings', data)).rejects.toThrow('model unavailable')
+      expect(chat.states.get('retry-job').status).toBe('error')
+    } finally {
+      delete globalThis.__chatStartError
+    }
+    await chat.chat('greetings', data)
+    expect(chat.states.get('retry-job').status).toBe('ready')
+    expect(chat.states.get('retry-job').error).toBeUndefined()
+  })
+
+  it('does not keep a previous error chunk after a successful retry', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+        ]),
+      },
+      resumes: { currentResume: ref(null) },
+    })
+    chat.createAgent({ prompt: [], enable: true }, 'greetings')
+    const data = { jobData: { key: 'error-job', brand: {}, boss: {} } }
+    globalThis.__chatChunks = [{ type: 'error', errorText: 'rate limited' }]
+    try {
+      await expect(chat.chat('greetings', data)).rejects.toThrow('rate limited')
+      expect(chat.states.get('error-job').status).toBe('error')
+    } finally {
+      delete globalThis.__chatChunks
+    }
+    await chat.chat('greetings', data)
+    expect(chat.states.get('error-job').error).toBeUndefined()
+  })
+
   it('ignores empty stream endings and completes received reasoning and text parts', async () => {
     const chat = new ChatModel({
       models: {

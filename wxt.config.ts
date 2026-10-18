@@ -2,8 +2,6 @@ import { resolve } from 'path'
 
 import ui from '@nuxt/ui/vite'
 import react from '@vitejs/plugin-react'
-import vueJsx from '@vitejs/plugin-vue-jsx'
-import tailwindShadowDOM from 'vite-plugin-tailwind-shadowdom'
 import { defineConfig } from 'wxt'
 
 import { version } from './package.json'
@@ -51,82 +49,9 @@ export default defineConfig({
       ],
     },
     plugins: [
-      vueJsx({ exclude: /src\/workbench\// }),
       react({ include: /src\/workbench\/.*\.[jt]sx$/ }),
-      ui({
-        // autoImport: false,
-        // components: false,
-        colorMode: false,
-        router: false,
-        prose: false,
-        ui: {
-          colors: {
-            primary: 'teal',
-            neutral: 'gray',
-            warning: 'orange',
-            success: 'emerald',
-            error: 'rose',
-          },
-          badge: {
-            defaultVariants: {
-              color: 'neutral',
-              variant: 'subtle',
-            },
-          },
-          alert: {
-            slots: {
-              root: 'px-4 py-2',
-            },
-            defaultVariants: {
-              orientation: 'horizontal',
-            },
-          },
-          button: {
-            slots: {
-              base: 'cursor-pointer',
-            },
-          },
-          tabs: {
-            slots: {
-              trigger: 'cursor-pointer',
-            },
-          },
-          link: {
-            base: 'no-underline hover:underline',
-          },
-          formField: {
-            slots: {
-              // container: 'flex flex-1',
-              // root: 'justify-start items-center',
-            },
-            defaultVariants: {
-              orientation: 'horizontal',
-            },
-          },
-          modal: {
-            slots: {
-              overlay: 'z-200',
-              content: 'z-220',
-              footer: 'justify-end',
-            },
-          },
-          chatMessage: {
-            variants: {
-              side: {
-                right: {
-                  container: 'flex-row-reverse justify-start',
-                },
-              },
-            },
-          },
-          slideover: {
-            slots: {
-              content: 'z-230',
-            },
-          },
-        },
-      }),
-      tailwindShadowDOM(),
+      // 业务服务仍使用 Nuxt UI 的 useToast 自动导入，不再注册旧界面组件。
+      ui({ colorMode: false, router: false, prose: false, components: false }),
     ],
   }),
   dev: {},

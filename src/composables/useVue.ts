@@ -3,7 +3,11 @@ import { ref, toValue } from 'vue'
 
 const rootVue = ref()
 
-async function waitForVue(selectors: string, matches: (component: any) => boolean, name: string) {
+export async function waitForVue(
+  selectors: string,
+  matches: (component: any) => boolean,
+  name: string,
+) {
   return new Promise<any>((resolve, reject) => {
     const check = () => {
       const queue = Array.from(
