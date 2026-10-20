@@ -61,7 +61,14 @@ const state = {
   runtime: null,
   config: defaultFormData,
   preset: 'default',
-  presets: [],
+  presets: [
+    { label: '默认配置', value: 'default' },
+    { label: '产品经理', value: 'product' },
+  ],
+  resumes: {
+    resumes: [{ id: 'resume-main', name: '主简历', content: '简历正文' }],
+    currentResumeId: 'resume-main',
+  },
   tabs: [],
   tabId: null,
   settingsWarning: '配置已保存，尚未同步到 BOSS',
@@ -77,15 +84,37 @@ await mock.module('@/message', () => ({
 }))
 await mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
 const savedPatches = []
+const deletedPlans = []
+const createdPlans = []
+const switchedPlans = []
+const savedPresets = []
+let saveFailure = ''
+let saveGate
 await mock.module('./store', () => ({
   perform: async (work) => work(),
   command: async () => {},
-  saveConfig: async (patch) => {
+  saveConfig: async (patch, preset) => {
+    if (saveGate) await saveGate
+    if (saveFailure) throw new Error(saveFailure)
     savedPatches.push(patch)
+    savedPresets.push(preset)
     state.config = { ...state.config, ...patch }
   },
+  switchPlan: async (value) => {
+    switchedPlans.push(value)
+    state.preset = value
+  },
+  createPlan: async (label) => {
+    createdPlans.push(label)
+  },
+  deletePlan: async (value) => {
+    deletedPlans.push(value)
+  },
+  selectResume: async () => {},
   reloadExecutorSettings: async () => {},
-  services: { conf: { formDataPreset: { value: 'default' } } },
+  services: {
+    conf: { formDataPreset: { value: 'default' }, formData: structuredClone(defaultFormData) },
+  },
 }))
 
 const { Settings } = await import('./Settings')
@@ -93,6 +122,13 @@ let root
 let container
 beforeEach(() => {
   savedPatches.length = 0
+  deletedPlans.length = 0
+  createdPlans.length = 0
+  switchedPlans.length = 0
+  savedPresets.length = 0
+  saveFailure = ''
+  saveGate = undefined
+  state.preset = 'default'
   state.config = structuredClone(defaultFormData)
   state.runtime = null
   container = document.createElement('div')
@@ -111,6 +147,14 @@ const render = () => act(async () => root.render(createElement(Settings)))
 const button = (text, scope = container) =>
   [...scope.querySelectorAll('button')].find((element) => element.textContent === text)
 const click = (element) => act(async () => element.click())
+const autoSave = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  })
+const deliveryLimitInput = () =>
+  [...container.querySelectorAll('input')].find((input) =>
+    [...(input.labels ?? [])].some((label) => label.textContent === '单次投递上限'),
+  )
 async function fill(input, value) {
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value)
@@ -136,7 +180,8 @@ test('keeps durable rules and commute settings without live BOSS search controls
   for (const label of ['月薪（K）下限', '公司人数上限', '严格匹配', '同步时薪、日薪与月薪'])
     expect(html).not.toContain(label)
   expect(html).toContain('筛选规则')
-  expect(html).toContain('保存配置')
+  expect(html).not.toContain('保存配置')
+  expect(html).not.toContain('放弃修改')
   for (const label of [
     '工作地址',
     '匹配方式',
@@ -165,7 +210,7 @@ test('saves local-rule edits without reapplying the saved native search', async 
     )
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
-  await click(button('保存配置'))
+  await autoSave()
   expect(savedPatches).toHaveLength(1)
   expect(savedPatches[0]).not.toHaveProperty('nativeSearch')
 })
@@ -176,10 +221,113 @@ test('keeps native filters out of task timing settings', () => {
   expect(html).not.toContain('BOSS 原生筛选')
 })
 
+test('keeps scheme, resume, filter and automation settings together in the plan workspace', () => {
+  const plan = renderToStaticMarkup(createElement(Settings, { page: 'plan' }))
+  const settings = renderToStaticMarkup(createElement(Settings))
+  const filters = renderToStaticMarkup(createElement(Settings, { page: 'filters' }))
+  expect(plan).toContain('求职方案')
+  expect(plan).not.toContain('另存为新方案')
+  expect(plan).not.toContain('保存配置')
+  expect(plan).not.toContain('放弃修改')
+  expect(plan).toContain('当前简历')
+  expect(plan).toContain('本地筛选规则')
+  expect(plan).toContain('投递与执行')
+  expect(settings).not.toContain('当前求职方案')
+  expect(filters).not.toContain('求职方案')
+})
+
+test('creates plans from the same toolbar and inline form pattern as the resume library', async () => {
+  await act(async () => root.render(createElement(Settings, { page: 'plan' })))
+  expect(container.querySelector('table[aria-label="求职方案列表"]')).toBeTruthy()
+  expect(container.querySelector('section[aria-label="新建方案"]')).toBeNull()
+  await click(button('新建方案'))
+  const editor = container.querySelector('section[aria-label="新建方案"]')
+  await fill(editor.querySelector('input'), '  人工智能产品经理  ')
+  await click(button('保存方案', editor))
+  expect(createdPlans).toEqual(['人工智能产品经理'])
+  expect(container.querySelector('section[aria-label="新建方案"]')).toBeNull()
+})
+
+test('selects plans in the table and requires confirmation before deletion', async () => {
+  await act(async () => root.render(createElement(Settings, { page: 'plan' })))
+  expect(container.querySelector('button[aria-label="当前求职方案"]')).toBeNull()
+  expect(container.querySelector('button[aria-label="删除 默认配置"]').disabled).toBe(true)
+  await click(container.querySelector('input[type="radio"][value="product"]'))
+  expect(switchedPlans).toEqual(['product'])
+  expect(deletedPlans).toEqual([])
+  await click(container.querySelector('button[aria-label="删除 产品经理"]'))
+  expect(deletedPlans).toEqual([])
+  const dialog = document.querySelector('[role="dialog"]')
+  expect(dialog.textContent).toContain('产品经理')
+  await click(button('删除', dialog))
+  expect(deletedPlans).toEqual(['product'])
+})
+
+test('saves pending rules to their original plan before selecting another row', async () => {
+  await act(async () => root.render(createElement(Settings, { page: 'plan' })))
+  const input = deliveryLimitInput()
+  await fill(input, '121')
+  await click(container.querySelector('input[type="radio"][value="product"]'))
+  expect(savedPatches[0].deliveryLimit.value).toBe(121)
+  expect(savedPresets).toEqual(['default'])
+  expect(state.preset).toBe('product')
+  expect(deletedPlans).toEqual([])
+})
+
+test('keeps the new-plan form and its name when selecting another plan', async () => {
+  await act(async () => root.render(createElement(Settings, { page: 'plan' })))
+  await click(button('新建方案'))
+  await fill(container.querySelector('section[aria-label="新建方案"] input'), 'AI 方案')
+  await click(container.querySelector('input[type="radio"][value="product"]'))
+  expect(container.querySelector('section[aria-label="新建方案"] input').value).toBe('AI 方案')
+  expect(deletedPlans).toEqual([])
+  await click(button('保存方案'))
+  expect(createdPlans).toEqual(['AI 方案'])
+})
+
+test('keeps unsaved input and blocks switching when automatic persistence fails', async () => {
+  saveFailure = '磁盘保存失败'
+  await act(async () => root.render(createElement(Settings, { page: 'plan' })))
+  const input = container.querySelector('[data-slot="number-field-input"]')
+  await fill(input, '121')
+  await autoSave()
+  expect(container.textContent).toContain('磁盘保存失败')
+  expect(input.value).toBe('121')
+  await click(container.querySelector('input[type="radio"][value="product"]'))
+  expect(switchedPlans).toEqual([])
+  expect(deletedPlans).toEqual([])
+  saveFailure = ''
+})
+
+test('flushes pending rules when leaving the settings page', async () => {
+  await render()
+  await fill(container.querySelector('[data-slot="number-field-input"]'), '121')
+  await act(async () => root.render(createElement('p', null, 'Other page')))
+  expect(savedPatches[0].deliveryLimit.value).toBe(121)
+  expect(savedPresets).toEqual(['default'])
+})
+
+test('preserves a newer edit that arrives while a previous automatic save is in flight', async () => {
+  await render()
+  let release
+  saveGate = new Promise((resolve) => {
+    release = resolve
+  })
+  const input = container.querySelector('[data-slot="number-field-input"]')
+  await fill(input, '122')
+  await autoSave()
+  await fill(input, '121')
+  await act(async () => {
+    saveGate = undefined
+    release()
+  })
+  expect(state.config.deliveryLimit.value).toBe(121)
+})
+
 test('keeps timing controls visible without nested collapsible sections', async () => {
   await render()
   expect(container.querySelectorAll('details')).toHaveLength(0)
-  expect(container.querySelectorAll('[data-slot="number-field-input"]')).toHaveLength(7)
+  expect(container.querySelectorAll('[data-slot="number-field-input"]')).toHaveLength(8)
   expect(container.querySelectorAll('input[type="range"]')).toHaveLength(12)
   expect(container.textContent).not.toContain('导出已保存配置')
   for (const label of ['执行间隔', '轮换间隔与批次', '调整采集间隔'])
@@ -198,8 +346,31 @@ test('converts a single minute interval input back to seconds and syncs its slid
   const input = interval.querySelector('[data-slot="number-field-input"]')
   await fill(input, '7.5')
   expect(Number(interval.querySelector('input[type="range"]').value)).toBe(7.5)
-  await click(button('保存配置'))
+  await autoSave()
   expect(state.config.delayDeliveryPageNext).toBe(450)
+})
+
+test('updates theoretical detail capacity immediately when runtime or detail timing changes', async () => {
+  await render()
+  const estimate = () => container.querySelector('output[aria-label="理论详情数量"]')?.textContent
+  expect(estimate()).toContain('900')
+  const runtime = [...container.querySelectorAll('input')].find((input) =>
+    [...(input.labels ?? [])].some((label) => label.textContent === '单次运行上限（分钟）'),
+  )
+  await fill(runtime, '30')
+  expect(estimate()).toContain('450')
+  const lower = container.querySelector('section[aria-label="详情采集间隔"] input[type="range"]')
+  await act(async () => {
+    lower.focus()
+    lower.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+  })
+  expect(estimate()).toContain('444')
+  expect(savedPatches).toHaveLength(0)
+  await autoSave()
+  expect(savedPatches[0]).toMatchObject({
+    collectionMaxRuntimeMinutes: 30,
+    delayCollectionDetailMin: 3.1,
+  })
 })
 
 test('restores only the chosen group and keeps custom timings in other groups', async () => {
@@ -211,7 +382,7 @@ test('restores only the chosen group and keeps custom timings in other groups', 
     (element) => element.textContent === '恢复本组默认值',
   )
   await click(resets[1])
-  await click(button('保存配置'))
+  await autoSave()
   expect(state.config.keywordRotationDailyLimit).toBe(10)
   expect(state.config.delayDeliveryInterval).toBe(17.3)
   expect(state.config.delayCollectionScrollMax).toBe(27.4)
@@ -228,7 +399,7 @@ test('preserves custom ranges beyond the usual slider scale during unrelated edi
   expect(Number(upper.max)).toBeGreaterThanOrEqual(20000)
   const deliveryLimit = container.querySelector('[data-slot="number-field-input"]')
   await fill(deliveryLimit, '121')
-  await click(button('保存配置'))
+  await autoSave()
   expect(state.config.deliveryLimit.value).toBe(121)
   expect(state.config.delayKeywordRotationMin).toBe(5000)
   expect(state.config.delayKeywordRotationMax).toBe(20000)
@@ -248,7 +419,7 @@ test('updates ranges with the keyboard and prevents thumbs crossing', async () =
   await key('End')
   await key('ArrowRight')
   expect(Number(lower.value)).toBe(900)
-  await click(button('保存配置'))
+  await autoSave()
   expect(state.config.delayKeywordRotationMin).toBe(900)
   expect(state.config.delayKeywordRotationMax).toBe(900)
 })

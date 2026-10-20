@@ -11,26 +11,34 @@ import {
   Switch,
   TextArea,
   TextField,
+  Tooltip,
 } from '@heroui/react'
 import {
   ArrowUp,
-  ExternalLink,
   ListRestart,
   Pause,
+  Pin,
+  PinOff,
   Play,
   RotateCcw,
   Save,
   ScanLine,
   Square,
-  WandSparkles,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { getJobFunnel } from '@/entrypoints/boss/jobStore'
 
-import { ConfirmDialog, IconButton, act } from './components'
-import { JobAI } from './JobAI'
+import {
+  applySavedJobDetail,
+  convertBossZpJobItemToJobData,
+  getJobSnapshotFromDetail,
+  getSavedJobData,
+} from '../entrypoints/boss/jobData'
+import { hasCompleteJobDetail } from '../entrypoints/boss/jobDetails'
+import { ConfirmDialog, act } from './components'
 import { SearchFilters } from './NativeFilters'
+import { PageJob } from './PageJob'
 import type { ExecutorCommand } from './protocol'
 import { statisticsHistory } from './statistics'
 import { command, selectResume } from './store'
@@ -66,18 +74,40 @@ export function Tasks() {
   const runtime = state.runtime
   const [deliveryConfirm, setDeliveryConfirm] = useState(false)
   const [messageDraft, setMessageDraft] = useState<string | null>(null)
+  const [pageJobsPinned, setPageJobsPinned] = useState(false)
+  const pageJobsRef = useRef<HTMLDivElement>(null)
   useEffect(() => setMessageDraft(null), [runtime?.pendingMessage, state.tabId])
   const busy = !!(
+    state.analysisBusy ||
     runtime?.gatheringBusy ||
     runtime?.analysisBusy ||
     runtime?.keywordRotationBusy ||
     runtime?.realtimeBusy ||
     runtime?.keywordExtractionBusy ||
     runtime?.keywordRotationSaving ||
+    Object.values(runtime?.jobActions ?? {}).some((action) => action.status === 'running') ||
     runtime?.workflow?.status === 'running'
   )
   const disabled = state.loading || state.saving
   const startDisabled = disabled || busy || !state.connected
+  const detailRecord = state.records.find(
+    (record) => record.encryptJobId === state.activeDetailJobId,
+  )
+  const detailJob = detailRecord
+    ? getSavedJobData(detailRecord).jobData
+    : state.activeDetail
+      ? applySavedJobDetail(
+          convertBossZpJobItemToJobData(getJobSnapshotFromDetail(state.activeDetail)),
+          state.activeDetail,
+        )
+      : null
+  const pageJobs = [
+    ...(detailJob ? [detailJob] : []),
+    ...(runtime?.jobs ?? []).filter((job) => job.key !== detailJob?.key),
+  ]
+  const history = state.historyDetailRun
+  const historyPending = !!history && history.cursor < history.total
+  const historyLocked = !!history?.owner && history.expiresAt > Date.now()
   const funnel = getJobFunnel(state.records)
   const deliveredToday = statisticsHistory(state.today, state.statistics, 1)[0]?.success ?? 0
   const run = runtime?.gatheringKind === 'detail' ? runtime.detailRun : runtime?.collectionRun
@@ -87,9 +117,69 @@ export function Tasks() {
   const execute = (type: ExecutorCommand['type']) => {
     void act(() => command({ type } as ExecutorCommand))
   }
+  const pageJobsSection = (
+    <div
+      key="page-jobs-section"
+      ref={pageJobsRef}
+      className={`page-jobs-section space-y-3${pageJobsPinned ? ' page-jobs-section-pinned' : ' pt-5'}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-base font-semibold">
+          当前页面岗位{' '}
+          <span className="text-muted">{pageJobs.length || (state.connected ? 0 : '-')}</span>
+        </h2>
+        <Tooltip>
+          <Button
+            isIconOnly
+            aria-label={pageJobsPinned ? '取消置顶当前页面岗位' : '置顶当前页面岗位'}
+            aria-pressed={pageJobsPinned}
+            variant="ghost"
+            size="sm"
+            onPress={() => setPageJobsPinned(!pageJobsPinned)}
+          >
+            {pageJobsPinned ? <PinOff size={16} /> : <Pin size={16} />}
+          </Button>
+          <Tooltip.Content>{pageJobsPinned ? '取消置顶' : '置顶当前页面岗位'}</Tooltip.Content>
+        </Tooltip>
+      </div>
+      {!pageJobs.length ? (
+        <output className="block text-sm text-muted">
+          {state.connected
+            ? '当前列表暂无岗位'
+            : state.tabId !== null && !state.connectionError && !runtime?.error
+              ? '正在连接岗位页'
+              : '连接 BOSS 标签页后查看'}
+        </output>
+      ) : (
+        <ul aria-label="当前页面岗位" className="max-h-80 divide-y divide-border overflow-y-auto">
+          {pageJobs.map((job) => {
+            const isDetail = job.key === detailJob?.key
+            return (
+              <PageJob
+                key={`${state.tabId ?? 'detail'}:${job.key}`}
+                job={job}
+                disabled={isDetail ? disabled || busy : startDisabled}
+                detail={isDetail}
+                viewed={isDetail || undefined}
+                status={
+                  statusNames[
+                    runtime?.results.find(([key]) => key === job.key)?.[1]?.status ?? ''
+                  ] || ''
+                }
+              />
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+  useEffect(() => {
+    if (pageJobsPinned) pageJobsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [pageJobsPinned])
 
   return (
-    <section className="space-y-6">
+    <section className={`space-y-6${pageJobsPinned ? ' page-jobs-only' : ''}`}>
+      {pageJobsPinned && pageJobsSection}
       <SearchFilters disabled={disabled || busy} />
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -127,68 +217,99 @@ export function Tasks() {
             </ListBox>
           </Select.Popover>
         </Select>
-        <div className="grid grid-cols-2 gap-2">
+        <Accordion>
+          <Accordion.Item id="batch-tasks">
+            <Accordion.Heading>
+              <Accordion.Trigger aria-label="批量任务">
+                批量任务
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  {!rotationBusy && (
+                    <Button
+                      className="col-span-2"
+                      fullWidth
+                      isDisabled={startDisabled || !state.keywords.trim()}
+                      onPress={() => execute('rotate')}
+                    >
+                      <ListRestart size={16} />
+                      {rotation && ['paused', 'stopped', 'failed'].includes(rotation.status)
+                        ? '继续轮换'
+                        : '轮换采集并分析'}
+                    </Button>
+                  )}
+                  <Button
+                    fullWidth
+                    variant="secondary"
+                    isDisabled={startDisabled}
+                    onPress={() => execute('collect')}
+                  >
+                    <ScanLine size={16} />
+                    只采集
+                  </Button>
+                  {runtime?.workflow?.status !== 'running' && (
+                    <Button
+                      fullWidth
+                      variant="secondary"
+                      isDisabled={startDisabled}
+                      onPress={() => setDeliveryConfirm(true)}
+                    >
+                      <Play size={16} />
+                      {runtime?.workflow?.status === 'stop' ? '继续投递' : '开始投递'}
+                    </Button>
+                  )}
+                  <Button
+                    className="col-span-2"
+                    fullWidth
+                    variant="secondary"
+                    isDisabled={startDisabled || state.analysisBusy || historyLocked}
+                    onPress={() => execute(historyPending ? 'resumeHistory' : 'completeHistory')}
+                  >
+                    <ListRestart size={16} />
+                    {historyPending ? '继续历史补全' : '补全历史岗位'}
+                  </Button>
+                </div>
+                {runtime?.workflow?.status === 'stop' && (
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      isDisabled={disabled || busy}
+                      onPress={() => execute('resetDelivery')}
+                    >
+                      <RotateCcw size={14} />
+                      重置进度
+                    </Button>
+                  </div>
+                )}
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        </Accordion>
+        {rotationBusy && (
           <Button
-            className="col-span-2"
             fullWidth
-            variant={rotationBusy ? 'danger-soft' : 'primary'}
-            isDisabled={
-              rotationBusy
-                ? disabled || !state.connected || !!runtime?.keywordRotationSaving
-                : startDisabled || !state.keywords.trim()
-            }
-            onPress={() => execute(rotationBusy ? 'stopRotation' : 'rotate')}
+            variant="danger-soft"
+            isDisabled={disabled || !state.connected || !!runtime?.keywordRotationSaving}
+            onPress={() => execute('stopRotation')}
           >
-            {rotationBusy ? <Square size={16} /> : <ListRestart size={16} />}
-            {rotationBusy
-              ? '停止轮换'
-              : rotation && ['paused', 'stopped', 'failed'].includes(rotation.status)
-                ? '继续轮换'
-                : '轮换采集并分析'}
+            <Square size={16} />
+            停止轮换
           </Button>
+        )}
+        {runtime?.workflow?.status === 'running' && (
           <Button
             fullWidth
-            variant="secondary"
-            isDisabled={startDisabled}
-            onPress={() => execute('collect')}
+            variant="danger-soft"
+            isDisabled={disabled}
+            onPress={() => execute('stopDelivery')}
           >
-            <ScanLine size={16} />
-            只采集
+            <Square size={16} />
+            停止投递
           </Button>
-          {runtime?.workflow?.status === 'running' ? (
-            <Button
-              fullWidth
-              variant="danger-soft"
-              isDisabled={disabled}
-              onPress={() => execute('stopDelivery')}
-            >
-              <Square size={16} />
-              停止投递
-            </Button>
-          ) : (
-            <Button
-              fullWidth
-              variant="secondary"
-              isDisabled={startDisabled}
-              onPress={() => setDeliveryConfirm(true)}
-            >
-              <Play size={16} />
-              {runtime?.workflow?.status === 'stop' ? '继续投递' : '开始投递'}
-            </Button>
-          )}
-        </div>
-        {runtime?.workflow?.status === 'stop' && (
-          <div className="flex justify-end">
-            <Button
-              size="sm"
-              variant="ghost"
-              isDisabled={disabled || busy}
-              onPress={() => execute('resetDelivery')}
-            >
-              <RotateCcw size={14} />
-              重置进度
-            </Button>
-          </div>
         )}
         <Switch
           className="switch-row"
@@ -234,9 +355,16 @@ export function Tasks() {
             </p>
             {runtime?.gatheringKind === 'collection' ? (
               <p className="text-sm">
-                本轮新增 {runtime.collectionRun?.newCount ?? 0} · 已保存{' '}
+                本轮新增 {runtime.collectionRun?.newCount ?? 0} · 列表已保存{' '}
                 {runtime.collectionRun?.savedCount ?? 0} · 列表{' '}
                 {runtime.collectionRun?.visibleCount ?? 0}
+                {runtime.collectionRun?.detailCompletedCount !== undefined && (
+                  <>
+                    <br />
+                    详情成功 {runtime.collectionRun.detailCompletedCount} · 详情失败{' '}
+                    {runtime.collectionRun.detailFailedCount ?? 0}
+                  </>
+                )}
               </p>
             ) : (
               <ProgressBar
@@ -249,6 +377,18 @@ export function Tasks() {
                   <ProgressBar.Fill />
                 </ProgressBar.Track>
               </ProgressBar>
+            )}
+            {runtime?.gatheringKind === 'detail' && (
+              <p className="text-sm">
+                成功 {runtime.detailRun?.completed ?? 0} · 失败 {runtime.detailRun?.failed ?? 0} ·
+                待补全{' '}
+                {
+                  state.records.filter(
+                    (record) =>
+                      record.processingStatus !== 'excluded' && !hasCompleteJobDetail(record),
+                  ).length
+                }
+              </p>
             )}
             {run.error && (
               <p className="text-sm text-danger" role="alert">
@@ -277,7 +417,7 @@ export function Tasks() {
               onPress={() => execute('stopGathering')}
             >
               <Square size={16} />
-              停止采集
+              {runtime.gatheringKind === 'detail' ? '停止补全' : '停止采集'}
             </Button>
           </div>
         )}
@@ -409,117 +549,7 @@ export function Tasks() {
           </Accordion.Item>
         </Accordion>
       )}
-      <div className="space-y-3 pt-5">
-        <h2 className="text-base font-semibold">
-          当前页面岗位{' '}
-          <span className="text-muted">{state.connected ? (runtime?.jobs.length ?? 0) : '-'}</span>
-        </h2>
-        {!state.connected || !runtime?.jobs.length ? (
-          <output className="block text-sm text-muted">
-            {state.connected
-              ? '当前列表暂无岗位'
-              : state.tabId !== null && !state.connectionError && !runtime?.error
-                ? '正在连接岗位页'
-                : '连接 BOSS 标签页后查看'}
-          </output>
-        ) : (
-          <ul aria-label="当前页面岗位" className="max-h-80 divide-y divide-border overflow-y-auto">
-            {runtime.jobs.map((job) => (
-              <li key={job.key} className="space-y-2 py-3">
-                <p className="text-sm font-medium break-words">{job.jobName}</p>
-                <p className="text-xs text-muted break-words">
-                  {job.brand.name} · {job.salary}
-                </p>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-muted">
-                    {statusNames[
-                      runtime.results.find(([key]) => key === job.key)?.[1]?.status ?? 'pending'
-                    ] || '待处理'}
-                  </span>
-                  <div className="flex gap-1">
-                    <IconButton
-                      label="在 BOSS 打开岗位"
-                      disabled={startDisabled}
-                      onPress={() => {
-                        void act(() => command({ type: 'openJob', key: job.key }))
-                      }}
-                    >
-                      <ExternalLink size={16} />
-                    </IconButton>
-                    <IconButton
-                      label="保存岗位"
-                      disabled={startDisabled}
-                      onPress={() => {
-                        void act(() => command({ type: 'captureJob', key: job.key }), '已保存岗位')
-                      }}
-                    >
-                      <Save size={16} />
-                    </IconButton>
-                    <IconButton
-                      label="分析岗位"
-                      disabled={startDisabled}
-                      onPress={() => {
-                        void act(() =>
-                          command({
-                            type: 'analyzeOne',
-                            jobId: job.key.slice('boss::'.length),
-                          }),
-                        )
-                      }}
-                    >
-                      <WandSparkles size={16} />
-                    </IconButton>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-        <Accordion>
-          <Accordion.Item id="job-ai">
-            <Accordion.Heading>
-              <Accordion.Trigger>
-                AI 过程
-                <Accordion.Indicator />
-              </Accordion.Trigger>
-            </Accordion.Heading>
-            <Accordion.Panel>
-              <Accordion.Body className="max-h-96 overflow-y-auto">
-                <JobAI />
-              </Accordion.Body>
-            </Accordion.Panel>
-          </Accordion.Item>
-        </Accordion>
-        <div className="flex items-center justify-between gap-2 pt-4">
-          <h2 className="text-base font-semibold">最近运行</h2>
-        </div>
-        {runtime?.logs.length ? (
-          <ul className="space-y-2 text-sm">
-            {runtime.logs
-              .slice(-3)
-              .reverse()
-              .map((log, index) => (
-                <li key={index} className="break-words">
-                  <Link
-                    href="./workbench.html#logs"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block rounded px-2 py-1 hover:bg-default"
-                  >
-                    <span className={log.state === 'danger' ? 'text-danger' : 'text-muted'}>
-                      {log.state_name}
-                    </span>{' '}
-                    {log.title}
-                  </Link>
-                </li>
-              ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted">
-            {state.connected ? '暂无运行记录' : '连接 BOSS 标签页后查看'}
-          </p>
-        )}
-      </div>
+      {!pageJobsPinned && pageJobsSection}
       <ConfirmDialog
         open={deliveryConfirm}
         onClose={() => setDeliveryConfirm(false)}

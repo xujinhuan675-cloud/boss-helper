@@ -41,6 +41,28 @@ bun run build:chrome
 
 工程入口见 [项目目录结构索引](docs/项目目录结构索引.md)。当前目录整理和构建入口不代表滚动采集、事前投或定时发送已经实现。
 
+## Chrome 商店打包与升级
+
+当前版本为 **1.0.0**，`package.json` 是唯一版本来源。已安装本项目依赖后，在仓库根目录双击 `package-chrome.cmd`，或执行：
+
+```powershell
+bun run release:chrome
+```
+
+命令先准备 WXT 类型并执行类型检查，再使用 WXT 正式构建并生成 `.output/offerhunt-1.0.0-chrome-store.zip`。将这个 ZIP 手动上传到自己的 Chrome Web Store 项目；后续版本继续上传到同一商店项目。每个版本的 ZIP 单独保留，重复打包同一版本会覆盖同名 ZIP。流程不上传、不创建 Git 提交或标签。
+
+以后升级补丁版本并打包，一条命令即可从 `1.0.0` 升到 `1.0.1`：
+
+```powershell
+bun run release:patch
+```
+
+需要指定版本时，先执行 `npm version 1.1.0 --no-git-tag-version`，再执行 `bun run release:chrome`。版本使用三段数字，并高于上次上传的版本。如果升版后的检查或构建失败，版本号会保留；修复后执行 `release:chrome` 重试，避免再次升版。
+
+商店产物临时写入 `.output/chrome-mv3-store`，打包及校验成功后自动删除该中间目录，保留 ZIP；不覆盖 Chrome 当前加载的 `.output/chrome-mv3`。发布脚本 `scripts/release-chrome.mjs` 使用 WXT 的生产构建 API，并自动断言版本、商店清单和许可证。ZIP 根目录包含 `manifest.json`、页面、脚本、图标、多语言资源和原 MIT 许可证，不包含源码仓库、本机配置或用户数据。商店清单不带开发公钥和 `nativeMessaging` 权限；普通用户无需安装本机诊断 Host，运行诊断仍保存在扩展本地并可在日志页导出，本机镜像会显示不可用。原 `build:chrome` 保留开发公钥和本机诊断，日常开发入口及加载目录保持原约定。
+
+现有 README 顶部的商店链接属于上游项目，不代表此二开版本已发布。首次从本地开发扩展切换到自己的商店扩展会使用新的 ID，旧扩展的数据不会自动迁移，切换前按需导出岗位和配置。首次商店上架的介绍、截图、隐私政策和权限用途说明由发布者在后台填写；自定义模型及高德接口使用的网络权限仍保留。ZIP 生成和本地检查不代表通过商店审核。
+
 ## 相关链接
 
 唯一交流群:

@@ -1,7 +1,7 @@
 {
   "name": "offerhunt",
   "displayName": "OfferHunt",
-  "version": "0.5.2.2",
+  "version": "1.0.0",
   "private": true,
   "description": "OfferHunt 求职助手，支持 BOSS直聘岗位采集、关键词轮换、AI 匹配分析、岗位管理与投递辅助。",
   "workspaces": [
@@ -14,12 +14,17 @@
     "dev:firefox": "wxt -b firefox --mv3",
     "check": "vue-tsc --noEmit",
     "test:prepare": "node --test scripts/prepare.test.mjs",
+    "test:diagnostics": "node --test scripts/diagnostics-host.test.mjs",
+    "diagnostics:install": "node scripts/diagnostics-host.mjs --install",
+    "diagnostics:read": "node scripts/diagnostics-host.mjs --read",
     "build": "wxt build -b chrome && wxt build -b firefox --mv3 && wxt build -b edge",
     "build:chrome": "wxt build -b chrome",
     "build:firefox": "wxt build -b firefox --mv3",
     "build:edge": "wxt build -b edge",
     "zip": "run-p zip:chrome zip:firefox zip:edge",
     "zip:chrome": "wxt zip -b chrome",
+    "release:chrome": "node scripts/release-chrome.mjs",
+    "release:patch": "npm version patch --no-git-tag-version && node scripts/release-chrome.mjs",
     "zip:firefox": "wxt zip -b firefox --mv3",
     "zip:edge": "wxt zip -b edge",
     "fmt": "oxfmt",
@@ -36,7 +41,7 @@
     "@react-aria/ssr": "^3.10.1",
     "@react-aria/utils": "^3.34.1",
     "ai": "^7.0.58",
-    "comctx": "^1.7.5",
+    "comctx": "1.7.5",
     "devlog-ui": "workspace:*",
     "idb": "^8.0.3",
     "lucide-react": "^1.57.0",
@@ -82,5 +87,8 @@
   "lint-staged": {
     "*": "oxfmt --no-error-on-unmatched-pattern",
     "*.{js,jsx,ts,tsx,mjs,cjs,vue}": "oxlint --fix"
+  },
+  "patchedDependencies": {
+    "comctx@1.7.5": "patches/comctx@1.7.5.patch"
   }
 }

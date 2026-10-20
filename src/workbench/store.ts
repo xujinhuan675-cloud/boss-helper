@@ -4,7 +4,7 @@ import { browser } from '#imports'
 import { useConf } from '@/composables/conf'
 import { confModelKey, isCompleteModel, useModel } from '@/composables/useModel'
 import type { ModelConf } from '@/composables/useModel'
-import { RESUME_STORAGE_KEY, useResumes } from '@/composables/useResume'
+import { normalizeResumeStore, RESUME_STORAGE_KEY, useResumes } from '@/composables/useResume'
 import type { ResumeStoreData } from '@/composables/useResume'
 import { statisticsKey, todayKey } from '@/composables/useStatistics'
 import type { BossJobLibraryRecord } from '@/entrypoints/boss/jobStore'
@@ -12,11 +12,24 @@ import { counter } from '@/message'
 import type { FormData, Statistics } from '@/types/formData'
 
 import { MATCH_SCORING_VERSION } from '../composables/useApplying/scoring'
-import { getSavedJobData } from '../entrypoints/boss/jobData'
+import {
+  assertHistoryDetailRun,
+  HISTORY_DETAIL_STORAGE_KEY,
+} from '../entrypoints/boss/historyDetails'
+import type { HistoryDetailRun } from '../entrypoints/boss/historyDetails'
+import { getJobSnapshotFromDetail, getSavedJobData } from '../entrypoints/boss/jobData'
+import {
+  DETAIL_MESSAGE,
+  assertCompleteJobDetail,
+  hasCompleteJobDetail,
+  jobIdFromUrl,
+} from '../entrypoints/boss/jobDetails'
+import type { JobDetailPage } from '../entrypoints/boss/jobDetails'
 import type { JobLibraryMutation } from '../entrypoints/boss/jobLibraryStorage'
 import {
   assertJobLibrary,
   JOB_LIBRARY_STORAGE_KEY,
+  isJobExcluded,
   normalizeJobLibraryAnalysis,
 } from '../entrypoints/boss/jobStore'
 import {
@@ -28,6 +41,7 @@ import {
 } from '../entrypoints/boss/keywordRotation'
 import { SavedJobAnalyzer } from '../entrypoints/boss/savedAnalysis'
 import type { SavedAnalysisRun } from '../entrypoints/boss/savedAnalysis'
+import type { BossZpDetailData } from '../entrypoints/boss/types'
 import { jsonClone } from '../utils/deepmerge'
 import { diagnostic } from '../utils/diagnostics'
 import { requestExecutor } from './client'
@@ -55,10 +69,13 @@ export type WorkbenchState = {
   preset: string
   tabs: { id: number; title: string; url: string }[]
   tabId: number | null
+  activeDetailJobId: string | null
+  activeDetail: BossZpDetailData | null
   runtime: ExecutorSnapshot | null
   connected: boolean
   analysisBusy: boolean
   analysisRun: SavedAnalysisRun | null
+  historyDetailRun: HistoryDetailRun | null
 }
 
 let state: WorkbenchState = {
@@ -79,10 +96,13 @@ let state: WorkbenchState = {
   preset: 'default',
   tabs: [],
   tabId: null,
+  activeDetailJobId: null,
+  activeDetail: null,
   runtime: null,
   connected: false,
   analysisBusy: false,
   analysisRun: null,
+  historyDetailRun: null,
 }
 const listeners = new Set<() => void>()
 export const getWorkbenchState = () => state
@@ -116,6 +136,8 @@ const savedAnalyzer = new SavedJobAnalyzer({
     }
   },
   claimJobAnalysis: (id, token, duration) => counter.claimJobAnalysis(id, token, duration),
+  saveJobGreeting: async (jobId, greeting) =>
+    (await counter.updateJobLibrary({ type: 'greeting', jobId, greeting })).updated,
   releaseJobAnalysis: (id, token) => counter.releaseJobAnalysis(id, token),
 })
 watch(savedAnalyzer.run, (run) => update({ analysisRun: jsonClone(run) }), {
@@ -161,6 +183,12 @@ export async function updateSavedJob(
 ) {
   await counter.updateJobLibrary(mutation)
   await refreshLibrary()
+}
+
+export async function importSavedJobs(records: BossJobLibraryRecord[]) {
+  const result = await counter.updateJobLibrary({ type: 'import', records })
+  await refreshLibrary()
+  return result
 }
 
 export async function deleteSavedJob(jobId: string) {
@@ -232,6 +260,16 @@ export async function refreshLibrary() {
   }
 }
 
+async function refreshHistoryDetails() {
+  try {
+    const run = await counter.storageGet<unknown>(HISTORY_DETAIL_STORAGE_KEY, null)
+    assertHistoryDetailRun(run)
+    update({ historyDetailRun: run })
+  } catch (error) {
+    update({ error: message(error) })
+  }
+}
+
 async function refreshKeywords() {
   try {
     const plan = await counter.storageGet<unknown>(KEYWORD_ROTATION_STORAGE_KEY, null)
@@ -279,12 +317,33 @@ export async function saveKeywords(input: string) {
 
 let polling = false
 let chatJobKey: string | undefined
+let activeDetailTabId: number | null = null
+async function refreshActiveDetail() {
+  const tabId = activeDetailTabId
+  const jobId = state.activeDetailJobId
+  if (tabId === null || !jobId || state.activeDetail) return
+  try {
+    const page: JobDetailPage = await browser.tabs.sendMessage(
+      tabId,
+      { type: DETAIL_MESSAGE, jobId },
+      { frameId: 0 },
+    )
+    if (tabId !== activeDetailTabId || jobId !== state.activeDetailJobId) return
+    if (page?.status !== 'ready' || page.jobId !== jobId) return
+    assertCompleteJobDetail(page.detail, jobId)
+    update({ activeDetail: page.detail })
+  } catch {
+    // The content script or full JD may not be ready yet; the regular poll retries.
+  }
+}
+
 export async function refreshRuntime() {
   if (polling) return
   polling = true
   const target = state.tabId
   const selectedChat = chatJobKey
   try {
+    if (activeDetailTabId !== null) await refreshActiveDetail()
     if (target === null) {
       update({ runtime: null, connected: false })
       return
@@ -328,15 +387,19 @@ export async function refreshRuntime() {
 }
 
 export async function refreshTabs() {
-  const tabs = (
-    await browser.tabs.query({ url: ['*://zhipin.com/*', '*://*.zhipin.com/*'] })
-  ).filter(
+  const allTabs = await browser.tabs.query({ url: ['*://zhipin.com/*', '*://*.zhipin.com/*'] })
+  const tabs = allTabs.filter(
     (tab) =>
       tab.id !== undefined &&
       /^https?:\/\/(?:[^/]+\.)?zhipin\.com\/web\/geek\/(?:jobs|job-recommend)\/?(?:[?#]|$)/.test(
         tab.url || '',
       ),
   )
+  const detailTab = allTabs.find((tab) => tab.active && jobIdFromUrl(tab.url || ''))
+  const activeDetailJobId = jobIdFromUrl(detailTab?.url || '')
+  const detailChanged =
+    (detailTab?.id ?? null) !== activeDetailTabId || activeDetailJobId !== state.activeDetailJobId
+  activeDetailTabId = detailTab?.id ?? null
   const selected =
     tabs.find((tab) => tab.id === state.tabId) ?? tabs.find((tab) => tab.active) ?? tabs[0]
   const tabId = selected?.id ?? null
@@ -344,6 +407,8 @@ export async function refreshTabs() {
   update({
     tabs: tabs.map((tab) => ({ id: tab.id!, title: tab.title || 'BOSS 直聘', url: tab.url || '' })),
     tabId,
+    activeDetailJobId,
+    ...(detailChanged ? { activeDetail: null } : {}),
     ...(changed ? { runtime: null, connected: false, connectionError: '' } : {}),
   })
   await refreshRuntime()
@@ -365,19 +430,83 @@ export function selectChat(key: string) {
   void refreshRuntime()
 }
 
+async function saveActiveDetailJob(jobId: string) {
+  const records = await counter.storageGet<unknown>(JOB_LIBRARY_STORAGE_KEY, [])
+  assertJobLibrary(records)
+  const record = records.find((item) => item.encryptJobId === jobId)
+  if (record && (isJobExcluded(record) || hasCompleteJobDetail(record))) return
+  const detail = state.activeDetail
+  if (!detail || detail.jobInfo.encryptId !== jobId) {
+    if (!record) throw new Error('岗位详情尚未完整加载，请稍后重试')
+    return
+  }
+  assertCompleteJobDetail(detail, jobId)
+  if (!record)
+    await counter.updateJobLibrary({
+      type: 'capture',
+      items: [getJobSnapshotFromDetail(detail)],
+      keyword: '手动详情页',
+      batch: 'manual-detail',
+      newOnly: true,
+    })
+  await counter.updateJobLibrary({
+    type: 'detail',
+    jobId,
+    patch: { detailStatus: 'complete', detail },
+  })
+  await refreshLibrary()
+}
+
 export async function command(command: ExecutorCommand) {
   if (state.tabId === null) await refreshTabs()
+  const detailJobId = state.activeDetailJobId
+  if (
+    detailJobId &&
+    state.activeDetail &&
+    command.type === 'captureJob' &&
+    command.key === `boss::${detailJobId}`
+  )
+    return saveActiveDetailJob(detailJobId)
+  if (
+    detailJobId &&
+    (command.type === 'analyzeOne' ||
+      command.type === 'generateGreeting' ||
+      command.type === 'sendGreeting') &&
+    command.jobId === detailJobId
+  ) {
+    if (command.type === 'sendGreeting')
+      throw new Error('详情页仅支持生成招呼语，请在 BOSS 沟通页发送')
+    if (state.analysisBusy) throw new Error('本地岗位分析正在进行，请等待当前请求结束')
+    update({ analysisBusy: true, error: '' })
+    try {
+      await saveActiveDetailJob(detailJobId)
+      return command.type === 'analyzeOne'
+        ? await savedAnalyzer.analyzeOne(command.jobId)
+        : await savedAnalyzer.generateGreetingOne(command.jobId)
+    } catch (error) {
+      update({ error: message(error) })
+      throw error
+    } finally {
+      update({ analysisBusy: false })
+      await refreshLibrary()
+    }
+  }
   const tabId = state.tabId
   if (tabId === null) throw new Error('请先打开 BOSS 职位搜索页，再重试此操作')
   const send = (value: ExecutorCommand) =>
     requestExecutor((id, request) => browser.tabs.sendMessage(id, request), tabId, value)
   try {
+    if (command.type === 'openJob') {
+      const tab = await browser.tabs.update(tabId, { active: true })
+      if (tab) await browser.windows.update(tab.windowId, { focused: true })
+    }
     if (
       [
         'collect',
         'rotate',
         'analyze',
         'analyzeOne',
+        'generateGreeting',
         'startDelivery',
         'sendGreeting',
         'extractKeywords',
@@ -457,11 +586,15 @@ export async function saveResume(id: string | null, name: string, content: strin
   await services.resumes.init(services.conf.formData.resumeText)
   if (id) await services.resumes.updateResume(id, name, content)
   else await services.resumes.createResume(name, content)
+  await services.resumes.selectResumeForPreset(
+    services.conf.formDataPreset.value,
+    services.resumes.currentResumeId.value,
+  )
   await reloadExecutorSettings()
 }
 export async function selectResume(id: string | null) {
   await services.resumes.init(services.conf.formData.resumeText)
-  await services.resumes.selectResume(id)
+  await services.resumes.selectResumeForPreset(services.conf.formDataPreset.value, id)
   await reloadExecutorSettings()
 }
 export async function deleteResume(id: string, replacementId?: string | null) {
@@ -472,6 +605,36 @@ export async function deleteResume(id: string, replacementId?: string | null) {
 export async function copyResume(id: string) {
   await services.resumes.init(services.conf.formData.resumeText)
   await services.resumes.copyResume(id)
+  await reloadExecutorSettings()
+}
+export async function switchPlan(value: string) {
+  await services.conf.confInit()
+  const current = services.conf.formDataPreset.value
+  if (current === value) return
+  await services.resumes.selectResumeForPreset(current, services.resumes.currentResumeId.value)
+  await services.conf.switchPreset(value)
+  await services.resumes.activatePreset(value)
+  await reloadExecutorSettings()
+}
+export async function createPlan(label: string) {
+  await services.conf.confInit()
+  await services.resumes.init(services.conf.formData.resumeText)
+  const current = services.conf.formDataPreset.value
+  const resumeId = services.resumes.currentResumeId.value
+  await services.resumes.selectResumeForPreset(current, resumeId)
+  await services.conf.createPreset(label)
+  await services.resumes.selectResumeForPreset(services.conf.formDataPreset.value, resumeId)
+  await reloadExecutorSettings()
+}
+export async function deletePlan(value: string) {
+  await services.conf.confInit()
+  if (value === 'default') throw new Error('默认方案不可删除')
+  if (!services.conf.formDataPresets.value.some((preset) => preset.value === value))
+    throw new Error('求职方案不存在')
+  await services.resumes.init(services.conf.formData.resumeText)
+  if (services.conf.formDataPreset.value === value) await switchPlan('default')
+  await services.conf.deletePreset(value)
+  await services.resumes.removePreset(value)
   await reloadExecutorSettings()
 }
 export async function openWorkbench(view = 'jobs') {
@@ -505,7 +668,9 @@ async function refreshSettings() {
   settingsRefresh = (async () => {
     settingsChanged = false
     try {
+      await diagnoseSettingsStorage('')
       await services.conf.confInit()
+      await diagnoseSettingsStorage(services.conf.formData.resumeText)
       validateConfig(services.conf.formData)
       const models = await counter.storageGet<unknown>(confModelKey, [])
       validateModels(models)
@@ -541,6 +706,8 @@ export async function initializeWorkbench() {
   }
   update({ loading: false })
   browser.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[HISTORY_DETAIL_STORAGE_KEY.replace('local:', '')])
+      void refreshHistoryDetails()
     if (area === 'local' && changes[KEYWORD_ROTATION_STORAGE_KEY.replace('local:', '')])
       void refreshKeywords()
     if (area === 'local' && changes[JOB_LIBRARY_STORAGE_KEY.replace('local:', '')])
@@ -565,6 +732,7 @@ export async function initializeWorkbench() {
       void refreshSettings()
     }
   })
+  await refreshHistoryDetails()
   browser.tabs.onRemoved.addListener(() => {
     void refreshTabs()
   })
@@ -578,9 +746,77 @@ export async function initializeWorkbench() {
     )
       void refreshTabs()
   })
+  browser.tabs.onActivated.addListener(() => {
+    void refreshTabs()
+  })
   setInterval(() => {
     void refreshRuntime()
   }, 1500)
+}
+
+async function diagnoseSettingsStorage(legacyResumeText: unknown) {
+  await Promise.all([
+    (async () => {
+      try {
+        const models = await counter.storageGet<unknown>(confModelKey, [])
+        let status = 'valid'
+        try {
+          validateModels(models)
+        } catch {
+          status = 'invalid'
+        }
+        diagnostic('settings.storage.models', {
+          context: { count: Array.isArray(models) ? models.length : 0, status },
+        })
+      } catch {
+        diagnostic('settings.storage.models', {
+          level: 'warning',
+          context: { status: 'unavailable' },
+        })
+      }
+    })(),
+    (async () => {
+      try {
+        const stored = await counter.storageGet<unknown>(RESUME_STORAGE_KEY, {})
+        const data =
+          stored && typeof stored === 'object' && !Array.isArray(stored)
+            ? (stored as Partial<ResumeStoreData>)
+            : undefined
+        const normalized = normalizeResumeStore(data)
+        const valid =
+          stored == null ||
+          (!!data &&
+            (!('resumes' in data) ||
+              (Array.isArray(data.resumes) && normalized.resumes.length === data.resumes.length)))
+        const resumes = Array.isArray(data?.resumes) ? data.resumes : []
+        const hasLegacyResume =
+          valid &&
+          !Array.isArray(data?.resumes) &&
+          typeof legacyResumeText === 'string' &&
+          !!legacyResumeText.trim()
+        diagnostic('settings.storage.resumes', {
+          context: {
+            count: resumes.length || (hasLegacyResume ? 1 : 0),
+            phase: !valid
+              ? 'invalid'
+              : normalized.currentResumeId
+                ? 'selected'
+                : resumes.length
+                  ? 'unselected'
+                  : hasLegacyResume
+                    ? 'legacy'
+                    : 'empty',
+            status: valid ? 'valid' : 'invalid',
+          },
+        })
+      } catch {
+        diagnostic('settings.storage.resumes', {
+          level: 'warning',
+          context: { phase: 'unavailable', status: 'unavailable' },
+        })
+      }
+    })(),
+  ])
 }
 
 async function refreshStatistics() {

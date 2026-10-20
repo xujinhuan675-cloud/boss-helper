@@ -111,3 +111,22 @@ export function getSavedJobData(record: BossJobLibraryRecord) {
     state: {},
   }
 }
+
+export function getJobSnapshotFromDetail(detail: BossZpDetailData): BossZpJobItemData {
+  const info = detail.jobInfo
+  const boss = detail.bossInfo
+  return {
+    encryptJobId: info.encryptId,
+    jobName: info.jobName || info.positionName || '',
+    salaryDesc: info.salaryDesc || '',
+    jobExperience: info.experienceName || '',
+    jobDegree: info.degreeName || '',
+    cityName: info.locationName || '',
+    brandName: detail.brandComInfo?.brandName || boss?.brandName || '',
+    bossName: boss?.name || '',
+    bossTitle: boss?.title || '',
+    jobLabels: info.showSkills || [],
+    skills: info.showSkills || [],
+    contact: false,
+  } as BossZpJobItemData
+}

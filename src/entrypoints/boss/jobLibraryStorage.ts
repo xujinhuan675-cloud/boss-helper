@@ -1,5 +1,13 @@
 import { MATCH_SCORING_VERSION } from '../../composables/useApplying/scoring'
 import { jsonClone } from '../../utils/deepmerge'
+import type { DetailAccessSession } from './detailAccess'
+import {
+  assertHistoryDetailRun,
+  HISTORY_DETAIL_LEASE_MS,
+  HISTORY_DETAIL_STORAGE_KEY,
+} from './historyDetails'
+import type { HistoryDetailCommand, HistoryDetailRun } from './historyDetails'
+import { DETAIL_ACCESS_KEY, assertCompleteJobDetail, hasCompleteJobDetail } from './jobDetails'
 import {
   assertJobLibrary,
   isFunnelStage,
@@ -23,13 +31,18 @@ export type JobLibraryMutation =
       batch: string
       newOnly?: boolean
     }
+  | { type: 'import'; records: BossJobLibraryRecord[] }
   | {
       type: 'detail'
       jobId: string
+      historyToken?: string
       patch: Pick<BossJobLibraryRecord, 'detailStatus'> &
         Partial<Pick<BossJobLibraryRecord, 'detail' | 'detailRetryCount' | 'failureReason'>>
     }
   | { type: 'analysis'; jobId: string; patch: JobAnalysisPatch }
+  | { type: 'greeting'; jobId: string; greeting: string }
+  | { type: 'send'; jobId: string; status: 'queued'; greeting: string }
+  | { type: 'send'; jobId: string; status: 'sent' | 'unknown' }
   | { type: 'funnel'; jobId: string; stage: FunnelStage | null }
   | { type: 'processing'; jobId: string; status: ProcessingStatus }
   | { type: 'delete'; jobId: string }
@@ -79,6 +92,19 @@ export class JobLibraryStorage {
         newCount = merged.newCount
         duplicateCount = merged.duplicateCount
         updated ||= items.length > 0
+      } else if (mutation.type === 'import') {
+        assertJobLibrary(mutation.records)
+        const ids = new Set(records.map((record) => record.encryptJobId))
+        for (const record of mutation.records) {
+          if (ids.has(record.encryptJobId)) {
+            duplicateCount++
+            continue
+          }
+          ids.add(record.encryptJobId)
+          records.push(jsonClone(record))
+          newCount++
+        }
+        updated ||= newCount > 0
       } else if (mutation.type === 'delete') {
         if (typeof mutation.jobId !== 'string' || !mutation.jobId.trim())
           throw new Error('缺少岗位 ID')
@@ -101,7 +127,35 @@ export class JobLibraryStorage {
       } else if (mutation.type !== 'normalize') {
         const record = records.find((item) => item.encryptJobId === mutation.jobId)
         if (!record) throw new Error('未找到已保存岗位')
-        if (mutation.type === 'analysis') {
+        if (mutation.type === 'send') {
+          if (!['queued', 'sent', 'unknown'].includes(mutation.status))
+            throw new Error('发送状态无效')
+          if (
+            mutation.status === 'queued' &&
+            (typeof mutation.greeting !== 'string' ||
+              !mutation.greeting.trim() ||
+              mutation.greeting.trim() !== record.finalGreeting?.trim())
+          )
+            throw new Error('招呼语已更新，请重新确认后发送')
+          if (
+            isJobExcluded(record) ||
+            (mutation.status === 'queued'
+              ? record.sendStatus !== 'pending' || !record.finalGreeting?.trim()
+              : record.sendStatus !== 'queued')
+          )
+            return { records, updated: false, newCount, duplicateCount }
+          record.sendStatus = mutation.status
+        } else if (mutation.type === 'greeting') {
+          if (typeof mutation.greeting !== 'string' || !mutation.greeting.trim())
+            throw new Error('招呼语不能为空')
+          if (
+            isJobExcluded(record) ||
+            record.reviewStatus !== 'pending' ||
+            record.sendStatus !== 'pending'
+          )
+            return { records, updated: false, newCount, duplicateCount }
+          record.finalGreeting = mutation.greeting.trim()
+        } else if (mutation.type === 'analysis') {
           const patch = mutation.patch
           if (
             !patch ||
@@ -131,7 +185,17 @@ export class JobLibraryStorage {
             record.analysisFailureReason = patch.analysisFailureReason
           else delete record.analysisFailureReason
         } else if (mutation.type === 'detail') {
+          const history = await this.readHistoryDetails()
+          if (mutation.historyToken !== undefined)
+            this.assertHistoryOwner(history, mutation.historyToken)
+          else if (history?.owner && history.expiresAt > Date.now())
+            throw new Error('历史详情补全正在另一页面运行')
           const patch = mutation.patch
+          if (isJobExcluded(record) || hasCompleteJobDetail(record))
+            return { records, updated: false, newCount, duplicateCount }
+          if (patch.detailStatus === 'complete')
+            assertCompleteJobDetail(patch.detail, mutation.jobId)
+          else if (patch.detail !== undefined) throw new Error('不完整详情不能覆盖岗位正文')
           record.detailStatus = patch.detailStatus
           if (patch.detail !== undefined) record.detail = jsonClone(patch.detail)
           if (patch.detailRetryCount !== undefined) record.detailRetryCount = patch.detailRetryCount
@@ -152,6 +216,114 @@ export class JobLibraryStorage {
       assertJobLibrary(records)
       if (updated) await this.storage.setItem(JOB_LIBRARY_STORAGE_KEY, jsonClone(records))
       return { records, updated, newCount, duplicateCount }
+    })
+  }
+
+  private async readHistoryDetails() {
+    const run = await this.storage.getItem<unknown>(HISTORY_DETAIL_STORAGE_KEY)
+    assertHistoryDetailRun(run)
+    return run
+  }
+
+  private assertHistoryOwner(
+    run: HistoryDetailRun | null,
+    token: string,
+  ): asserts run is HistoryDetailRun {
+    if (!token?.trim() || !run || run.owner !== token || run.expiresAt <= Date.now())
+      throw new Error('历史补全任务所有权已失效，请重新继续')
+  }
+
+  historyDetails(command: HistoryDetailCommand): Promise<HistoryDetailRun | null> {
+    return this.enqueue(async () => {
+      let run = await this.readHistoryDetails()
+      if (command.type === 'read') return run
+      if (typeof command.token !== 'string' || !command.token.trim())
+        throw new Error('缺少历史补全所有者')
+      if (command.type === 'start' || command.type === 'resume') {
+        const access = await this.storage.getItem<DetailAccessSession>(DETAIL_ACCESS_KEY)
+        if (
+          access &&
+          access.expiresAt > Date.now() &&
+          access.deadline > Date.now() &&
+          access.token !== command.token
+        )
+          throw new Error('已有详情任务正在另一页面运行')
+        if (run?.owner && run.expiresAt > Date.now())
+          throw new Error('历史补全正在另一页面运行，请等待原页面停止或 90 秒后继续')
+        if (command.type === 'start') {
+          if (run && run.cursor < run.total) throw new Error('历史补全尚未结束，请继续已有任务')
+          const records = (await this.storage.getItem<unknown>(JOB_LIBRARY_STORAGE_KEY)) ?? []
+          assertJobLibrary(records)
+          const jobIds = records
+            .filter((r) => !isJobExcluded(r) && !hasCompleteJobDetail(r))
+            .map((r) => r.encryptJobId)
+          run = {
+            id: crypto.randomUUID(),
+            jobIds,
+            cursor: 0,
+            skipped: 0,
+            completed: 0,
+            failed: 0,
+            retryable: 0,
+            total: jobIds.length,
+            status: 'running',
+            owner: '',
+            expiresAt: 0,
+          }
+        }
+        if (!run) throw new Error('没有可继续的历史补全任务')
+        run = {
+          ...run,
+          status: 'running',
+          owner: command.token,
+          expiresAt: Date.now() + HISTORY_DETAIL_LEASE_MS,
+          error: undefined,
+        }
+      } else {
+        this.assertHistoryOwner(run, command.token)
+        run = { ...run }
+        if (command.type === 'advance') {
+          if (
+            run.jobIds[run.cursor] !== command.jobId ||
+            !['completed', 'failed', 'skipped'].includes(command.result)
+          )
+            throw new Error('历史补全断点不匹配')
+          if (command.result !== 'skipped') {
+            const records = await this.storage.getItem<unknown>(JOB_LIBRARY_STORAGE_KEY)
+            assertJobLibrary(records)
+            const record = records.find((r) => r.encryptJobId === command.jobId)
+            if (
+              !record ||
+              record.detailStatus !== (command.result === 'completed' ? 'complete' : 'failed') ||
+              (command.result === 'completed' && !record.detail?.jobInfo?.postDescription?.trim())
+            )
+              throw new Error('详情保存尚未确认，保留当前断点')
+          }
+          run.cursor++
+          run[command.result]++
+        } else if (command.type === 'finish') {
+          if (
+            ![
+              'completed',
+              'stopped',
+              'captcha',
+              'login_required',
+              'restricted',
+              'network_error',
+              'unknown_error',
+            ].includes(command.status)
+          )
+            throw new Error('历史补全停止状态无效')
+          run.status = command.status
+          run.error = command.error
+          run.owner = ''
+          run.expiresAt = 0
+        }
+        if (run.owner) run.expiresAt = Date.now() + HISTORY_DETAIL_LEASE_MS
+      }
+      assertHistoryDetailRun(run)
+      await this.storage.setItem(HISTORY_DETAIL_STORAGE_KEY, jsonClone(run))
+      return run
     })
   }
 

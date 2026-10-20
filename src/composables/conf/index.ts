@@ -16,6 +16,16 @@ export * from './info'
 
 const formDataPresetKey = 'local:FormDataPrese'
 const formDataPresetsKey = 'local:FormDataPreses'
+const defaultPreset = { label: '默认配置', value: 'default' }
+
+function isPreset(value: unknown): value is { label: string; value: string } {
+  return (
+    isPlainObject(value) &&
+    typeof value.label === 'string' &&
+    typeof value.value === 'string' &&
+    !!value.value.trim()
+  )
+}
 
 function removeRetiredRanges(config: Partial<FormData>) {
   delete config.salaryRange
@@ -137,6 +147,15 @@ const FROM_VERSION: [string, (from: Partial<FormData>) => Partial<FormData>][] =
       return from
     },
   ],
+  [
+    '20261018',
+    (from) => {
+      if (from.delayCollectionDetailMin === 2 && from.delayCollectionDetailMax === 5) {
+        from.delayCollectionDetailMin = defaultFormData.delayCollectionDetailMin
+      }
+      return from
+    },
+  ],
 ]
 
 export const useConf = () => {
@@ -155,11 +174,8 @@ export const useConf = () => {
       }
     }
     try {
-      for (let i = FROM_VERSION.length - 1; i >= 0; i--) {
-        const [version, fn] = FROM_VERSION[i]!
-        if ((from?.version ?? '20240401') >= version) {
-          break
-        }
+      for (const [version, fn] of FROM_VERSION) {
+        if ((from.version ?? '20240401') >= version) continue
         from = fn(from)
         from.version = version
       }
@@ -186,29 +202,47 @@ export const useConf = () => {
     try {
       const rawFormDataPreset = await counter.storageGet<unknown>(formDataPresetKey, 'default')
       const rawFormDataPresets = await counter.storageGet<unknown>(formDataPresetsKey, [
-        {
-          label: '默认配置',
-          value: 'default',
-        },
+        defaultPreset,
       ])
-      if (
-        typeof rawFormDataPreset !== 'string' ||
-        !rawFormDataPreset.trim() ||
-        !Array.isArray(rawFormDataPresets) ||
-        rawFormDataPresets.some(
-          (preset) =>
-            !isPlainObject(preset) ||
-            typeof preset.label !== 'string' ||
-            typeof preset.value !== 'string' ||
-            !preset.value.trim(),
-        )
-      )
-        throw new Error('配置预设格式异常；已保留原数据')
+      const selectionValid = typeof rawFormDataPreset === 'string' && !!rawFormDataPreset.trim()
+      const presetListValid =
+        Array.isArray(rawFormDataPresets) && rawFormDataPresets.every(isPreset)
+      const preset =
+        typeof rawFormDataPreset === 'string' && rawFormDataPreset.trim()
+          ? rawFormDataPreset
+          : 'default'
+      const presets = Array.isArray(rawFormDataPresets) ? rawFormDataPresets.filter(isPreset) : []
+      const normalizedPresets = presets.length ? presets : [defaultPreset]
+      const selectedPresetListed = normalizedPresets.some((item) => item.value === preset)
+      if (!selectedPresetListed)
+        normalizedPresets.push({
+          label: preset === 'default' ? defaultPreset.label : '当前方案',
+          value: preset,
+        })
+      const needsPresetMetadataRecovery =
+        !selectionValid || !presetListValid || !selectedPresetListed
+      if (needsPresetMetadataRecovery)
+        diagnostic('config.preset.recover', {
+          level: 'warning',
+          context: {
+            phase:
+              !selectionValid && !presetListValid
+                ? 'selection-and-list'
+                : !selectionValid
+                  ? 'selection'
+                  : !presetListValid
+                    ? 'list'
+                    : 'selected-entry-missing',
+            status: 'recovered',
+            count: normalizedPresets.length,
+          },
+        })
 
-      const storageKey = formDataKey(rawFormDataPreset)
+      const storageKey = formDataKey(preset)
       const rawConfig = await counter.storageGet<unknown>(storageKey, {})
       if (!isPlainObject(rawConfig)) throw new Error('配置格式异常；已保留原数据')
       let from = rawConfig as Partial<FormData>
+      const previousVersion = from.version
       const previousFiltering = JSON.stringify(from.aiFiltering)
       const hasRetiredRanges =
         'salaryRange' in from ||
@@ -227,10 +261,14 @@ export const useConf = () => {
           ].some((key) => key in from.amap!))
       from = (await formDataHandler(from)) ?? from
       const data = deepmerge<FormData>(defaultFormData, from)
-      if (JSON.stringify(from.aiFiltering) !== previousFiltering || hasRetiredRanges)
+      if (
+        from.version !== previousVersion ||
+        JSON.stringify(from.aiFiltering) !== previousFiltering ||
+        hasRetiredRanges
+      )
         await counter.storageSet(storageKey, jsonClone(data))
-      formDataPreset.value = rawFormDataPreset
-      formDataPresets.value = rawFormDataPresets
+      formDataPreset.value = preset
+      formDataPresets.value = normalizedPresets
       removeRetiredRanges(formData)
       removeRetiredFilters(formData)
       Object.assign(formData, data)
@@ -252,8 +290,6 @@ export const useConf = () => {
       removeRetiredRanges(formData)
       removeRetiredFilters(formData)
       await counter.storageSet(formDataKey(), jsonClone(formData))
-      await counter.storageSet(formDataPresetKey, jsonClone(formDataPreset.value))
-      await counter.storageSet(formDataPresetsKey, jsonClone(formDataPresets.value))
 
       toast.add({
         title: '保存成功',
@@ -361,17 +397,22 @@ export const useConf = () => {
   async function createPreset(label: string) {
     isLoading.value = true
     try {
-      const value = Date.now().toString()
-      formDataPresets.value.push({
-        label,
-        value,
-      })
+      const name = label.trim()
+      if (!name) throw new Error('请填写方案名称')
+      const value = crypto.randomUUID()
+      const data = jsonClone(formData)
+      removeRetiredRanges(data)
+      removeRetiredFilters(data)
+      const previous = await counter.storageGet<unknown>(formDataPresetsKey, [defaultPreset])
+      if (!Array.isArray(previous) || !previous.every(isPreset))
+        throw new Error('方案列表格式异常；已保留原数据')
+      const presets = [...previous, { label: name, value }]
+      await counter.storageSet(formDataKey(value), data)
+      await counter.storageSet(formDataPresetsKey, presets)
+      await counter.storageSet(formDataPresetKey, value)
+      formDataPresets.value = presets
       formDataPreset.value = value
-
-      await counter.storageSet(formDataPresetKey, formDataPreset.value)
-      await counter.storageSet(formDataPresetsKey, formDataPresets.value)
-      removeRetiredRanges(formData)
-      await counter.storageSet(formDataKey(), jsonClone(formData))
+      Object.assign(formData, data)
 
       toast.add({
         title: '预设创建成功',
@@ -392,7 +433,13 @@ export const useConf = () => {
   async function switchPreset(value: string) {
     isLoading.value = true
     try {
-      formDataPreset.value = value
+      const presets = await counter.storageGet<unknown>(formDataPresetsKey, [defaultPreset])
+      if (
+        value !== 'default' &&
+        (!Array.isArray(presets) ||
+          !presets.some((preset) => isPreset(preset) && preset.value === value))
+      )
+        throw new Error('求职方案不存在')
       await counter.storageSet(formDataPresetKey, value)
       await init()
     } catch (e) {
@@ -402,6 +449,31 @@ export const useConf = () => {
       })
       logger.error('预设切换失败', e)
       throw e
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  async function deletePreset(value: string) {
+    if (value === 'default') throw new Error('默认方案不可删除')
+    if (!formDataPresets.value.some((preset) => preset.value === value))
+      throw new Error('求职方案不存在')
+    if (formDataPreset.value === value) throw new Error('请先切换到其他方案再删除')
+    isLoading.value = true
+    try {
+      const previous = await counter.storageGet(
+        formDataPresetsKey,
+        jsonClone(formDataPresets.value),
+      )
+      const remaining = formDataPresets.value.filter((preset) => preset.value !== value)
+      await counter.storageSet(formDataPresetsKey, jsonClone(remaining))
+      try {
+        await counter.storageRm(formDataKey(value))
+      } catch (error) {
+        await counter.storageSet(formDataPresetsKey, previous)
+        throw error
+      }
+      formDataPresets.value = remaining
     } finally {
       isLoading.value = false
     }
@@ -424,6 +496,7 @@ export const useConf = () => {
     formDataPresets,
     createPreset,
     switchPreset,
+    deletePreset,
     isLoading,
   }
 }

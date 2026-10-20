@@ -1,15 +1,25 @@
 import { defineProxy } from 'comctx'
 
 import { browser, defineBackground } from '#imports'
-import { BackgroundCounter, ProvideBackgroundAdapter } from '@/message/background'
+import {
+  BackgroundCounter,
+  ProvideBackgroundAdapter,
+  installDetailAccess,
+} from '@/message/background'
 
 import { observeProvider } from '../message/bridge'
-import { installDiagnosticReceiver, startExtensionDiagnostics } from '../message/diagnostics'
+import {
+  installDiagnosticReceiver,
+  mirrorSavedDiagnostics,
+  startExtensionDiagnostics,
+} from '../message/diagnostics'
 
 export default defineBackground({
   main() {
+    installDetailAccess()
     installDiagnosticReceiver()
     startExtensionDiagnostics('background')
+    void mirrorSavedDiagnostics().catch(() => {})
     const [provideBackgroundCounter] = defineProxy(() => new BackgroundCounter(), {
       namespace: '__boss-helper-background__',
     })

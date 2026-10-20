@@ -23,7 +23,9 @@ import { EXECUTOR_NAMESPACE } from '../../workbench/protocol'
 import { GeekChatClientManager } from './chat'
 import type { BoosJobData } from './delivery'
 import { bossWorkflow } from './delivery'
+import type { HistoryDetailRun } from './historyDetails'
 import { applySavedJobDetail, convertBossZpJobItemToJobData, getSavedJobData } from './jobData'
+import { assertCompleteJobDetail, detailStopReason, hasCompleteJobDetail } from './jobDetails'
 import type { JobAnalysisPatch, JobLibraryMutation } from './jobLibraryStorage'
 import type { BossJobLibraryRecord, CollectionRun, DetailRun, FunnelStage } from './jobStore'
 import {
@@ -58,7 +60,7 @@ import {
 import type { KeywordRotationPlan, KeywordRotationUsage } from './keywordRotation'
 import { buildNativeSearchUrl, nativeSearchFromUrl } from './nativeSearch'
 import type { NativeSearchFilters } from './nativeSearch'
-import { getBossData, uploadImage } from './requests'
+import { getBossData, getJobDetail, sendPublishReq, uploadImage } from './requests'
 import { SavedJobAnalyzer } from './savedAnalysis'
 import type { BossZpDetailData, BossZpJobItemData } from './types'
 import { createExecutorBridge } from './workbench'
@@ -111,6 +113,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   keywordRotationWaitSeconds = ref(0)
   keywordRotationError = ref('')
   detailRun = ref<DetailRun | null>(null)
+  historyDetailRun = ref<HistoryDetailRun | null>(null)
   gatheringKind = ref<'collection' | 'detail'>('collection')
   gatheringBusy = ref(false)
   jobLibrarySummary = ref<{
@@ -135,13 +138,208 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private collectionStoragePending: Promise<unknown> | null = null
   private analysisCleanup: Promise<BossJobLibraryRecord[]> | null = null
   private jobCapturePromise: Promise<void> = Promise.resolve()
-  private backgroundDetailQueued = false
   private mounted = false
   private mountedPath = ''
   private mountPromise: Promise<void> | null = null
   private keywordRotationPromise: Promise<KeywordRotationPlan> | null = null
   private keywordRotationStopRequested = false
   private autoCaptureLoaded = false
+  private gatheringDeadline = 0
+  private gatheringLimitError = ''
+  private gatheringTimer: ReturnType<typeof setTimeout> | undefined
+  private detailAccessToken = ''
+  private detailAccessTimer: ReturnType<typeof setInterval> | undefined
+
+  private beginGatheringSession(manual = true) {
+    if (
+      !this.gatheringDeadline ||
+      (manual &&
+        Date.now() >= this.gatheringDeadline &&
+        !this.keywordRotationBusy.value &&
+        !this.gatheringBusy.value)
+    ) {
+      const minutes =
+        this.conf.formData.collectionMaxRuntimeMinutes ??
+        defaultFormData.collectionMaxRuntimeMinutes
+      if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1440)
+        throw new Error('单次运行上限必须是 1～1440 分钟的整数')
+      this.gatheringDeadline = Date.now() + minutes * 60_000
+      this.gatheringLimitError = ''
+    }
+    clearTimeout(this.gatheringTimer)
+    this.gatheringTimer = setTimeout(
+      () => this.checkGatheringDeadline(),
+      Math.max(0, this.gatheringDeadline - Date.now()),
+    )
+    this.checkGatheringDeadline()
+  }
+
+  private endGatheringSession() {
+    if (!this.keywordRotationBusy.value) clearTimeout(this.gatheringTimer)
+  }
+
+  private async ensureDetailAccess(run: CollectionRun | DetailRun, historyToken?: string) {
+    if (this.detailAccessToken) return
+    if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run)))
+      throw new Error('详情补全已停止')
+    const token = historyToken ?? crypto.randomUUID()
+    await counter.detailAccess({
+      type: 'claim',
+      token,
+      deadline: this.gatheringDeadline,
+      historyToken,
+    })
+    this.detailAccessToken = token
+    this.detailAccessTimer = setInterval(() => {
+      if (!this.detailAccessToken) return
+      void counter.detailAccess({ type: 'renew', token }).catch((error) => {
+        if (this.detailAccessToken !== token) return
+        const active =
+          this.gatheringKind.value === 'detail' ? this.detailRun.value : this.collectionRun.value
+        if (active && ['running', 'paused'].includes(active.status)) {
+          active.status = 'stopped'
+          active.error = error instanceof Error ? error.message : String(error)
+          this.haltAutomaticDetails()
+        }
+      })
+    }, 10_000)
+  }
+
+  private async closeDetailAccess() {
+    const token = this.detailAccessToken
+    this.detailAccessToken = ''
+    clearInterval(this.detailAccessTimer)
+    if (token)
+      await counter.detailAccess({ type: 'release', token }).catch((error) => {
+        this.jobLibraryError.value = error instanceof Error ? error.message : String(error)
+      })
+  }
+
+  private haltAutomaticDetails() {
+    this.keywordRotationStopRequested = true
+    if (this.savedAnalyzer.busy.value && !this.savedAnalyzer.collecting.value)
+      this.savedAnalyzer.stop()
+    if (this.autoCaptureEnabled.value) {
+      this.autoCaptureEnabled.value = false
+      void counter
+        .storageSet(AUTO_CAPTURE_STORAGE_KEY, false)
+        .catch((error) => diagnostic('detail.stop', { error }))
+    }
+  }
+
+  private async fetchUrlDetail(
+    record: BossJobLibraryRecord,
+    run: CollectionRun | DetailRun,
+    historyToken?: string,
+  ) {
+    await this.ensureDetailAccess(run, historyToken)
+    if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run)))
+      throw new Error('详情补全已停止')
+    const token = this.detailAccessToken
+    run.phase = '正在通过 URL 获取详情'
+    await counter.detailAccess({
+      type: 'visit',
+      token,
+      jobId: record.encryptJobId,
+      url: record.jobUrl || `https://www.zhipin.com/job_detail/${record.encryptJobId}.html`,
+    })
+    const deadline = Math.min(this.gatheringDeadline, Date.now() + 30_000)
+    let lastError = '详情正文未加载'
+    while (Date.now() < deadline) {
+      if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run)))
+        throw new Error('详情补全已停止')
+      const page = await counter.detailAccess({ type: 'read', token, jobId: record.encryptJobId })
+      if (this.gatheringIssue(run)) throw new Error('详情补全已停止')
+      if (page?.status === 'ready') {
+        if (page.jobId !== record.encryptJobId) throw new Error('详情页面岗位 ID 不匹配')
+        assertCompleteJobDetail(page.detail, record.encryptJobId)
+        return page.detail
+      }
+      if (page) {
+        lastError = page.error
+        if (page.status !== 'pending') {
+          if (['captcha', 'login_required', 'restricted'].includes(page.status)) {
+            run.status = page.status as DetailRun['status']
+            run.error = page.error
+            this.haltAutomaticDetails()
+          }
+          throw new Error(page.error)
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error(`URL 详情获取超时：${lastError}`)
+  }
+
+  private async fetchJobDetail(
+    record: BossJobLibraryRecord,
+    run: CollectionRun | DetailRun,
+    historyToken?: string,
+  ) {
+    await this.ensureDetailAccess(run, historyToken)
+    if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run)))
+      throw new Error('详情补全已停止')
+    const { securityId, lid } = record.snapshot
+    let apiError = ''
+    if (securityId?.trim() && lid?.trim()) {
+      try {
+        run.phase = '正在通过接口获取详情'
+        const response = await getJobDetail({ securityId, lid })
+        if (this.gatheringIssue(run)) throw new Error('详情补全已停止')
+        if (response?.code !== 0) throw new Error(response?.message || '详情请求返回异常')
+        assertCompleteJobDetail(response.zpData, record.encryptJobId)
+        return response.zpData
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // An API environment error alone does not mean the normal detail page is blocked.
+        if (
+          this.gatheringIssue(run) ||
+          detailStopReason(message.replace(/环境\s*存在\s*异常/g, ''), true)
+        )
+          throw error
+        apiError = message || '详情接口请求失败'
+      }
+    }
+    try {
+      if (apiError) {
+        run.phase = '等待 URL 补全详情'
+        if (!(await this.waitForGathering(this.collectionDelay('Detail'), run)))
+          throw new Error('详情补全已停止')
+      }
+      return await this.fetchUrlDetail(record, run, historyToken)
+    } catch (error) {
+      const urlError = error instanceof Error ? error.message : String(error)
+      if (apiError && !detailStopReason(urlError, true)) {
+        const apiFailure = detailStopReason(apiError, true) ? '详情接口请求失败' : apiError
+        throw new Error(`${apiFailure}；URL 补全失败：${urlError}`, { cause: new Error(apiError) })
+      }
+      throw error
+    }
+  }
+
+  private checkGatheringDeadline() {
+    if (!this.gatheringDeadline || Date.now() < this.gatheringDeadline) return false
+    if (!this.gatheringLimitError) {
+      const minutes =
+        this.conf.formData.collectionMaxRuntimeMinutes ??
+        defaultFormData.collectionMaxRuntimeMinutes
+      this.gatheringLimitError = `已达到单次运行上限（${minutes} 分钟），进度已保留，请手动继续`
+      this.keywordRotationStopRequested = true
+      if (this.savedAnalyzer.busy.value) this.savedAnalyzer.stop()
+      if (this.realtimeBusy.value) this.workflow?.stop()
+      this.stopGathering()
+      for (const run of [this.collectionRun.value, this.detailRun.value]) {
+        if (run?.status === 'stopped') run.error = this.gatheringLimitError
+      }
+      if (this.autoCaptureEnabled.value) {
+        this.autoCaptureEnabled.value = false
+        void counter
+          .storageSet(AUTO_CAPTURE_STORAGE_KEY, false)
+          .catch((error) => diagnostic('collection.limit', { error }))
+      }
+    }
+    return true
+  }
 
   constructor() {
     const jobList = ref<JobData[]>([])
@@ -457,6 +655,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 
   private async waitForKeywordRotation(until?: string) {
     while (!this.keywordRotationStopRequested) {
+      if (this.checkGatheringDeadline()) return false
       if (this.detectCollectionIssue())
         throw new Error('页面要求验证、登录或提示访问异常，轮换已停止')
       const remaining = until ? Date.parse(until) - Date.now() : 0
@@ -489,6 +688,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           ...this.nativeFilterSnapshot(),
         })
     if (!plan.items.some((item) => item.enabled)) throw new Error('请至少输入一个岗位关键词')
+    this.beginGatheringSession()
     this.keywordRotationStopRequested = false
     this.keywordRotationError.value = ''
     this.keywordRotationBusy.value = true
@@ -589,6 +789,15 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         }
         await this.writeKeywordRotation(current)
       } finally {
+        if (this.gatheringLimitError) {
+          current = {
+            ...current,
+            status: 'stopped',
+            error: this.gatheringLimitError,
+            updatedAt: new Date().toISOString(),
+          }
+          await this.writeKeywordRotation(current)
+        }
         diagnostic('rotation.finish', {
           level: current.status === 'failed' ? 'error' : undefined,
           error: current.error,
@@ -600,6 +809,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         })
         this.keywordRotationWaitSeconds.value = 0
         this.keywordRotationBusy.value = false
+        await this.closeDetailAccess()
+        this.endGatheringSession()
         this.keywordRotationPromise = null
         const status =
           current.status === 'completed'
@@ -663,14 +874,17 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     if (this.gatheringBusy.value) throw new Error('请先停止采集或详情补全')
     if (this.realtimeBusy.value || this.collectionStoragePending)
       throw new Error('已有任务正在运行或等待保存，请稍后重试')
+    this.beginGatheringSession()
     this.realtimeBusy.value = true
     try {
       if (!this.workflow) {
         this.workflow = await bossWorkflow(this)
       }
+      if (this.checkGatheringDeadline()) return
       await this.workflow.executeAll(this._jobDataMap)
     } finally {
       this.realtimeBusy.value = false
+      this.endGatheringSession()
     }
   }
 
@@ -698,11 +912,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     return result
   }
 
-  async captureNewJobs(
-    items: BossZpJobItemData[],
-    keyword = '',
-    scheduleDetails = true,
-  ): Promise<number> {
+  async captureNewJobs(items: BossZpJobItemData[], keyword = ''): Promise<number> {
     const run = this.jobCapturePromise.then(async () => {
       if (!items.length || this.gatheringBusy.value) return 0
       const unique = [...new Map(items.map((item) => [item.encryptJobId, item])).values()].filter(
@@ -729,7 +939,6 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         '保存新岗位',
         null,
       )
-      if (scheduleDetails) this.scheduleBackgroundDetailCompletion()
       return merged.newCount
     })
     this.jobCapturePromise = run.then(
@@ -742,8 +951,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   async captureJobSnapshot(jobKey: string, keyword = ''): Promise<BossJobLibraryRecord> {
     const job = this.jobMaps.get(jobKey)
     if (!job) throw new Error('未找到当前岗位数据')
-    // The single-card action completes details next; do not let a background batch take its lock.
-    await this.captureNewJobs([job.rawData.jobitem], keyword, false)
+    await this.captureNewJobs([job.rawData.jobitem], keyword)
     const record = (await this.getJobLibrary()).find(
       (item) => item.encryptJobId === job.rawData.jobitem.encryptJobId,
     )
@@ -754,8 +962,10 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private updateJobLibrarySummary(records: BossJobLibraryRecord[]) {
     this.jobLibrarySummary.value = {
       total: records.length,
-      complete: records.filter((record) => record.detailStatus === 'complete').length,
-      pending: records.filter((record) => record.detailStatus === 'pending').length,
+      complete: records.filter(hasCompleteJobDetail).length,
+      pending: records.filter(
+        (record) => !hasCompleteJobDetail(record) && record.detailStatus !== 'failed',
+      ).length,
       failed: records.filter((record) => record.detailStatus === 'failed').length,
       funnel: getJobFunnel(records),
     }
@@ -780,39 +990,58 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   async setAutoCaptureEnabled(enabled: boolean) {
     await counter.storageSet(AUTO_CAPTURE_STORAGE_KEY, enabled)
     this.autoCaptureEnabled.value = enabled
-    if (!enabled) {
-      this.backgroundDetailQueued = false
-      if (this.detailPromise) this.stopGathering()
-      return
-    }
-    await this.captureNewJobs(this._jobList.value).catch((error) => {
-      logger.error('自动保存新岗位失败', error)
-      return 0
-    })
+    if (enabled) this.captureViewedJobDetail(this._jobDetail.value)
   }
 
-  scheduleBackgroundDetailCompletion() {
-    if (!this.mounted || this.backgroundDetailQueued || this.detailPromise) return
-    this.backgroundDetailQueued = true
-    void Promise.resolve().then(async () => {
-      if (!this.backgroundDetailQueued) return
-      this.backgroundDetailQueued = false
-      if (
-        !this.mounted ||
-        this.keywordRotationBusy.value ||
-        this.savedAnalyzer.busy.value ||
-        this.gatheringBusy.value ||
-        this.collectionStoragePending ||
-        this.realtimeBusy.value ||
-        this.workflow?.status.value === 'running'
-      )
-        return
-      try {
-        await this.completeCollectedDetails({ availableOnly: true })
-      } catch (error) {
-        logger.error('鍚庡彴琛ヨˉ宀椾綅璇︽儏澶辫触', error)
-      }
-    })
+  private captureViewedJobDetail(detail: BossZpDetailData | undefined) {
+    const jobId = detail?.jobInfo?.encryptId
+    const job = jobId ? this.jobMaps.get(`boss::${jobId}`) : undefined
+    if (!job || !jobId) return
+    try {
+      assertCompleteJobDetail(detail, jobId)
+    } catch {
+      return
+    }
+    job.rawData.detail = detail
+    Object.assign(job.jobData, applySavedJobDetail(job.jobData, detail))
+    if (
+      !this.autoCaptureEnabled.value ||
+      this.gatheringBusy.value ||
+      this.keywordRotationBusy.value ||
+      this.realtimeBusy.value
+    )
+      return
+    const snapshot = jsonClone(job.rawData.jobitem)
+    const savedDetail = jsonClone(detail)
+    const keyword = new URL(location.href).searchParams.get('query') || ''
+    // Only persist the response already loaded by BOSS; never request another detail here.
+    this.jobCapturePromise = this.jobCapturePromise
+      .then(async () => {
+        if (!this.autoCaptureEnabled.value) return
+        let record = (await this.getJobLibrary()).find((item) => item.encryptJobId === jobId)
+        if (record && (isJobExcluded(record) || hasCompleteJobDetail(record))) return
+        if (!record) {
+          const result = await this.mutateJobLibrary({
+            type: 'capture',
+            items: [snapshot],
+            keyword,
+            batch: `browse_${Date.now()}`,
+            newOnly: true,
+          })
+          record = result.records.find((item) => item.encryptJobId === jobId)
+        }
+        if (!record || isJobExcluded(record) || hasCompleteJobDetail(record)) return
+        await this.mutateJobLibrary({
+          type: 'detail',
+          jobId,
+          patch: { detailStatus: 'complete', detail: savedDetail },
+        })
+      })
+      .catch((error) => {
+        this.jobLibraryError.value = error instanceof Error ? error.message : String(error)
+        diagnostic('browse.capture', { error })
+        logger.error('保存浏览岗位失败', error)
+      })
   }
 
   private async writeCollectionRun(run: CollectionRun) {
@@ -896,21 +1125,46 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   private lastDetectedCollectionIssue = ''
   private detectCollectionIssue(message?: string): CollectionRun['status'] | undefined {
     const text = (message ?? document.body?.innerText ?? '').replace(/\s+/g, '')
+    const captchaWidget =
+      message === undefined &&
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'input[autocomplete="one-time-code"], input[name="captcha"], input[placeholder*="验证码"], iframe[src*="/captcha"], iframe[src*="/verify"], iframe[title*="验证"], iframe[title*="CAPTCHA"]',
+        ),
+      ).some(
+        (element) =>
+          element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden',
+      )
     const patterns = [
-      ['captcha', /验证码|安全验证|滑动验证|人机验证/],
-      ['login_required', /登录后|请先登录|登录过期/],
-      ['restricted', /操作(过于|太)频繁|访问(过于|太)频繁|访问受限|账号异常|账户异常|稍后再试/],
+      // A JD can describe verification codes; only prompts or visible controls block page work.
+      [
+        'captcha',
+        message === undefined
+          ? /请(?:先)?(?:完成|进行|通过)(?:安全|滑动|人机)验证|(?:需要|需)(?:完成|进行)?(?:安全|滑动|人机)验证|请(?:先)?(?:输入|填写)(?:图形|图片|短信)?验证码|验证码(?:错误|失效|过期)|拖动(?:下方)?滑块/
+          : /验证码|安全验证|滑动验证|人机验证/,
+      ],
+      ['login_required', /登录后|请先登录|登录(?:已)?(?:过期|失效)|未登录/],
+      [
+        'restricted',
+        /操作(过于|太)频繁|访问(过于|太)频繁|访问受限|账号异常|账户异常|稍后再试|(?:环境|账户|账号)存在异常/,
+      ],
       ['network_error', /网络异常|加载失败|请求失败|服务异常/],
     ] as const
     for (const [status, pattern] of patterns) {
       const match = text.match(pattern)
-      if (!match) continue
-      const evidenceSource = message === undefined ? 'page-text' : 'error-message'
-      const signature = `${status}:${evidenceSource}:${match[0]}`
+      if (!match && !(status === 'captcha' && captchaWidget)) continue
+      const matchedTerm = match?.[0] ?? 'captcha-control'
+      const evidenceSource =
+        status === 'captcha' && captchaWidget
+          ? 'visible-control'
+          : message === undefined
+            ? 'page-text'
+            : 'error-message'
+      const signature = `${status}:${evidenceSource}:${matchedTerm}`
       if (signature !== this.lastDetectedCollectionIssue) {
         diagnostic('page.restriction', {
           level: 'warning',
-          context: { status, matchedTerm: match[0], evidenceSource },
+          context: { status, matchedTerm, evidenceSource },
         })
         this.lastDetectedCollectionIssue = signature
       }
@@ -931,6 +1185,10 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   private gatheringIssue(run: CollectionRun | DetailRun) {
+    if (this.checkGatheringDeadline() && ['running', 'paused'].includes(run.status)) {
+      run.status = 'stopped'
+      run.error = this.gatheringLimitError
+    }
     const issue = this.detectCollectionIssue()
     if (issue && (run.status === 'running' || run.status === 'paused')) {
       run.status = issue
@@ -940,14 +1198,20 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         restricted: '页面提示访问限制，已停止',
         network_error: '页面提示网络失败，已停止',
       }[issue as 'captcha' | 'login_required' | 'restricted' | 'network_error']
+      if (['captcha', 'login_required', 'restricted'].includes(issue)) this.haltAutomaticDetails()
     }
     return run.status !== 'running' && run.status !== 'paused'
   }
 
   private collectionDelay(kind: 'Scroll' | 'Detail') {
-    const defaults = kind === 'Scroll' ? [1, 2] : [2, 5]
-    const min = Number(this.conf.formData[`delayCollection${kind}Min`] ?? defaults[0])
-    const max = Number(this.conf.formData[`delayCollection${kind}Max`] ?? defaults[1])
+    const min = Number(
+      this.conf.formData[`delayCollection${kind}Min`] ??
+        defaultFormData[`delayCollection${kind}Min`],
+    )
+    const max = Number(
+      this.conf.formData[`delayCollection${kind}Max`] ??
+        defaultFormData[`delayCollection${kind}Max`],
+    )
     if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0.5 || max < min || max > 3600) {
       throw new Error('采集间隔必须在 0.5～3600 秒内，最长间隔不能小于最短间隔')
     }
@@ -972,7 +1236,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   pauseGathering() {
-    const run = this.detailPromise ? this.detailRun.value : this.collectionRun.value
+    const run =
+      this.gatheringKind.value === 'detail' ? this.detailRun.value : this.collectionRun.value
     if (this.gatheringBusy.value && run?.status === 'running') {
       this.pausedPhase = run.phase ?? ''
       run.status = 'paused'
@@ -981,7 +1246,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   resumeGathering() {
-    const run = this.detailPromise ? this.detailRun.value : this.collectionRun.value
+    const run =
+      this.gatheringKind.value === 'detail' ? this.detailRun.value : this.collectionRun.value
     if (!this.gatheringBusy.value || run?.status !== 'paused') return
     if (this.gatheringIssue(run)) return
     if (
@@ -999,6 +1265,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   }
 
   stopGathering() {
+    this.haltAutomaticDetails()
     if (this.collectionAnalysisRun) this.savedAnalyzer.stop()
     this.stopCollection()
     if (this.detailRun.value && ['running', 'paused'].includes(this.detailRun.value.status)) {
@@ -1031,6 +1298,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       this.workflow?.status.value === 'running'
     )
       throw new Error('已有任务正在运行或等待保存，请稍后重试')
+    this.beginGatheringSession()
     this.collectionStopRequested = false
     const run = reactive(
       createCollectionRun({
@@ -1040,6 +1308,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       }),
     )
     run.visibleCount = this._jobList.value.length
+    run.detailCompletedCount = 0
+    run.detailFailedCount = 0
     run.phase = '等待岗位列表'
     this.collectionRun.value = run
     this.collectionAnalysisRun = analyze ? run : null
@@ -1086,38 +1356,42 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           run.newCount += merged.newCount
           run.duplicateCount += merged.duplicateCount
           if (this.collectionStopRequested) break
-          if (analyze) {
-            const pending = merged.records
-              .filter(
-                (record) =>
-                  !isJobExcluded(record) &&
-                  beforeIds.has(record.encryptJobId) &&
-                  !handled.has(record.encryptJobId) &&
-                  !record.snapshot.contact &&
-                  record.detailStatus !== 'failed' &&
-                  record.analysisStatus === 'pending' &&
-                  record.reviewStatus === 'pending' &&
-                  record.sendStatus === 'pending',
-              )
-              .sort(
-                (a, b) =>
-                  Number(storedIds.has(a.encryptJobId)) - Number(storedIds.has(b.encryptJobId)),
-              )
-            for (const record of pending) {
-              handled.add(record.encryptJobId)
-              const completed =
-                record.detailStatus === 'complete'
-                  ? record
-                  : await this.completeCollectedJob(record, run)
-              if (this.gatheringIssue(run)) break
-              if (
-                completed?.detailStatus === 'complete' &&
-                completed.detail?.jobInfo?.postDescription?.trim()
-              )
-                await analyze(completed)
-            }
+          const pending = merged.records
+            .filter(
+              (record) =>
+                !isJobExcluded(record) &&
+                beforeIds.has(record.encryptJobId) &&
+                !handled.has(record.encryptJobId) &&
+                (!storedIds.has(record.encryptJobId) ||
+                  (!!analyze && hasCompleteJobDetail(record))) &&
+                (analyze
+                  ? !record.snapshot.contact &&
+                    record.detailStatus !== 'failed' &&
+                    record.analysisStatus === 'pending' &&
+                    record.reviewStatus === 'pending' &&
+                    record.sendStatus === 'pending'
+                  : !hasCompleteJobDetail(record)),
+            )
+            .sort(
+              (a, b) =>
+                Number(storedIds.has(a.encryptJobId)) - Number(storedIds.has(b.encryptJobId)),
+            )
+          for (const record of pending) {
+            handled.add(record.encryptJobId)
+            const completed = hasCompleteJobDetail(record)
+              ? record
+              : await this.completeCollectedJob(record, run)
+            if (completed?.detailStatus === 'complete') run.detailCompletedCount!++
+            else if (completed?.detailStatus === 'failed') run.detailFailedCount!++
             if (this.gatheringIssue(run)) break
+            if (
+              analyze &&
+              completed?.detailStatus === 'complete' &&
+              completed.detail?.jobInfo?.postDescription?.trim()
+            )
+              await analyze(completed)
           }
+          if (this.gatheringIssue(run)) break
           const target = this.getScrollTarget()
           const before = this.getScrollState(target)
           run.lastScrollTop = before.top
@@ -1184,12 +1458,14 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           run.waitSeconds = undefined
           this.collectionPromise = null
           this.gatheringBusy.value = false
+          if (!this.keywordRotationBusy.value || run.status !== 'completed')
+            await this.closeDetailAccess()
+          this.endGatheringSession()
           if (!analyze && !this.keywordRotationBusy.value) {
             void this.notification(
-              `岗位采集${gatheringStatusText[run.status]}，新增 ${run.newCount} 个，重复 ${run.duplicateCount} 个${run.error ? `；${run.error}` : ''}`,
+              `岗位采集${gatheringStatusText[run.status]}，新增 ${run.newCount} 个，重复 ${run.duplicateCount} 个；详情成功 ${run.detailCompletedCount} 个，失败 ${run.detailFailedCount} 个${run.error ? `；${run.error}` : ''}`,
             )
           }
-          if (!analyze && run.status === 'completed') this.scheduleBackgroundDetailCompletion()
         }
       }
       return run
@@ -1206,19 +1482,29 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 
   private async completeCollectedJob(record: BossJobLibraryRecord, run: CollectionRun | DetailRun) {
     if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run))) return null
-    const job = this.jobMaps.get(record.key)
-    if (!job) {
-      record.detailStatus = 'failed'
-      record.detailRetryCount++
-      record.failureReason = '岗位不在当前列表，恢复原搜索后重试'
-    } else {
-      run.phase = '等待打开详情'
+    {
+      run.phase = '等待获取详情'
       if (!(await this.waitForGathering(this.collectionDelay('Detail'), run))) return null
+      const latest = (
+        await this.waitForCollectionStorage(() => this.readJobLibrary(), '重新读取岗位状态', run)
+      ).find((item) => item.encryptJobId === record.encryptJobId)
+      if (!latest || isJobExcluded(latest) || hasCompleteJobDetail(latest)) return latest ?? null
+      record = latest
       try {
-        run.phase = '获取详情'
-        await this.onJobCardClick(record.key, () => this.gatheringIssue(run))
+        const history = await this.waitForCollectionStorage(
+          () => counter.historyDetails({ type: 'read' }),
+          '检查历史补全任务',
+          run,
+        )
+        if (history?.owner && history.expiresAt > Date.now()) {
+          run.status = 'stopped'
+          run.error = '历史补全正在另一页面运行'
+          return null
+        }
+        const detail = await this.fetchJobDetail(record, run)
         if (this.gatheringIssue(run)) return null
-        record.detail = job.rawData.detail as BossZpDetailData
+        assertCompleteJobDetail(detail, record.encryptJobId)
+        record.detail = detail
         record.detailStatus = 'complete'
         record.failureReason = undefined
       } catch (error) {
@@ -1227,10 +1513,17 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         record.detailStatus = 'failed'
         record.detailRetryCount++
         record.failureReason = error instanceof Error ? error.message : String(error)
-        const issue = this.detectCollectionIssue(record.failureReason)
+        const issue = detailStopReason(record.failureReason, true)
         if (issue) {
           run.status = issue
           run.error = record.failureReason
+          this.haltAutomaticDetails()
+        } else if (
+          /标签页已被关闭|任务已中断|所有权|另一页面|已到时限/.test(record.failureReason)
+        ) {
+          run.status = 'stopped'
+          run.error = record.failureReason
+          this.haltAutomaticDetails()
         }
       }
     }
@@ -1240,7 +1533,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           type: 'detail',
           jobId: record.encryptJobId,
           patch: {
-            detail: record.detail,
+            detail: record.detailStatus === 'complete' ? record.detail : undefined,
             detailStatus: record.detailStatus,
             detailRetryCount: record.detailRetryCount,
             failureReason: record.failureReason,
@@ -1250,6 +1543,213 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       run,
     )
     return result.records.find((item) => item.encryptJobId === record.encryptJobId)!
+  }
+
+  async completeHistoricalDetails(resume = false) {
+    if (
+      this.detailPromise ||
+      this.gatheringBusy.value ||
+      this.savedAnalyzer.busy.value ||
+      this.collectionStoragePending ||
+      this.realtimeBusy.value ||
+      this.keywordRotationBusy.value ||
+      this.workflow?.status.value === 'running'
+    )
+      throw new Error('请先停止当前任务并等待保存确认')
+    const token = crypto.randomUUID()
+    const run = reactive<HistoryDetailRun>({
+      id: '',
+      jobIds: [],
+      cursor: 0,
+      skipped: 0,
+      owner: token,
+      expiresAt: 0,
+      status: 'running',
+      completed: 0,
+      failed: 0,
+      retryable: 0,
+      total: 0,
+      phase: '读取历史补全断点',
+    })
+    this.beginGatheringSession()
+    this.detailRun.value = run
+    this.historyDetailRun.value = run
+    this.gatheringKind.value = 'detail'
+    this.gatheringBusy.value = true
+    const started = performance.now()
+    this.detailPromise = (async () => {
+      let acquired = false
+      let renewing: Promise<unknown> | null = null
+      let timer: ReturnType<typeof setInterval> | undefined
+      let renewalDeadline: ReturnType<typeof setTimeout> | undefined
+      let finishing = false
+      try {
+        this.collectionDelay('Detail')
+        const saved = await this.waitForCollectionStorage(
+          () => counter.historyDetails({ type: resume ? 'resume' : 'start', token }),
+          '读取历史补全断点',
+          run,
+        )
+        if (!saved) throw new Error('历史补全断点不可用')
+        const status = run.status
+        Object.assign(run, saved, { status })
+        acquired = true
+        timer = setInterval(() => {
+          if (renewing) return
+          renewing = Promise.race([
+            counter.historyDetails({ type: 'renew', token }),
+            new Promise<never>((_, reject) => {
+              renewalDeadline = setTimeout(
+                () => reject(new Error('历史补全续租超时；已保留断点，请稍后继续')),
+                8000,
+              )
+            }),
+          ])
+            .catch((error) => {
+              if (finishing) return
+              run.status = 'unknown_error'
+              run.error = error instanceof Error ? error.message : String(error)
+            })
+            .finally(() => {
+              clearTimeout(renewalDeadline)
+              renewing = null
+            })
+        }, 10_000)
+        while (run.cursor < run.total) {
+          if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run))) break
+          const jobId = run.jobIds[run.cursor]!
+          let record = (
+            await this.waitForCollectionStorage(() => this.readJobLibrary(), '读取本地岗位库', run)
+          ).find((r) => r.encryptJobId === jobId)
+          let result: 'completed' | 'failed' | 'skipped' = 'skipped'
+          if (record && !isJobExcluded(record) && !hasCompleteJobDetail(record)) {
+            run.currentJob = record.snapshot.jobName
+            run.phase = '等待历史岗位详情'
+            if (!(await this.waitForGathering(this.collectionDelay('Detail'), run))) break
+            await this.waitForCollectionStorage(
+              () => counter.historyDetails({ type: 'renew', token }),
+              '确认历史补全所有权',
+              run,
+            )
+            // Reread after pacing: another client may have completed or removed this job.
+            record = (
+              await this.waitForCollectionStorage(
+                () => this.readJobLibrary(),
+                '读取本地岗位库',
+                run,
+              )
+            ).find((r) => r.encryptJobId === jobId)
+            if (record && !isJobExcluded(record) && !hasCompleteJobDetail(record)) {
+              let detail: BossZpDetailData | undefined
+              let failureReason: string | undefined
+              try {
+                if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run))) break
+                const value = await this.fetchJobDetail(record, run, token)
+                if (this.gatheringIssue(run)) break
+                assertJobLibrary([{ ...record, detail: value, detailStatus: 'complete' }])
+                detail = value
+              } catch (error) {
+                failureReason = error instanceof Error ? error.message : String(error)
+                diagnostic('historyDetail.capture', {
+                  error,
+                  context: { phase: `历史补全 ${run.cursor + 1}/${run.total}` },
+                })
+                const issue = detailStopReason(failureReason, true)
+                if (issue) {
+                  run.status = issue
+                  run.error = failureReason
+                  this.haltAutomaticDetails()
+                  break
+                }
+                if (/标签页已被关闭|任务已中断|所有权|另一页面|已到时限/.test(failureReason)) {
+                  run.status = 'stopped'
+                  run.error = failureReason
+                  this.haltAutomaticDetails()
+                  break
+                }
+              }
+              if (this.gatheringIssue(run)) break
+              result = detail ? 'completed' : 'failed'
+              const detailRetryCount = record.detailRetryCount + (detail ? 0 : 1)
+              const saved = await this.waitForCollectionStorage(
+                () =>
+                  this.mutateJobLibrary({
+                    type: 'detail',
+                    jobId,
+                    historyToken: token,
+                    patch: {
+                      detail,
+                      detailStatus: detail ? 'complete' : 'failed',
+                      detailRetryCount,
+                      failureReason,
+                    },
+                  }),
+                '保存历史岗位详情',
+                run,
+              )
+              const latest = saved.records.find((r) => r.encryptJobId === jobId)
+              if (!latest || isJobExcluded(latest)) result = 'skipped'
+              else result = hasCompleteJobDetail(latest) ? 'completed' : 'failed'
+            }
+          }
+          const next = await this.waitForCollectionStorage(
+            () => counter.historyDetails({ type: 'advance', token, jobId, result }),
+            '保存历史补全断点',
+            run,
+          )
+          if (!next) throw new Error('历史补全断点不可用')
+          for (const key of ['cursor', 'completed', 'failed', 'skipped'] as const)
+            run[key] = next[key]
+        }
+        if (!this.gatheringIssue(run) && (await this.waitForGathering(0, run)))
+          run.status = 'completed'
+      } catch (error) {
+        if (run.status !== 'stopped') run.status = 'unknown_error'
+        run.error = error instanceof Error ? error.message : String(error)
+      } finally {
+        finishing = true
+        clearInterval(timer)
+        clearTimeout(renewalDeadline)
+        if (acquired && !this.collectionStoragePending) {
+          try {
+            await this.waitForCollectionStorage(
+              () =>
+                counter.historyDetails({
+                  type: 'finish',
+                  token,
+                  status: run.status,
+                  error: run.error,
+                }),
+              '保存历史补全状态',
+              run,
+            )
+            run.owner = ''
+            run.expiresAt = 0
+          } catch (error) {
+            run.status = 'unknown_error'
+            run.error = error instanceof Error ? error.message : String(error)
+          }
+        }
+        run.waitSeconds = undefined
+        run.phase = '历史补全已结束'
+        await this.closeDetailAccess()
+        this.detailPromise = null
+        this.gatheringBusy.value = false
+        this.endGatheringSession()
+        diagnostic('historyDetail.finish', {
+          level: run.status !== 'completed' || run.failed ? 'error' : undefined,
+          error: run.error,
+          durationMs: performance.now() - started,
+          context: {
+            status: run.status,
+            count: run.completed,
+            phase: `历史补全 ${run.cursor}/${run.total}；失败 ${run.failed}；跳过 ${run.skipped}`,
+          },
+        })
+      }
+      return run
+    })()
+    return this.detailPromise
   }
 
   async completeCollectedDetails(options: { availableOnly?: boolean } = {}) {
@@ -1270,6 +1770,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       total: 0,
       phase: '读取本地岗位库',
     })
+    this.beginGatheringSession(!options.availableOnly)
     this.detailRun.value = run
     this.gatheringKind.value = 'detail'
     this.gatheringBusy.value = true
@@ -1277,6 +1778,13 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     this.detailPromise = (async () => {
       try {
         this.collectionDelay('Detail')
+        const history = await this.waitForCollectionStorage(
+          () => counter.historyDetails({ type: 'read' }),
+          '检查历史补全任务',
+          run,
+        )
+        if (history?.owner && history.expiresAt > Date.now())
+          throw new Error('历史补全正在另一页面运行')
         const records = await this.waitForCollectionStorage(
           () => this.readJobLibrary(),
           '读取本地岗位库',
@@ -1286,7 +1794,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           .filter(
             (record) =>
               !isJobExcluded(record) &&
-              record.detailStatus !== 'complete' &&
+              !hasCompleteJobDetail(record) &&
               (!options.availableOnly || this.jobMaps.has(record.key)),
           )
           .sort((a, b) => Number(this.jobMaps.has(b.key)) - Number(this.jobMaps.has(a.key)))
@@ -1316,15 +1824,16 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
         })
         run.waitSeconds = undefined
         run.phase = run.status === 'stopped' ? '已停止' : '详情批次结束'
+        if (!this.keywordRotationBusy.value || run.status !== 'completed')
+          await this.closeDetailAccess()
         this.detailPromise = null
         this.gatheringBusy.value = false
+        this.endGatheringSession()
         if (!options.availableOnly || run.status !== 'completed') {
           void this.notification(
             `详情补全${gatheringStatusText[run.status]}，成功 ${run.completed} 个，失败 ${run.failed} 个${run.error ? `；${run.error}` : ''}`,
           )
         }
-        if (options.availableOnly && run.status === 'completed' && run.total > 0)
-          this.scheduleBackgroundDetailCompletion()
       }
       return run
     })()
@@ -1346,7 +1855,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     }
   }
 
-  async sendSavedGreeting(jobId: string): Promise<void> {
+  async sendSavedGreeting(jobId: string, expectedGreeting?: string): Promise<void> {
     if (!jobId?.trim()) throw new Error('缺少岗位 ID')
     if (
       this.savedAnalyzer.busy.value ||
@@ -1359,20 +1868,41 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     let record = (await this.getJobLibrary()).find((item) => item.encryptJobId === jobId)
     if (!record) throw new Error('未找到已保存岗位')
     if (isJobExcluded(record)) throw new Error('Excluded jobs are not processed')
+    if (record.sendStatus !== 'pending')
+      throw new Error('该岗位已发送或发送结果待确认，请先查看 BOSS 沟通记录')
     const greeting = record.finalGreeting?.trim()
     if (!greeting) throw new Error('该岗位暂无已保存招呼语')
-    if (record.detailStatus !== 'complete' || !record.detail?.jobInfo?.postDescription?.trim()) {
+    if (expectedGreeting !== undefined && greeting !== expectedGreeting.trim())
+      throw new Error('招呼语已在其他窗口更新，请重新确认后发送')
+    if (!hasCompleteJobDetail(record)) {
       record = await this.ensureSavedJobDetails(jobId)
     }
     const job = this.jobMaps.get(record.key)
     if (!job) throw new Error('请回到该岗位所在的 BOSS 搜索页后再发送')
     if (!record.detail) throw new Error('岗位详情未补全完成')
-    job.rawData.detail = record.detail
-    job.rawData.boss = await getBossData({
-      securityId: job.rawData.jobitem.securityId,
-      encryptUserId: this.uid,
-    })
-    await this.sendMessage({ jobData: job.jobData, rawData: job.rawData, state: {} }, greeting)
+    this.realtimeBusy.value = true
+    let queued = false
+    try {
+      queued = (await this.mutateJobLibrary({ type: 'send', jobId, status: 'queued', greeting }))
+        .updated
+      if (!queued) throw new Error('岗位状态已变化，请重新查看后再发送')
+      job.rawData.detail = record.detail
+      if (!job.rawData.jobitem.contact) {
+        await sendPublishReq({ securityId: job.rawData.jobitem.securityId, encryptJobId: jobId })
+        job.rawData.jobitem.contact = true
+      }
+      job.rawData.boss = await getBossData({
+        securityId: job.rawData.jobitem.securityId,
+        encryptUserId: this.uid,
+      })
+      await this.sendMessage({ jobData: job.jobData, rawData: job.rawData, state: {} }, greeting)
+      await this.mutateJobLibrary({ type: 'send', jobId, status: 'sent' })
+    } catch (error) {
+      if (queued) await this.mutateJobLibrary({ type: 'send', jobId, status: 'unknown' })
+      throw error
+    } finally {
+      this.realtimeBusy.value = false
+    }
   }
 
   async ensureSavedJobDetails(jobId: string): Promise<BossJobLibraryRecord> {
@@ -1392,24 +1922,31 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     const record = records.find((item) => item.encryptJobId === jobId)
     if (!record) throw new Error('未找到已保存岗位')
     if (isJobExcluded(record)) throw new Error('Excluded jobs are not processed')
-    if (record.detailStatus === 'complete' && record.detail?.jobInfo?.postDescription?.trim())
-      return record
-    const job = this.jobMaps.get(record.key)
-    if (!job) throw new Error('请回到该岗位所在 BOSS 搜索页后再补全详情')
-    await this.onJobCardClick(record.key)
-    const detail = job.rawData.detail as BossZpDetailData | undefined
-    if (!detail?.jobInfo?.postDescription?.trim()) throw new Error('岗位详情未返回完整 JD')
-    const result = await this.waitForCollectionStorage(
-      () =>
-        this.mutateJobLibrary({
-          type: 'detail',
-          jobId,
-          patch: { detail, detailStatus: 'complete' },
-        }),
-      '保存详情',
-      null,
-    )
-    return result.records.find((item) => item.encryptJobId === jobId)!
+    if (hasCompleteJobDetail(record)) return record
+    this.beginGatheringSession()
+    const run = reactive<DetailRun>({
+      status: 'running',
+      completed: 0,
+      failed: 0,
+      retryable: 0,
+      total: 1,
+    })
+    this.detailRun.value = run
+    this.gatheringKind.value = 'detail'
+    this.gatheringBusy.value = true
+    try {
+      const saved = await this.completeCollectedJob(record, run)
+      if (!saved || saved.detailStatus !== 'complete')
+        throw new Error(run.error || saved?.failureReason || '详情仍待补全')
+      run.status = 'completed'
+      run.completed = 1
+      return saved
+    } finally {
+      if (['running', 'paused'].includes(run.status)) run.status = 'stopped'
+      await this.closeDetailAccess()
+      this.gatheringBusy.value = false
+      this.endGatheringSession()
+    }
   }
 
   async getAnalysisHandoff() {
@@ -1447,6 +1984,18 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     return result.updated
   }
 
+  async saveJobGreeting(jobId: string, greeting: string): Promise<boolean> {
+    if (this.gatheringBusy.value || this.collectionStoragePending)
+      throw new Error('已有任务正在运行或等待保存，请稍后重试')
+    return (
+      await this.waitForCollectionStorage(
+        () => this.mutateJobLibrary({ type: 'greeting', jobId, greeting }),
+        '保存招呼语',
+        null,
+      )
+    ).updated
+  }
+
   async updateJobFunnelStage(jobId: string, stage: FunnelStage | null): Promise<boolean> {
     if (this.gatheringBusy.value || this.collectionStoragePending)
       throw new Error('已有任务正在运行或等待保存，请稍后重试')
@@ -1474,7 +2023,8 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
 
     const stanza = {
       uid: Number(data.rawData.boss.data.bossId),
-      friendSource: data.rawData.detail.bossInfo.bossSource ?? 0,
+      friendSource:
+        data.rawData.detail.bossInfo?.bossSource ?? data.rawData.boss.data.bossSource ?? 0,
       encryptUid: data.rawData.jobitem.encryptBossId,
       encryptGid: '',
       clientMid: Date.now(),
@@ -1554,13 +2104,18 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     }
     this.mounted = true
     this.mountedPath = path
-    this.scheduleBackgroundDetailCompletion()
     if (this.keywordRotation.value?.status === 'running') {
       void this.startKeywordRotation().catch((error) => {
         this.keywordRotationError.value = error instanceof Error ? error.message : String(error)
       })
     }
   }
+  openJob(key: string) {
+    const job = this.jobMaps.get(key)
+    if (!job) throw new Error('未找到job数据')
+    this._clickJobCardAction(job.rawData.jobitem)
+  }
+
   override async onJobCardClick(key: string, shouldStop?: () => boolean) {
     // const detail = await requestDetail({
     //   securityId: job.rawData.jobitem.securityId,
@@ -1570,11 +2125,11 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     if (!job) {
       throw new Error('未找到job数据')
     }
-    if (isInitialized(job.rawData.detail)) {
+    if (isInitialized(job.rawData.detail) && job.rawData.detail.jobInfo?.postDescription?.trim()) {
       return
     }
     if (shouldStop?.()) throw new Error('详情补全已停止')
-    this._clickJobCardAction(job.rawData.jobitem)
+    this.openJob(key)
     const deadline = Date.now() + 60000
     while (!this._jobDetail.value || this._jobDetail.value.lid !== job.rawData.jobitem.lid) {
       if (shouldStop?.()) throw new Error('详情补全已停止')
@@ -1630,12 +2185,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
             state: {},
           })
         })
-        if (this.autoCaptureEnabled.value) {
-          void this.captureNewJobs(v).catch((error) => {
-            logger.error('自动保存新岗位失败', error)
-          })
-        }
-        this.scheduleBackgroundDetailCompletion()
+        this.captureViewedJobDetail(this._jobDetail.value)
       },
     )()
   }
@@ -1658,6 +2208,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
       '#wrap .page-job-wrapper,.job-recommend-main,.page-jobs-main',
       'jobDetail',
       this._jobDetail,
+      (detail) => this.captureViewedJobDetail(detail),
     )()
   }
 

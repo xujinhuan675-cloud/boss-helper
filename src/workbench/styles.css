@@ -278,6 +278,18 @@ pre {
   max-width: 720px;
   margin-inline: auto;
 }
+.page-jobs-section-pinned {
+  position: sticky;
+  top: 3rem;
+  z-index: 10;
+  max-height: calc(100dvh - 3rem);
+  overflow-y: auto;
+  scroll-margin-top: 3rem;
+  background: var(--background);
+}
+.page-jobs-only > :not(.page-jobs-section) {
+  display: none;
+}
 .sidepanel-header-controls {
   display: flex;
   min-width: 0;

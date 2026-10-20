@@ -1,5 +1,6 @@
 // @ts-nocheck -- Bun test type declarations are absent in this repository.
 import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test'
+import { createRequire } from 'node:module'
 
 import { defineProxy } from 'comctx'
 import { computed, reactive, ref, watchSyncEffect } from 'vue'
@@ -24,12 +25,17 @@ import {
   keywordRotationDateKey,
 } from './keywordRotation'
 import type { BossZpJobItemData } from './types'
+import { createExecutorBridge } from './workbench'
+
+const require = createRequire(new URL('../../../packages/devlog-ui/package.json', import.meta.url))
+const { JSDOM } = require('jsdom')
 
 const conf = {
   formData: { notification: { value: true } },
 }
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
+let jobDetailHookCallback: ((value: unknown) => void) | undefined
 let getRoot = async () => ({})
 let nativePage
 mock.module('@/composables/conf', () => ({ appearanceConf: ref({}), useConf: () => conf }))
@@ -48,9 +54,10 @@ mock.module('@/composables/useHelper', () => ({
     pendingMessages = ref(undefined)
   },
 }))
+let detailInitialized = false
 mock.module('@/composables/useApplying/type', () => ({
   createLazyObject: () => ({}),
-  isInitialized: () => false,
+  isInitialized: () => detailInitialized,
 }))
 mock.module('@/composables/useVue', () => ({
   getRootVue: () => getRoot(),
@@ -60,6 +67,8 @@ mock.module('@/composables/useVue', () => ({
       if (key === 'jobList' && typeof callback === 'function') {
         jobListHookCallback = callback as (value: BossZpJobItemData[]) => void
       }
+      if (key === 'jobDetail' && typeof callback === 'function')
+        jobDetailHookCallback = callback as (value: unknown) => void
     },
   useHookVueFn: () => async () => {},
 }))
@@ -89,8 +98,54 @@ mock.module('./chat', () => ({
 let createWorkflow: () => Promise<unknown> = async () => ({})
 mock.module('./delivery', () => ({ bossWorkflow: () => createWorkflow() }))
 let bossDataRequests: Array<{ securityId: string; encryptUserId: string }> = []
+let publishRequests = []
+let publishGreeting = async () => {}
+let historyRequests = []
+let urlCommands = []
+let urlContext
+// Reuse existing JD fixtures and request-completion callbacks at the URL transport boundary.
+async function fixtureUrlCommand(command) {
+  urlCommands.push(command)
+  if (command.type === 'read') {
+    const key = `boss::${command.jobId}`
+    const run =
+      urlContext.gatheringKind.value === 'detail'
+        ? urlContext.detailRun.value
+        : urlContext.collectionRun.value
+    if (Object.hasOwn(urlContext, 'onJobCardClick'))
+      await urlContext.onJobCardClick(key, () => urlContext['gatheringIssue'](run))
+    const live = urlContext.jobMaps.get(key)?.rawData?.detail
+    const detail = live?.jobInfo
+      ? live
+      : urlContext._jobDetail.value?.jobInfo
+        ? urlContext._jobDetail.value
+        : live
+    if (!detail?.jobInfo) return { status: 'failed', error: '测试详情页面未返回正文' }
+    return {
+      status: 'ready',
+      jobId: command.jobId,
+      detail: { ...detail, jobInfo: { encryptId: command.jobId, ...detail.jobInfo } },
+    }
+  }
+  return null
+}
+let urlCommand = fixtureUrlCommand
+let historyCommand = (library, command) => library.historyDetails(command)
+let historyResponse = async (params) => ({
+  code: 0,
+  message: '',
+  zpData: { jobInfo: { encryptId: params.lid.slice(4), postDescription: 'Historical JD' } },
+})
 mock.module('./requests', () => ({
+  sendPublishReq: async (params) => {
+    publishRequests.push(params)
+    await publishGreeting()
+  },
   uploadImage() {},
+  getJobDetail: async (params) => {
+    historyRequests.push(params)
+    return historyResponse(params)
+  },
   getBossData: async (job: { securityId: string; encryptUserId: string }) => {
     bossDataRequests.push(job)
     return { data: { bossId: 42, securityId: job.securityId, bossSource: 7 } }
@@ -141,6 +196,7 @@ const { BossHelperCtx, runBoss } = await import('./runtime')
 
 function context() {
   const ctx = new BossHelperCtx()
+  urlContext = ctx
   // 时间边界另有回归；存储与列表测试不等待真实的操作间隔。
   Object.assign(ctx, {
     waitForGathering: async () => true,
@@ -353,6 +409,8 @@ const root = {
 }
 
 beforeEach(() => {
+  publishRequests = []
+  publishGreeting = async () => {}
   data.clear()
   desktopNotifications = []
   pageNotifications = []
@@ -409,10 +467,20 @@ beforeEach(() => {
   visualDelayCalls = 0
   modelRequests = []
   bossDataRequests = []
+  historyRequests = []
+  urlCommands = []
+  urlCommand = fixtureUrlCommand
+  historyCommand = (library, command) => library.historyDetails(command)
+  historyResponse = async (params) => ({
+    code: 0,
+    message: '',
+    zpData: { jobInfo: { encryptId: params.lid.slice(4), postDescription: 'Historical JD' } },
+  })
   modelRespond = async (role) => (role === 'filtering' ? filteringResponse : '招呼语草稿')
   for (const key of Object.keys(conf.formData)) {
     if (
       key.startsWith('delayCollection') ||
+      key === 'collectionMaxRuntimeMinutes' ||
       key.startsWith('delayKeywordRotation') ||
       key.startsWith('keywordRotation')
     )
@@ -420,6 +488,7 @@ beforeEach(() => {
   }
   selectors = new Map()
   jobListHookCallback = undefined
+  jobDetailHookCallback = undefined
   root.scrollTop = 0
   Object.assign(globalThis, {
     location: { href: 'https://www.zhipin.com/web/geek/jobs?query=AI' },
@@ -430,6 +499,7 @@ beforeEach(() => {
       documentElement: root,
       body: { scrollHeight: 2000, scrollTop: 0, innerText: '' },
       querySelector: (s: string) => selectors.get(s) ?? null,
+      querySelectorAll: () => [],
       createElement: () => ({ remove() {} }),
     },
     window: { innerHeight: 800, scrollY: 0 },
@@ -449,6 +519,8 @@ beforeEach(() => {
       storageGet: (key: string, fallback: unknown) => getStored(key, fallback),
       storageSet: (key: string, value: unknown) => setStored(key, value),
       updateJobLibrary: (mutation) => library.update(mutation),
+      historyDetails: (command) => historyCommand(library, command),
+      detailAccess: (command) => urlCommand(command),
       claimJobAnalysis: (id, token, duration) => library.claimAnalysis(id, token, duration),
       releaseJobAnalysis: (id, token) => library.releaseAnalysis(id, token),
     }),
@@ -1012,7 +1084,7 @@ describe('collection with immediate analysis', () => {
     expect((await ctx.savedAnalyzer.start({ collectNew: true })).status).toBe('completed')
     expect(desktopNotifications).toHaveLength(1)
     expect(desktopNotifications[0]).toContain('采集并分析')
-    expect(desktopNotifications[0]).toContain('2')
+    expect(desktopNotifications[0]).toContain('1/1')
     expect(pageNotifications).toHaveLength(1)
   })
 
@@ -1195,8 +1267,12 @@ describe('collection with immediate analysis', () => {
     expect(ctx.keywordRotationSaving.value).toBe(false)
   })
 
-  it('resumes current pending jobs and persists score, greeting and resume identity before collection continues', async () => {
+  it('analyzes saved complete jobs locally and persists new results before collection continues', async () => {
     const ctx = pipelineContext()
+    Object.assign(data.get(JOB_LIBRARY_STORAGE_KEY)[0], {
+      detailStatus: 'complete',
+      detail: { jobInfo: { postDescription: 'Saved full JD' } },
+    })
     Object.assign(ctx, {
       scrollDown: () => {
         expect(data.get(JOB_LIBRARY_STORAGE_KEY).map((record) => record.analysisStatus)).toEqual([
@@ -1420,6 +1496,29 @@ describe('collection with immediate analysis', () => {
 })
 
 describe('saved job analysis data boundary', () => {
+  it('reselects a cached job on explicit opening while keeping detail acquisition cached', async () => {
+    const ctx = context()
+    const jobitem = { ...item('a'), lid: 'lid-a' }
+    const detail = { lid: 'lid-a', jobInfo: { postDescription: 'Cached JD' } }
+    ctx.jobMaps.set('boss::a', { rawData: { jobitem, detail } })
+    ctx._jobDetail.value = { lid: 'lid-b' }
+    const opened = []
+    ctx._clickJobCardAction = (value) => opened.push(value)
+    detailInitialized = true
+    try {
+      await ctx.onJobCardClick('boss::a')
+      expect(opened).toEqual([])
+
+      ctx.openJob('boss::a')
+      ctx.openJob('boss::a')
+
+      expect(opened).toEqual([jobitem, jobitem])
+      expect(() => ctx.openJob('boss::missing')).toThrow('未找到job数据')
+    } finally {
+      detailInitialized = false
+    }
+  })
+
   it('maps saved snapshots and details without opening cards or reading live job maps', () => {
     const ctx = context()
     const record = mergeJobRecords(
@@ -1495,6 +1594,59 @@ describe('saved job analysis data boundary', () => {
     })
   })
 
+  it.each([false, true])(
+    'manual sidebar save persists fetched details with auto capture set to %s',
+    async (enabled) => {
+      const ctx = context()
+      ctx.autoCaptureEnabled.value = enabled
+      const other = mergeJobRecords([], [item('other')], 'AI', 'batch').records[0]
+      data.set(JOB_LIBRARY_STORAGE_KEY, [other])
+      const otherBefore = JSON.stringify(other)
+      ctx.jobMaps.set('boss::single', {
+        rawData: {
+          jobitem: { ...item('single'), lid: 'lid-single', securityId: 'security-single' },
+        },
+      })
+      const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+
+      const result = await bridge.command({ type: 'captureJob', key: 'boss::single' })
+
+      expect(result).toMatchObject({
+        encryptJobId: 'single',
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: 'Historical JD' } },
+      })
+      const records = data.get(JOB_LIBRARY_STORAGE_KEY)
+      expect(records).toHaveLength(2)
+      expect(records.find((record) => record.encryptJobId === 'single')).toEqual(result)
+      expect(JSON.stringify(records.find((record) => record.encryptJobId === 'other'))).toBe(
+        otherBefore,
+      )
+      expect(historyRequests).toHaveLength(1)
+      expect(historyRequests[0].lid).toBe('lid-single')
+      expect(ctx.autoCaptureEnabled.value).toBe(enabled)
+      expect(ctx.gatheringBusy.value).toBe(false)
+    },
+  )
+
+  it('manual sidebar save preserves the snapshot and reports detail retrieval failure', async () => {
+    const ctx = context()
+    ctx.autoCaptureEnabled.value = false
+    ctx.jobMaps.set('boss::single', { rawData: { jobitem: item('single') } })
+    const state = { ready: true, error: '', lastError: '' }
+    const bridge = createExecutorBridge(ctx, state)
+
+    await expect(bridge.command({ type: 'captureJob', key: 'boss::single' })).rejects.toThrow(
+      '未返回正文',
+    )
+
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+      { encryptJobId: 'single', detailStatus: 'failed', snapshot: item('single') },
+    ])
+    expect(state.lastError).toContain('未返回正文')
+    expect(ctx.gatheringBusy.value).toBe(false)
+  })
+
   it('completes one saved job from the current live card and preserves library state', async () => {
     const ctx = context()
     const record = mergeJobRecords([], [item('single')], 'AI', 'batch').records[0]
@@ -1527,8 +1679,8 @@ describe('saved job analysis data boundary', () => {
     const record = mergeJobRecords([], [item('missing-live')], 'AI', 'batch').records[0]
     data.set(JOB_LIBRARY_STORAGE_KEY, [record])
 
-    await expect(ctx.ensureSavedJobDetails(record.encryptJobId)).rejects.toThrow('搜索页')
-    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    await expect(ctx.ensureSavedJobDetails(record.encryptJobId)).rejects.toThrow('未返回正文')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('failed')
   })
 
   it('saves analysis against the latest library without replacing detail, audit or other jobs', async () => {
@@ -1754,6 +1906,39 @@ describe('saved job analysis data boundary', () => {
 })
 
 describe('realtime workflow startup lock', () => {
+  it('stops the realtime workflow when its runtime timer expires', async () => {
+    const ctx = context()
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    const timeout = globalThis.setTimeout
+    let expire
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
+      if (ms === 60 * 60_000) {
+        expire = callback
+        return 0
+      }
+      return timeout(callback, ms, ...args)
+    })
+    let stopped = false
+    ctx.workflow = {
+      status: ref('pending'),
+      stop() {
+        stopped = true
+      },
+      async executeAll() {
+        now += 60 * 60_000
+        expire?.()
+      },
+    }
+    try {
+      await ctx.start()
+      expect(stopped).toBe(true)
+      expect(ctx.realtimeBusy.value).toBe(false)
+    } finally {
+      clock.mockRestore()
+      timer.mockRestore()
+    }
+  })
   it('blocks collection, details and duplicate starts while workflow initialization is pending', async () => {
     const ctx = context()
     let release!: (workflow: unknown) => void
@@ -1832,23 +2017,30 @@ it('captures only unseen job snapshots without fetching details', async () => {
   })
 })
 
-it('starts background detail completion from passive job-list updates without capturing when disabled', async () => {
+it('keeps saved details untouched on passive job-list updates when auto capture is disabled', async () => {
   const ctx = context()
-  let scheduled = 0
-  ctx.scheduleBackgroundDetailCompletion = () => {
-    scheduled++
+  ctx['mounted'] = true
+  const records = mergeJobRecords([], [item('visible')], 'AI', 'old').records
+  data.set(JOB_LIBRARY_STORAGE_KEY, structuredClone(records))
+  let clicks = 0
+  ctx.onJobCardClick = async (key) => {
+    clicks++
+    ctx.jobMaps.get(key).rawData.detail = { jobInfo: { postDescription: 'JD' } }
   }
 
   await ctx._initJobList()
   expect(jobListHookCallback).toBeDefined()
   jobListHookCallback?.([item('visible')])
+  await Promise.resolve()
+  await ctx['detailPromise']
 
-  expect(scheduled).toBe(1)
-  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toBeUndefined()
+  expect(clicks).toBe(0)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(records)
 })
 
-it('captures passive job-list updates when auto capture is enabled', async () => {
+it('leaves passive job-list updates unsaved even when browsing capture is enabled', async () => {
   const ctx = context()
+  ctx['mounted'] = true
   ctx.autoCaptureEnabled.value = true
 
   await ctx._initJobList()
@@ -1856,15 +2048,14 @@ it('captures passive job-list updates when auto capture is enabled', async () =>
   jobListHookCallback?.([item('visible')])
   await ctx['jobCapturePromise']
 
-  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
-    { encryptJobId: 'visible', detailStatus: 'pending' },
-  ])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+  expect(historyRequests).toEqual([])
+  expect(urlCommands).toEqual([])
 })
 
-it('stops queued or active background detail completion when auto capture is disabled', async () => {
+it('does not interrupt an explicit detail task when browsing capture is disabled', async () => {
   const ctx = context()
   let stopped = 0
-  ctx['backgroundDetailQueued'] = true
   ctx['detailPromise'] = Promise.resolve()
   ctx.stopGathering = () => {
     stopped++
@@ -1873,8 +2064,94 @@ it('stops queued or active background detail completion when auto capture is dis
   await ctx.setAutoCaptureEnabled(false)
 
   expect(ctx.autoCaptureEnabled.value).toBe(false)
-  expect(ctx['backgroundDetailQueued']).toBe(false)
-  expect(stopped).toBe(1)
+  expect(stopped).toBe(0)
+})
+
+describe('capture while browsing details', () => {
+  async function browsingContext() {
+    const ctx = context()
+    await ctx._initJobList()
+    await ctx._initJobDetail()
+    ctx._jobList.value = [item('viewed'), item('other')]
+    jobListHookCallback?.(ctx._jobList.value)
+    return ctx
+  }
+  const viewedDetail = () => ({
+    jobInfo: { encryptId: 'viewed', postDescription: 'Full viewed JD' },
+  })
+
+  it('enables capture without collecting the current list or requesting details', async () => {
+    const ctx = await browsingContext()
+    await ctx.setAutoCaptureEnabled(true)
+    await ctx['jobCapturePromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+  })
+
+  it('saves the viewed JD once and leaves the other visible job untouched', async () => {
+    const ctx = await browsingContext()
+    ctx.autoCaptureEnabled.value = true
+    let writes = 0
+    const write = setStored
+    setStored = async (key, value) => {
+      if (key === JOB_LIBRARY_STORAGE_KEY) writes++
+      return write(key, value)
+    }
+    expect(jobDetailHookCallback).toBeDefined()
+    jobDetailHookCallback?.(viewedDetail())
+    jobDetailHookCallback?.(viewedDetail())
+    await ctx['jobCapturePromise']
+    const savedWrites = writes
+    jobDetailHookCallback?.(viewedDetail())
+    await ctx['jobCapturePromise']
+    expect(writes).toBe(savedWrites)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+      { encryptJobId: 'viewed', detailStatus: 'complete', detail: viewedDetail() },
+    ])
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(1)
+    expect(ctx.jobMaps.get('boss::viewed').jobData.jobDescription).toBe('Full viewed JD')
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+  })
+
+  it('fills an already stored pending job without losing its workflow state', async () => {
+    const ctx = await browsingContext()
+    const record = mergeJobRecords([], [item('viewed')], 'old', 'old-batch').records[0]
+    record.manualFunnelStage = 'interview'
+    data.set(JOB_LIBRARY_STORAGE_KEY, [record])
+    ctx.autoCaptureEnabled.value = true
+    jobDetailHookCallback?.(viewedDetail())
+    await ctx['jobCapturePromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+      { detailStatus: 'complete', manualFunnelStage: 'interview', sourceKeywords: ['old'] },
+    ])
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+  })
+
+  it.each([
+    undefined,
+    {},
+    { jobInfo: { encryptId: 'missing', postDescription: 'Other JD' } },
+    { jobInfo: { encryptId: 'viewed', postDescription: '  ' } },
+    { jobInfo: { encryptId: 'viewed', postDescription: '请登录后查看完整内容' } },
+    { jobInfo: { encryptId: 'viewed', postDescription: 'Preview...' } },
+  ])('does not save missing, unassociated or incomplete details: %j', async (detail) => {
+    const ctx = await browsingContext()
+    ctx.autoCaptureEnabled.value = true
+    jobDetailHookCallback?.(detail)
+    await ctx['jobCapturePromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+  })
+
+  it('keeps browsing capture off without affecting the loaded detail', async () => {
+    const ctx = await browsingContext()
+    jobDetailHookCallback?.(viewedDetail())
+    await ctx['jobCapturePromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+    expect(ctx.jobMaps.get('boss::viewed').jobData.jobDescription).toBe('Full viewed JD')
+  })
 })
 
 it('persists auto capture and restores it before the first mounted job list', async () => {
@@ -1891,7 +2168,6 @@ it('persists auto capture and restores it before the first mounted job list', as
   ctx.initNetConf = () => {}
   ctx.geek = { connect: async () => {} }
   ctx.loadKeywordRotation = async () => {}
-  ctx.scheduleBackgroundDetailCompletion = () => {}
   const originalInitJobList = ctx._initJobList.bind(ctx)
   ctx._initJobList = async () => {
     await originalInitJobList()
@@ -1903,7 +2179,7 @@ it('persists auto capture and restores it before the first mounted job list', as
 
   jobListHookCallback?.([item('restored')])
   await ctx['jobCapturePromise']
-  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([{ encryptJobId: 'restored' }])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
 })
 
 it('sends a saved greeting through the existing BOSS chat sender', async () => {
@@ -1928,13 +2204,137 @@ it('sends a saved greeting through the existing BOSS chat sender', async () => {
     sent = message
   }
 
-  await ctx.sendSavedGreeting('new')
+  await expect(ctx.sendSavedGreeting('new', '其他正文')).rejects.toThrow('重新确认')
+  expect(publishRequests).toEqual([])
+  await ctx.sendSavedGreeting('new', record.finalGreeting)
 
   expect(sent).toBe(record.finalGreeting)
   expect(bossDataRequests).toEqual([{ securityId: 'security', encryptUserId: 'user' }])
+  expect(publishRequests).toEqual([{ securityId: 'security', encryptJobId: 'new' }])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus).toBe('sent')
+  await expect(ctx.sendSavedGreeting('new')).rejects.toThrow()
+  expect(publishRequests).toHaveLength(1)
+  expect(ctx.realtimeBusy.value).toBe(false)
+})
+
+it('keeps a failed first greeting uncertain and blocks duplicate submissions', async () => {
+  const ctx = context()
+  const record = mergeJobRecords([], [item('new')], '', '').records[0]
+  record.detailStatus = 'complete'
+  record.detail = { jobInfo: { postDescription: 'JD' } }
+  record.finalGreeting = '你好'
+  record.analysis = { scoringVersion: 'weighted-v1', passed: false }
+  data.set(JOB_LIBRARY_STORAGE_KEY, [record])
+  ctx.jobMaps.set('boss::new', { jobData: { key: 'boss::new' }, rawData: { jobitem: item('new') } })
+  publishGreeting = async () => {
+    throw new Error('网络中断')
+  }
+  await expect(ctx.sendSavedGreeting('new')).rejects.toThrow('网络中断')
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus).toBe('unknown')
+  await expect(ctx.sendSavedGreeting('new')).rejects.toThrow()
+  expect(publishRequests).toHaveLength(1)
+  expect(ctx.realtimeBusy.value).toBe(false)
+})
+
+it('uses the fetched recruiter source when a URL detail contains only job responsibilities', async () => {
+  const ctx = context()
+  const sent = []
+  ctx.geek = {
+    msgBuilder: { createTextMessage: (stanza) => ({ ...stanza }), encode: (message) => message },
+    client: { publish: (_topic, message) => sent.push(message) },
+  }
+  await ctx.sendMessage(
+    {
+      jobData: { key: 'boss::one' },
+      rawData: {
+        jobitem: { encryptBossId: 'recruiter' },
+        detail: { jobInfo: { encryptId: 'one', postDescription: 'URL JD' } },
+        boss: { data: { bossId: 42, bossSource: 7 } },
+      },
+    },
+    '已审核的话术',
+  )
+  expect(sent).toMatchObject([{ uid: 42, friendSource: 7, encryptUid: 'recruiter' }])
 })
 
 describe('collection runtime with the existing storage bridge', () => {
+  it('skips an existing pending job during ordinary collection', async () => {
+    const ctx = context()
+    data.set(JOB_LIBRARY_STORAGE_KEY, mergeJobRecords([], [item('saved')], 'AI', 'old').records)
+    ctx._jobList.value = [item('saved')]
+    ctx._pageHasMore.value = false
+    Object.assign(ctx, {
+      waitForNewJobs: async () => false,
+      scrollDown: () => {},
+      getScrollState: () => ({ top: 1200, height: 2000, clientHeight: 800 }),
+    })
+    expect((await ctx.collectOnly()).duplicateCount).toBeGreaterThan(0)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+  })
+  it('saves complete details for each visible batch before a virtual list replaces it', async () => {
+    const ctx = context()
+    ctx._jobList.value = [item('a')]
+    ctx.onJobCardClick = async (key) => {
+      ctx.jobMaps.get(key).rawData.detail = { jobInfo: { postDescription: `JD ${key}` } }
+    }
+    for (const id of ['a', 'b']) {
+      ctx.jobMaps.set(`boss::${id}`, { rawData: { jobitem: item(id) } })
+    }
+    let rounds = 0
+    Object.assign(ctx, {
+      scrollDown() {
+        expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => r.detailStatus === 'complete')).toBe(
+          true,
+        )
+      },
+      waitForNewJobs: async () => {
+        if (++rounds === 1) {
+          ctx._jobList.value = [item('b')]
+          ctx.jobMaps.delete('boss::a')
+          return true
+        }
+        ctx.stopCollection()
+        return false
+      },
+    })
+    expect(await ctx.collectOnly()).toMatchObject({ detailCompletedCount: 2, detailFailedCount: 0 })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.detail?.jobInfo.postDescription)).toEqual(
+      ['JD boss::a', 'JD boss::b'],
+    )
+    expect(modelRequests).toHaveLength(0)
+    expect(bossDataRequests).toHaveLength(0)
+  })
+
+  it('counts detail failures separately and tries each visible job only once per collection', async () => {
+    const ctx = context()
+    ctx._jobList.value = [item('a'), item('b')]
+    ctx._pageHasMore.value = false
+    root.scrollTop = 1200
+    for (const id of ['a', 'b']) {
+      ctx.jobMaps.set(`boss::${id}`, { rawData: { jobitem: item(id) } })
+    }
+    const clicks = []
+    ctx.onJobCardClick = async (key) => {
+      clicks.push(key)
+      if (key === 'boss::a') throw new Error('岗位详情未返回完整 JD')
+      ctx.jobMaps.get(key).rawData.detail = { jobInfo: { postDescription: 'Saved JD' } }
+    }
+    ctx.waitForNewJobs = async () => false
+    expect(await ctx.collectOnly()).toMatchObject({
+      status: 'completed',
+      detailCompletedCount: 1,
+      detailFailedCount: 1,
+    })
+    expect(clicks).toEqual(['boss::a', 'boss::b'])
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.detailStatus)).toEqual([
+      'failed',
+      'complete',
+    ])
+    expect(desktopNotifications[0]).toContain('详情成功 1 个，失败 1 个')
+  })
+
   it('passes serializable snapshots and run records to storage before scrolling the first 15 jobs', async () => {
     const ctx = context()
     ctx._jobList.value = Array.from({ length: 15 }, (_, i) => ({
@@ -2029,7 +2429,6 @@ describe('collection runtime with the existing storage bridge', () => {
         calls.push('click')
       },
       initNetConf() {},
-      scheduleBackgroundDetailCompletion() {},
       loadKeywordRotation: async () => {
         calls.push('rotation')
       },
@@ -2295,10 +2694,82 @@ describe('collection runtime with the existing storage bridge', () => {
 })
 
 describe('collection pacing, controls and persistence', () => {
+  it('interrupts a pending detail when the runtime timer fires', async () => {
+    const ctx = context()
+    ctx._jobList.value = [item('a')]
+    ctx.jobMaps.set('boss::a', { rawData: { jobitem: item('a'), detail: {} } })
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    const timeout = globalThis.setTimeout
+    let expire
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
+      if (ms === 60 * 60_000) {
+        expire = callback
+        return 0
+      }
+      return timeout(callback, ms, ...args)
+    })
+    ctx.onJobCardClick = async (_key, shouldStop) => {
+      now += 60 * 60_000
+      expire()
+      expect(shouldStop()).toBe(true)
+      throw new Error('详情补全已停止')
+    }
+    try {
+      expect(await ctx.collectOnly()).toMatchObject({
+        status: 'stopped',
+        detailFailedCount: 0,
+        error: expect.stringContaining('运行上限'),
+      })
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    } finally {
+      clock.mockRestore()
+      timer.mockRestore()
+    }
+  })
+  it('stops at the default one-hour deadline before another detail or scroll', async () => {
+    const ctx = context()
+    ctx._jobList.value = [item('a'), item('b')]
+    for (const job of ctx._jobList.value)
+      ctx.jobMaps.set(`boss::${job.encryptJobId}`, {
+        rawData: { jobitem: job, detail: { jobInfo: { postDescription: 'JD' } } },
+      })
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    const clicks = []
+    let scrolls = 0
+    Object.assign(ctx, {
+      onJobCardClick: async (key) => {
+        clicks.push(key)
+        now += 60 * 60_000
+      },
+      scrollDown: () => {
+        scrolls++
+      },
+      waitForNewJobs: async () => {
+        ctx.stopCollection()
+        return false
+      },
+    })
+    try {
+      const run = await ctx.collectOnly()
+      expect(run).toMatchObject({ status: 'stopped', error: expect.stringContaining('60 分钟') })
+      expect(clicks).toEqual(['boss::a'])
+      expect(scrolls).toBe(0)
+      expect(
+        data.get(JOB_LIBRARY_STORAGE_KEY).every((record) => record.detailStatus === 'pending'),
+      ).toBe(true)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('merges new interval defaults into old presets and preserves saved custom settings', () => {
     const old = deepmerge(defaultFormData, { delayDeliveryInterval: 20 })
     expect(old.delayCollectionScrollMin).toBe(1)
     expect(old.delayCollectionDetailMax).toBe(5)
+    expect(old.delayCollectionDetailMin).toBe(3)
+    expect(old.collectionMaxRuntimeMinutes).toBe(60)
     expect(old.delayDeliveryInterval).toBe(20)
     expect(old.delayKeywordRotationMin).toBe(300)
     expect(old.delayKeywordRotationMax).toBe(900)
@@ -2407,9 +2878,11 @@ describe('collection pacing, controls and persistence', () => {
     const paused = new Promise<void>((resolve) => {
       announce = resolve
     })
+    let pausedOnce = false
     setStored = async (key, value) => {
       data.set(key, structuredClone(value))
-      if (key === JOB_LIBRARY_STORAGE_KEY) {
+      if (key === JOB_LIBRARY_STORAGE_KEY && !pausedOnce) {
+        pausedOnce = true
         ctx.pauseGathering()
         announce()
       }
@@ -2456,7 +2929,853 @@ describe('collection pacing, controls and persistence', () => {
   })
 })
 
+describe('historical detail completion', () => {
+  function historyContext(count = 7) {
+    const records = mergeJobRecords(
+      [],
+      Array.from({ length: count }, (_, i) => ({
+        ...item(String(i)),
+        securityId: `security-${i}`,
+        lid: `lid-${i}`,
+      })),
+      '',
+      '',
+    ).records
+    data.set(JOB_LIBRARY_STORAGE_KEY, records)
+    return context()
+  }
+
+  it.each(['paused', 'stopped'])(
+    'rechecks %s after acquiring detail ownership before any API request',
+    async (status) => {
+      const ctx = historyContext(1)
+      ctx.waitForGathering = (_ms, run) =>
+        BossHelperCtx.prototype['waitForGathering'].call(ctx, 0, run)
+      let resumed = false
+      let requestedBeforeResume = false
+      let resumeTimer
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type === 'claim') {
+          if (status === 'stopped') ctx.stopGathering()
+          else {
+            ctx.pauseGathering()
+            resumeTimer = setTimeout(() => {
+              resumed = true
+              ctx.resumeGathering()
+            }, 20)
+          }
+        }
+        return null
+      }
+      const respond = historyResponse
+      historyResponse = async (params) => {
+        requestedBeforeResume ||= !resumed
+        return respond(params)
+      }
+      try {
+        const result = await ctx.completeHistoricalDetails()
+        expect(historyRequests).toHaveLength(status === 'stopped' ? 0 : 1)
+        expect(requestedBeforeResume).toBe(false)
+        expect(result.status).toBe(status === 'stopped' ? 'stopped' : 'completed')
+      } finally {
+        clearTimeout(resumeTimer)
+      }
+    },
+  )
+
+  it.each(['详情标识已过期', '网络异常，详情请求未完成', '您的环境存在异常.'])(
+    'falls back to the shared URL path after %s without needing a list',
+    async (message) => {
+      const ctx = historyContext(2)
+      historyResponse = async () => {
+        throw new Error(message)
+      }
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type === 'read')
+          return {
+            status: 'ready',
+            jobId: command.jobId,
+            detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL fetched JD' } },
+          }
+        return null
+      }
+      expect(await ctx.completeHistoricalDetails()).toMatchObject({
+        status: 'completed',
+        completed: 2,
+        cursor: 2,
+      })
+      expect(urlCommands.filter((c) => c.type === 'visit').map((c) => c.jobId)).toEqual(['0', '1'])
+      expect(new Set(urlCommands.filter((c) => c.type === 'visit').map((c) => c.token)).size).toBe(
+        1,
+      )
+      expect(urlCommands.at(-1).type).toBe('release')
+    },
+  )
+
+  it.each(['stop', 'deadline', 'restricted', 'closed'])(
+    'does not visit another URL or consume its checkpoint after %s',
+    async (mode) => {
+      const ctx = historyContext(2)
+      conf.formData.collectionMaxRuntimeMinutes = 1
+      historyResponse = async () => {
+        throw new Error('详情标识已过期')
+      }
+      const now = Date.now
+      let time = now()
+      Date.now = () => time
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type !== 'read') return null
+        if (mode === 'stop') ctx.stopGathering()
+        if (mode === 'deadline') time += 60_001
+        if (mode === 'closed') throw new Error('采集详情标签页已被关闭，任务已中断')
+        if (mode === 'restricted') return { status: 'restricted', error: '您的账户存在异常行为' }
+        return {
+          status: 'ready',
+          jobId: command.jobId,
+          detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL JD' } },
+        }
+      }
+      try {
+        expect(await ctx.completeHistoricalDetails()).toMatchObject({
+          status: mode === 'restricted' ? 'restricted' : 'stopped',
+          cursor: 0,
+        })
+        expect(urlCommands.filter((c) => c.type === 'visit').map((c) => c.jobId)).toEqual(['0'])
+        expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => r.detailStatus === 'pending')).toBe(
+          true,
+        )
+      } finally {
+        Date.now = now
+      }
+    },
+  )
+
+  it('keeps the next URL paused until explicitly resumed', async () => {
+    const ctx = historyContext(2)
+    ctx.waitForGathering = (ms, run) =>
+      BossHelperCtx.prototype['waitForGathering'].call(ctx, 0, run)
+    historyResponse = async () => {
+      throw new Error('详情标识已过期')
+    }
+    let resumed = false
+    let resumeTimer
+    urlCommand = async (command) => {
+      urlCommands.push(command)
+      if (command.type === 'visit' && command.jobId === '1') expect(resumed).toBe(true)
+      if (command.type !== 'read') return null
+      if (command.jobId === '0') {
+        ctx.pauseGathering()
+        resumeTimer = setTimeout(() => {
+          resumed = true
+          ctx.resumeGathering()
+        }, 20)
+      }
+      return {
+        status: 'ready',
+        jobId: command.jobId,
+        detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL JD' } },
+      }
+    }
+    try {
+      expect(await ctx.completeHistoricalDetails()).toMatchObject({
+        status: 'completed',
+        completed: 2,
+      })
+    } finally {
+      clearTimeout(resumeTimer)
+    }
+  })
+
+  it('shares the original runtime deadline when switching from a single job to historical completion', async () => {
+    const ctx = historyContext(2)
+    const now = Date.now
+    let time = now()
+    Date.now = () => time
+    urlCommand = async (command) => {
+      urlCommands.push(command)
+      if (command.type === 'read')
+        return {
+          status: 'ready',
+          jobId: command.jobId,
+          detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL JD' } },
+        }
+      return null
+    }
+    try {
+      await ctx.ensureSavedJobDetails('0')
+      time += 10_000
+      await ctx.completeHistoricalDetails()
+      const claims = urlCommands.filter((c) => c.type === 'claim')
+      expect(claims).toHaveLength(2)
+      expect(claims[1].deadline).toBe(claims[0].deadline)
+    } finally {
+      Date.now = now
+    }
+  })
+
+  it('uses the detail API first during first collection and skips URL when it succeeds', async () => {
+    const ctx = historyContext(1)
+    ctx._jobList.value = data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.snapshot)
+    data.delete(JOB_LIBRARY_STORAGE_KEY)
+    ctx['scrollDown'] = () => ctx.stopCollection()
+    urlCommand = async (command) => {
+      urlCommands.push(command)
+      if (command.type === 'read')
+        return {
+          status: 'ready',
+          jobId: command.jobId,
+          detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL fetched JD' } },
+        }
+      return null
+    }
+    expect(await ctx.collectOnly()).toMatchObject({ newCount: 1, detailCompletedCount: 1 })
+    const saved = data.get(JOB_LIBRARY_STORAGE_KEY)[0]
+    expect(saved.detailStatus).toBe('complete')
+    expect(saved.detail.jobInfo.postDescription).toBe('Historical JD')
+    expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(0)
+    expect(historyRequests).toEqual([{ securityId: 'security-0', lid: 'lid-0' }])
+  })
+
+  it('uses URL directly with one detail interval when API identifiers are unavailable', async () => {
+    const ctx = historyContext(1)
+    const record = data.get(JOB_LIBRARY_STORAGE_KEY)[0]
+    record.snapshot.lid = ''
+    const waits: number[] = []
+    ctx.waitForGathering = async (ms) => {
+      if (ms > 0) waits.push(ms)
+      return true
+    }
+    ctx._jobDetail.value = { jobInfo: { encryptId: '0', postDescription: 'URL fetched JD' } }
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'completed',
+      completed: 1,
+    })
+    expect(historyRequests).toHaveLength(0)
+    expect(waits).toHaveLength(1)
+    expect(waits[0]).toBeGreaterThanOrEqual(3000)
+    expect(waits[0]).toBeLessThanOrEqual(5000)
+    expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(1)
+  })
+
+  it.each([
+    ['登录查看完整内容', 'login_required'],
+    ['请完成安全验证', 'captcha'],
+    ['您的账户存在异常行为', 'restricted'],
+  ])(
+    'stops first collection after API restriction %s without URL fallback',
+    async (message, status) => {
+      const ctx = historyContext(2)
+      ctx._jobList.value = data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.snapshot)
+      data.delete(JOB_LIBRARY_STORAGE_KEY)
+      historyResponse = async () => ({
+        code: status === 'login_required' ? 0 : 1,
+        message,
+        zpData: { jobInfo: { encryptId: '0', postDescription: message } },
+      })
+      expect(await ctx.collectOnly()).toMatchObject({ status })
+      expect(historyRequests).toHaveLength(1)
+      expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(0)
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => !r.detail)).toBe(true)
+    },
+  )
+
+  it.each([
+    ['collection', '详情标识已过期'],
+    ['collection', '您的环境存在异常.'],
+    ['history', '详情标识已过期'],
+    ['history', '您的环境存在异常.'],
+    ['history', ''],
+  ])(
+    'paces both attempts with the configured detail interval in %s after error %s',
+    async (entry, message) => {
+      const ctx = historyContext(1)
+      ctx._jobList.value = data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.snapshot)
+      if (entry === 'collection') data.delete(JOB_LIBRARY_STORAGE_KEY)
+      ctx['scrollDown'] = () => ctx.stopCollection()
+      conf.formData.delayCollectionDetailMin = 0.7
+      conf.formData.delayCollectionDetailMax = 0.7
+      const waits: number[] = []
+      const events: string[] = []
+      ctx.waitForGathering = async (ms) => {
+        waits.push(ms)
+        if (ms === 700) events.push('wait')
+        return true
+      }
+      historyResponse = async () => {
+        events.push('api')
+        throw new Error(message)
+      }
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type === 'visit') events.push('url')
+        if (command.type === 'read')
+          return {
+            status: 'ready',
+            jobId: command.jobId,
+            detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL fetched JD' } },
+          }
+        return null
+      }
+      await (entry === 'collection' ? ctx.collectOnly() : ctx.completeHistoricalDetails())
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
+        detailStatus: 'complete',
+        detailRetryCount: 0,
+        detail: { jobInfo: { postDescription: 'URL fetched JD' } },
+      })
+      expect(events).toEqual(['wait', 'api', 'wait', 'url'])
+      expect(waits.filter((ms) => ms === 700)).toHaveLength(2)
+      expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(1)
+    },
+  )
+
+  it.each(['stop', 'deadline', 'restricted', 'paused'])(
+    'honors %s while waiting between API and URL without consuming the checkpoint',
+    async (mode) => {
+      const ctx = historyContext(1)
+      conf.formData.collectionMaxRuntimeMinutes = 1
+      let interrupted = false
+      let resumed = false
+      let resumeTimer
+      const clock = spyOn(Date, 'now')
+      const started = Date.now()
+      historyResponse = async () => {
+        throw new Error('详情标识已过期')
+      }
+      ctx.waitForGathering = async (ms, run) => {
+        if (ms > 0 && historyRequests.length === 1 && !interrupted) {
+          interrupted = true
+          if (mode === 'stop') ctx.stopGathering()
+          if (mode === 'deadline') clock.mockReturnValue(started + 60_001)
+          if (mode === 'restricted') document.body.innerText = '您的账户存在异常行为'
+          if (mode === 'paused') {
+            ctx.pauseGathering()
+            resumeTimer = setTimeout(() => {
+              resumed = true
+              ctx.resumeGathering()
+            }, 20)
+          }
+        }
+        return BossHelperCtx.prototype['waitForGathering'].call(ctx, 0, run)
+      }
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type === 'visit') expect(resumed).toBe(true)
+        if (command.type === 'read')
+          return {
+            status: 'ready',
+            jobId: command.jobId,
+            detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL fetched JD' } },
+          }
+        return null
+      }
+      try {
+        const result = await ctx.completeHistoricalDetails()
+        expect(interrupted).toBe(true)
+        expect(historyRequests).toHaveLength(1)
+        expect(result).toMatchObject({
+          status:
+            mode === 'paused' ? 'completed' : mode === 'restricted' ? 'restricted' : 'stopped',
+          cursor: mode === 'paused' ? 1 : 0,
+        })
+        expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(
+          mode === 'paused' ? 1 : 0,
+        )
+        expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe(
+          mode === 'paused' ? 'complete' : 'pending',
+        )
+      } finally {
+        clearTimeout(resumeTimer)
+        clock.mockRestore()
+      }
+    },
+  )
+
+  it('does not fall back to URL or advance a cursor after a login preview', async () => {
+    const ctx = historyContext(2)
+    historyResponse = async ({ lid }) => ({
+      code: 0,
+      zpData: { jobInfo: { encryptId: lid.slice(4), postDescription: '登录查看完整内容' } },
+    })
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'login_required',
+      cursor: 0,
+    })
+    expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(0)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+  })
+
+  it('completes the saved library beyond five jobs without requiring visible cards', async () => {
+    const ctx = historyContext()
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'completed',
+      completed: 7,
+      cursor: 7,
+    })
+    expect(historyRequests).toHaveLength(7)
+    expect(historyRequests[0]).toEqual({ securityId: 'security-0', lid: 'lid-0' })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => r.detailStatus === 'complete')).toBe(true)
+  })
+
+  it('keeps the historical checkpoint at the time limit and grants a fresh session on manual resume', async () => {
+    const ctx = historyContext(3)
+    conf.formData.collectionMaxRuntimeMinutes = 1
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    ctx.waitForGathering = async (ms, run) => {
+      if (ms && historyRequests.length === 1) now += 60_000
+      return BossHelperCtx.prototype['waitForGathering'].call(ctx, 0, run)
+    }
+    try {
+      const run = await ctx.completeHistoricalDetails()
+      expect(run).toMatchObject({
+        status: 'stopped',
+        cursor: 1,
+        error: expect.stringContaining('运行上限'),
+      })
+      expect(historyRequests.map((p) => p.lid)).toEqual(['lid-0'])
+      ctx.waitForGathering = async () => true
+      expect(await ctx.completeHistoricalDetails(true)).toMatchObject({
+        id: run.id,
+        status: 'completed',
+        cursor: 3,
+      })
+      expect(historyRequests.map((p) => p.lid)).toEqual(['lid-0', 'lid-1', 'lid-2'])
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it('stops on verification and resumes the same fixed queue without repeating saved requests', async () => {
+    const ctx = historyContext(3)
+    historyResponse = async ({ lid }) =>
+      lid === 'lid-1'
+        ? { code: 1, message: '请完成安全验证' }
+        : { code: 0, zpData: { jobInfo: { encryptId: lid.slice(4), postDescription: 'JD' } } }
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({ status: 'captcha', cursor: 1 })
+    const next = context()
+    historyResponse = async ({ lid }) => ({
+      code: 0,
+      zpData: { jobInfo: { encryptId: lid.slice(4), postDescription: 'JD' } },
+    })
+    expect(await next.completeHistoricalDetails(true)).toMatchObject({
+      status: 'completed',
+      cursor: 3,
+    })
+    expect(historyRequests.map((p) => p.lid)).toEqual(['lid-0', 'lid-1', 'lid-1', 'lid-2'])
+  })
+
+  it('does not advance or repeat a detail whose save reply failed after the write', async () => {
+    const ctx = historyContext(2)
+    const write = setStored
+    setStored = async (key, value) => {
+      await write(key, value)
+      if (key === JOB_LIBRARY_STORAGE_KEY) throw new Error('save reply lost')
+    }
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'unknown_error',
+      cursor: 0,
+    })
+    setStored = write
+    expect(await context().completeHistoricalDetails(true)).toMatchObject({
+      status: 'completed',
+      cursor: 2,
+      skipped: 1,
+    })
+    expect(historyRequests.map((p) => p.lid)).toEqual(['lid-0', 'lid-1'])
+  })
+
+  it('preserves a manual stop while startup storage is pending', async () => {
+    const ctx = historyContext(2)
+    let release
+    const pending = new Promise((resolve) => {
+      release = resolve
+    })
+    const read = getStored
+    getStored = async (key, fallback) => {
+      await pending
+      return read(key, fallback)
+    }
+    const task = ctx.completeHistoricalDetails()
+    ctx.stopGathering()
+    release()
+    expect(await task).toMatchObject({ status: 'stopped', cursor: 0 })
+    expect(historyRequests).toHaveLength(0)
+  })
+
+  it('stops if a periodic lease renewal reply is lost and releases the page task', async () => {
+    const ctx = historyContext(2)
+    const timeout = globalThis.setTimeout
+    let tick
+    const nativeInterval = globalThis.setInterval
+    const interval = spyOn(globalThis, 'setInterval').mockImplementation(
+      (callback, ms, ...args) => {
+        if (ms === 10_000) {
+          tick = callback
+          return 987654
+        }
+        return nativeInterval(callback, ms, ...args)
+      },
+    )
+    const timers = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
+      timeout(callback, ms === 8000 ? 200 : ms, ...args),
+    )
+    let loseNext = false
+    historyCommand = (library, command) => {
+      if (command.type === 'renew' && loseNext) {
+        loseNext = false
+        return new Promise(() => {})
+      }
+      return library.historyDetails(command)
+    }
+    ctx.waitForGathering = async (ms) => {
+      if (ms && tick) {
+        loseNext = true
+        tick()
+        await new Promise((resolve) => timeout(resolve, 250))
+      }
+      return true
+    }
+    try {
+      expect(await ctx.completeHistoricalDetails()).toMatchObject({
+        status: 'unknown_error',
+        cursor: 0,
+        error: expect.stringContaining('历史补全续租超时'),
+      })
+      expect(historyRequests).toHaveLength(0)
+      expect(ctx.gatheringBusy.value).toBe(false)
+    } finally {
+      interval.mockRestore()
+      timers.mockRestore()
+    }
+  })
+
+  it('discards a late detail response after the user stops', async () => {
+    const ctx = historyContext(2)
+    historyResponse = async ({ lid }) => {
+      ctx.stopGathering()
+      return { code: 0, zpData: { jobInfo: { encryptId: lid.slice(4), postDescription: 'JD' } } }
+    }
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({ status: 'stopped', cursor: 0 })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    expect(historyRequests).toHaveLength(1)
+  })
+
+  it('retains the last-record pause until explicitly resumed', async () => {
+    const ctx = historyContext(1)
+    let paused = false
+    const wait = ctx.waitForGathering
+    ctx.waitForGathering = async (...args) => {
+      if (paused && ctx.detailRun.value.status === 'paused') ctx.resumeGathering()
+      return wait(...args)
+    }
+    const write = setStored
+    setStored = async (key, value) => {
+      await write(key, value)
+      if (key === JOB_LIBRARY_STORAGE_KEY) {
+        ctx.pauseGathering()
+        paused = true
+      }
+    }
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'completed',
+      completed: 1,
+    })
+    expect(paused).toBe(true)
+    expect(ctx.gatheringBusy.value).toBe(false)
+  })
+
+  it('records invalid identity, empty JD and missing identifiers once and preserves review/send fields', async () => {
+    const ctx = historyContext(3)
+    const records = data.get(JOB_LIBRARY_STORAGE_KEY)
+    records[2].snapshot.lid = ''
+    records[0].reviewStatus = 'approved'
+    records[0].sendStatus = 'sent'
+    historyResponse = async ({ lid }) => ({
+      code: 0,
+      zpData: {
+        jobInfo: {
+          encryptId: lid === 'lid-0' ? 'wrong' : '1',
+          postDescription: lid === 'lid-0' ? 'wrong JD' : '',
+        },
+      },
+    })
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: 'completed',
+      failed: 3,
+      cursor: 3,
+    })
+    expect(historyRequests).toHaveLength(2)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
+      detailStatus: 'failed',
+      reviewStatus: 'approved',
+      sendStatus: 'sent',
+    })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => !r.detail)).toBe(true)
+    expect(getDiagnostics()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: 'historyDetail.capture',
+          error: expect.stringContaining('历史详情岗位 ID 不匹配'),
+        }),
+      ]),
+    )
+  })
+
+  it.each(['请先登录', '登录已失效', '操作过于频繁'])(
+    'stops without consuming the checkpoint for %s',
+    async (message) => {
+      const ctx = historyContext(2)
+      historyResponse = async () => {
+        throw new Error(message)
+      }
+      const run = await ctx.completeHistoricalDetails()
+      expect(run.cursor).toBe(0)
+      expect(run.status).not.toBe('completed')
+      expect(historyRequests).toHaveLength(1)
+    },
+  )
+
+  it.each([
+    '您的账户存在异常行为.',
+    '您的环境存在异常，请完成安全验证',
+    '您的环境存在异常，访问过于频繁',
+  ])('stops on %s without failing subsequent jobs or consuming the checkpoint', async (message) => {
+    const ctx = historyContext(3)
+    historyResponse = async () => ({ code: 1, message })
+    expect(await ctx.completeHistoricalDetails()).toMatchObject({
+      status: message.includes('安全验证') ? 'captcha' : 'restricted',
+      cursor: 0,
+      failed: 0,
+      error: message,
+    })
+    expect(historyRequests).toHaveLength(1)
+    expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(0)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY).every((r) => r.detailStatus === 'pending')).toBe(true)
+  })
+
+  it.each(['collection', 'history'])(
+    'keeps an ordinary URL failure local to the job after an API environment error in %s',
+    async (entry) => {
+      const ctx = historyContext(2)
+      ctx._jobList.value = data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.snapshot)
+      ctx['scrollDown'] = () => ctx.stopCollection()
+      if (entry === 'collection') data.delete(JOB_LIBRARY_STORAGE_KEY)
+      historyResponse = async () => ({ code: 1, message: '您的环境存在异常.' })
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type !== 'read') return null
+        if (command.jobId === '0') return { status: 'failed', error: '职位描述正文未加载' }
+        return {
+          status: 'ready',
+          jobId: command.jobId,
+          detail: { jobInfo: { encryptId: command.jobId, postDescription: 'URL fetched JD' } },
+        }
+      }
+      const result = await (entry === 'collection'
+        ? ctx.collectOnly()
+        : ctx.completeHistoricalDetails())
+      expect(result).toMatchObject(
+        entry === 'collection'
+          ? { detailCompletedCount: 1, detailFailedCount: 1 }
+          : { status: 'completed', completed: 1, failed: 1, cursor: 2 },
+      )
+      const records = data.get(JOB_LIBRARY_STORAGE_KEY)
+      expect(records[0]).toMatchObject({ detailStatus: 'failed', detailRetryCount: 1 })
+      expect(records[0].failureReason).toContain('职位描述正文未加载')
+      expect(records[0].failureReason).not.toContain('环境存在异常')
+      expect(records[1]).toMatchObject({
+        detailStatus: 'complete',
+        detail: { jobInfo: { encryptId: '1', postDescription: 'URL fetched JD' } },
+      })
+      expect(historyRequests).toHaveLength(2)
+      expect(urlCommands.filter((c) => c.type === 'visit').map((c) => c.url)).toEqual([
+        'https://www.zhipin.com/job_detail/0.html',
+        'https://www.zhipin.com/job_detail/1.html',
+      ])
+      expect(urlCommands.at(-1).type).toBe('release')
+    },
+  )
+
+  it.each(['collection', 'history'])(
+    'stops on an actual URL restriction after an API environment error in %s',
+    async (entry) => {
+      const ctx = historyContext(2)
+      ctx._jobList.value = data.get(JOB_LIBRARY_STORAGE_KEY).map((r) => r.snapshot)
+      if (entry === 'collection') data.delete(JOB_LIBRARY_STORAGE_KEY)
+      historyResponse = async () => ({ code: 1, message: '您的环境存在异常.' })
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        return command.type === 'read' ? { status: 'restricted', error: '详情页面访问受限' } : null
+      }
+      const result = await (entry === 'collection'
+        ? ctx.collectOnly()
+        : ctx.completeHistoricalDetails())
+      expect(result).toMatchObject({ status: 'restricted', error: '详情页面访问受限' })
+      if (entry === 'history') expect(result).toMatchObject({ cursor: 0, failed: 0 })
+      expect(historyRequests).toHaveLength(1)
+      expect(urlCommands.filter((c) => c.type === 'visit').map((c) => c.jobId)).toEqual(['0'])
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[1].detailStatus).toBe('pending')
+      expect(urlCommands.at(-1).type).toBe('release')
+    },
+  )
+})
+
 describe('slow collected detail batches', () => {
+  it('does not click a card if another page starts history completion during pacing', async () => {
+    const ctx = detailContext(1)
+    let clicks = 0
+    ctx.onJobCardClick = async () => {
+      clicks++
+    }
+    ctx.waitForGathering = async (ms) => {
+      if (ms) await counter.historyDetails({ type: 'start', token: 'other-page' })
+      return true
+    }
+    expect((await ctx.completeCollectedDetails({ availableOnly: true })).status).toBe('stopped')
+    expect(clicks).toBe(0)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+  })
+
+  it('does not treat the registration flow in a job description as a captcha', async () => {
+    const ctx = detailContext(1)
+    ctx.onJobCardClick = async () => {
+      document.body.innerText =
+        '设计最简洁注册登录流程（验证码注册登录合一 + 三方登录）与跨端观看进度同步'
+    }
+
+    expect(await ctx.completeCollectedDetails({ availableOnly: true })).toMatchObject({
+      status: 'completed',
+      completed: 1,
+    })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('complete')
+  })
+
+  it('stops for a visible captcha widget even without a text prompt', async () => {
+    const ctx = detailContext(1)
+    const dom = new JSDOM('<input name="captcha">')
+    dom.window.document.querySelector('input').getClientRects = () => [{}]
+    Object.assign(globalThis, {
+      document: dom.window.document,
+      getComputedStyle: dom.window.getComputedStyle,
+    })
+    ctx.onJobCardClick = async () => {
+      throw new Error('must not click')
+    }
+    try {
+      expect((await ctx.completeCollectedDetails({ availableOnly: true })).status).toBe('captcha')
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    } finally {
+      dom.window.close()
+    }
+  })
+
+  it.each(['no-layout', 'hidden'])('ignores a captcha widget that is %s', async (visibility) => {
+    const ctx = detailContext(1)
+    const dom = new JSDOM(`<input name="captcha" style="visibility:${visibility}">`)
+    if (visibility === 'hidden')
+      dom.window.document.querySelector('input').getClientRects = () => [{}]
+    Object.assign(globalThis, {
+      document: dom.window.document,
+      getComputedStyle: dom.window.getComputedStyle,
+    })
+    ctx.onJobCardClick = async () => {}
+    try {
+      expect((await ctx.completeCollectedDetails({ availableOnly: true })).completed).toBe(1)
+    } finally {
+      dom.window.close()
+    }
+  })
+
+  it('retains captcha errors returned by a detail operation', async () => {
+    const ctx = detailContext(1)
+    ctx.onJobCardClick = async () => {
+      throw new Error('验证码已过期')
+    }
+
+    expect((await ctx.completeCollectedDetails({ availableOnly: true })).status).toBe('captcha')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('failed')
+  })
+
+  it('repairs a legacy completed record that contains no JD', async () => {
+    const ctx = detailContext(1)
+    const record = data.get(JOB_LIBRARY_STORAGE_KEY)[0]
+    record.detailStatus = 'complete'
+    record.detail = { jobInfo: { postDescription: '' } }
+    ctx.onJobCardClick = async () => {}
+
+    expect((await ctx.completeCollectedDetails({ availableOnly: true })).completed).toBe(1)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detail.jobInfo.postDescription).toBe('Saved JD')
+  })
+
+  it('does not save an empty JD as a completed detail', async () => {
+    const ctx = detailContext(1)
+    ctx.jobMaps.get('boss::0').rawData.detail.jobInfo.postDescription = '  '
+    ctx.onJobCardClick = async () => {}
+
+    expect(await ctx.completeCollectedDetails({ availableOnly: true })).toMatchObject({
+      completed: 0,
+      failed: 1,
+    })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({ detailStatus: 'failed' })
+  })
+
+  it('keeps a malformed detail retryable without corrupting the saved library', async () => {
+    const ctx = detailContext(1)
+    ctx.jobMaps.get('boss::0').rawData.detail = {}
+    ctx.onJobCardClick = async () => {}
+
+    expect(await ctx.completeCollectedDetails({ availableOnly: true })).toMatchObject({
+      status: 'completed',
+      failed: 1,
+    })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('failed')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detail).toBeUndefined()
+  })
+
+  it('does not schedule detail requests after saving a snapshot with browser capture enabled', async () => {
+    const ctx = detailContext(6)
+    ctx['mounted'] = true
+    ctx.autoCaptureEnabled.value = true
+    expect(await ctx.captureNewJobs([item('new'), item('0')])).toBe(1)
+    await Promise.resolve()
+    await ctx['detailPromise']
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+    expect(
+      data.get(JOB_LIBRARY_STORAGE_KEY).every((record) => record.detailStatus === 'pending'),
+    ).toBe(true)
+  })
+
+  it('leaves old pending jobs untouched when browser capture is enabled', async () => {
+    const ctx = detailContext(1)
+    ctx['mounted'] = true
+    await ctx.setAutoCaptureEnabled(true)
+    await ctx['jobCapturePromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+  })
+
+  it('rechecks completed details after pacing before issuing an API request or URL visit', async () => {
+    const ctx = detailContext(1)
+    const detail = { jobInfo: { encryptId: '0', postDescription: 'Saved during pacing' } }
+    ctx.waitForGathering = async (ms) => {
+      if (ms > 0)
+        Object.assign(data.get(JOB_LIBRARY_STORAGE_KEY)[0], {
+          detailStatus: 'complete',
+          detail,
+        })
+      return true
+    }
+    expect((await ctx.completeCollectedDetails()).completed).toBe(1)
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detail).toEqual(detail)
+  })
+
   it('cancels the existing detail poll after a click without leaking an interval', async () => {
     const ctx = context()
     ctx.jobMaps.set('boss::a', { rawData: { jobitem: { ...item('a'), lid: 'lid-a' }, detail: {} } })
@@ -2488,6 +3807,29 @@ describe('slow collected detail batches', () => {
     return ctx
   }
 
+  it('shares the time limit across background batches and disables automatic restart', async () => {
+    const ctx = detailContext(6)
+    ctx.autoCaptureEnabled.value = true
+    ctx.onJobCardClick = async () => {}
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      expect((await ctx.completeCollectedDetails({ availableOnly: true })).completed).toBe(5)
+      now += 60 * 60_000
+      const run = await ctx.completeCollectedDetails({ availableOnly: true })
+      expect(run).toMatchObject({
+        status: 'stopped',
+        completed: 0,
+        error: expect.stringContaining('运行上限'),
+      })
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[5].detailStatus).toBe('pending')
+      expect(ctx.autoCaptureEnabled.value).toBe(false)
+      expect(data.get(AUTO_CAPTURE_STORAGE_KEY)).toBe(false)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('waits before every detail including the first, limits the batch to 5 and keeps latest review/send state', async () => {
     const ctx = detailContext()
     const waits: number[] = []
@@ -2515,7 +3857,7 @@ describe('slow collected detail batches', () => {
     expect(desktopNotifications).toHaveLength(1)
     expect(desktopNotifications[0]).toContain('详情补全')
     expect(clicks).toHaveLength(5)
-    expect(waits.every((ms) => ms >= 2000 && ms <= 5000)).toBe(true)
+    expect(waits.every((ms) => ms >= 3000 && ms <= 5000)).toBe(true)
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
       reviewStatus: 'approved',
       sendStatus: 'sent',
@@ -2593,7 +3935,7 @@ describe('slow collected detail batches', () => {
       },
     })
     await ctx.completeCollectedDetails()
-    expect(clicks).toEqual(['boss::5'])
+    expect(clicks).toEqual(['boss::5', 'boss::0', 'boss::1', 'boss::2', 'boss::3'])
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[5].detailStatus).toBe('complete')
   })
 
@@ -2765,6 +4107,25 @@ describe('keyword rotation pacing', () => {
     })
     return { ctx, started, waits }
   }
+
+  it('stops at the runtime deadline during keyword cooldown without charging the next keyword', async () => {
+    const { ctx, started } = rotationContext()
+    let now = Date.now()
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    ctx['waitForKeywordRotation'] = async (until) => {
+      if (until) now += 60 * 60_000
+      return BossHelperCtx.prototype['waitForKeywordRotation'].call(ctx, until)
+    }
+    try {
+      const run = await ctx.startKeywordRotation('A\nB')
+      expect(run).toMatchObject({ status: 'stopped', error: expect.stringContaining('运行上限') })
+      expect(started).toEqual(['A'])
+      expect(data.get(KEYWORD_ROTATION_USAGE_STORAGE_KEY).count).toBe(1)
+      expect(data.get(KEYWORD_ROTATION_STORAGE_KEY).status).toBe('stopped')
+    } finally {
+      clock.mockRestore()
+    }
+  })
 
   it('notifies once when the daily cap pauses a rotation', async () => {
     const { ctx } = rotationContext()
@@ -2977,14 +4338,13 @@ describe('keyword rotation pacing', () => {
 
   it('does not start passive detail completion during a rotation cooldown', async () => {
     const { ctx } = rotationContext()
-    let calls = 0
     ctx['mounted'] = true
+    ctx.autoCaptureEnabled.value = true
     ctx.keywordRotationBusy.value = true
-    ctx.completeCollectedDetails = async () => {
-      calls++
-    }
-    ctx.scheduleBackgroundDetailCompletion()
-    await Promise.resolve()
-    expect(calls).toBe(0)
+    await ctx._initJobList()
+    jobListHookCallback?.([item('old'), item('new')])
+    await ctx['jobCapturePromise']
+    expect(historyRequests).toEqual([])
+    expect(urlCommands).toEqual([])
   })
 })

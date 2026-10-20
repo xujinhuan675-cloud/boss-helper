@@ -12,7 +12,7 @@
         "@react-aria/ssr": "^3.10.1",
         "@react-aria/utils": "^3.34.1",
         "ai": "^7.0.58",
-        "comctx": "^1.7.5",
+        "comctx": "1.7.5",
         "devlog-ui": "workspace:*",
         "idb": "^8.0.3",
         "lucide-react": "^1.57.0",
@@ -68,6 +68,9 @@
         "vitest": "^2.1.8",
       },
     },
+  },
+  "patchedDependencies": {
+    "comctx@1.7.5": "patches/comctx@1.7.5.patch",
   },
   "overrides": {
     "vite": "^8.0.16",

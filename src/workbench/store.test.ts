@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from 'bun:te
 import { nextTick, reactive, ref } from 'vue'
 
 import { defaultFormData } from '../composables/conf/info'
+import { DETAIL_MESSAGE } from '../entrypoints/boss/jobDetails'
 import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
 import { mergeJobRecords, JOB_LIBRARY_STORAGE_KEY } from '../entrypoints/boss/jobStore'
 import {
@@ -12,6 +13,7 @@ import {
   KEYWORD_ROTATION_STORAGE_KEY,
 } from '../entrypoints/boss/keywordRotation'
 import { jsonClone } from '../utils/deepmerge'
+import { getDiagnostics } from '../utils/diagnostics'
 
 const stored = new Map()
 const events = {}
@@ -25,7 +27,10 @@ const tabs = [
   { id: 2, title: 'second', url: 'https://www.zhipin.com/web/geek/jobs' },
 ]
 let send = async () => ({ ok: true, data: { ready: true, error: '' } })
+let readDetail = async () => ({ status: 'pending', error: '等待正文' })
+let configReadError = false
 const calls = []
+const navigationCalls = []
 const panelCalls = []
 const createdTabs = []
 let panelError = ''
@@ -38,17 +43,28 @@ mock.module('#imports', () => ({
         panelCalls.push(options)
       },
     },
+    windows: {
+      update: async (id, options) => {
+        navigationCalls.push(['window', id, options])
+      },
+    },
     tabs: {
       getCurrent: async () => ({ id: 21, windowId: 7 }),
       query: async () => tabs,
       create: async (options) => createdTabs.push(options),
+      update: async (id, options) => {
+        navigationCalls.push(['tab', id, options])
+        return { id, windowId: 7 }
+      },
       sendMessage: async (id, request) => {
+        if (request.type === DETAIL_MESSAGE) return readDetail(id, request)
         calls.push([id, request.command])
         return send(id, request)
       },
       onRemoved: event('removed'),
       onCreated: event('created'),
       onUpdated: event('updated'),
+      onActivated: event('activated'),
     },
     storage: { onChanged: event('storage') },
   },
@@ -56,17 +72,37 @@ mock.module('#imports', () => ({
 const config = reactive(jsonClone(defaultFormData))
 let reading = async () => {}
 const preset = ref('default')
+const resumePresetIds = new Map()
+const planResumeCalls = []
+const presetCreations = []
 const conf = {
   formData: config,
   formDataPreset: preset,
   formDataPresets: ref([{ label: '默认', value: 'default' }]),
   confInit: async () => {
     await reading()
+    if (configReadError) throw new Error('配置预设格式异常；已保留原数据')
     Object.assign(config, jsonClone(stored.get('config') ?? defaultFormData))
     preset.value = stored.get('preset') ?? 'default'
   },
   confSaving: async () => {
     stored.set('config', jsonClone(config))
+  },
+  switchPreset: async (value) => {
+    preset.value = value
+    stored.set('preset', value)
+  },
+  createPreset: async (label) => {
+    presetCreations.push({ label, config: jsonClone(config) })
+    const value = `plan-${presetCreations.length}`
+    conf.formDataPresets.value.push({ label, value })
+    preset.value = value
+    stored.set('preset', value)
+  },
+  deletePreset: async (value) => {
+    if (value === 'default' || !conf.formDataPresets.value.some((item) => item.value === value))
+      throw new Error('求职方案不可删除')
+    conf.formDataPresets.value = conf.formDataPresets.value.filter((item) => item.value !== value)
   },
 }
 mock.module('@/composables/conf', () => ({ useConf: () => conf }))
@@ -91,9 +127,41 @@ const resumes = {
   currentResumeId: ref(null),
   currentResume: ref(null),
   init: async () => {},
+  selectResumeForPreset: async (value, id) => {
+    planResumeCalls.push(['select', value, id])
+    resumePresetIds.set(value, id)
+    resumes.currentResumeId.value = id
+  },
+  activatePreset: async (value) => {
+    planResumeCalls.push(['activate', value])
+    resumes.currentResumeId.value = resumePresetIds.get(value) ?? null
+    return resumes.currentResumeId.value
+  },
+  removePreset: async (value) => {
+    resumePresetIds.delete(value)
+  },
 }
 mock.module('@/composables/useResume', () => ({
   RESUME_STORAGE_KEY: 'local:boss-helper:resumes:v1',
+  normalizeResumeStore: (stored) => {
+    const resumes = Array.isArray(stored?.resumes)
+      ? stored.resumes.filter(
+          (resume) =>
+            !!resume &&
+            typeof resume.id === 'string' &&
+            typeof resume.name === 'string' &&
+            typeof resume.content === 'string' &&
+            typeof resume.createdAt === 'string' &&
+            typeof resume.updatedAt === 'string',
+        )
+      : []
+    return {
+      resumes,
+      currentResumeId: resumes.some((resume) => resume.id === stored?.currentResumeId)
+        ? stored.currentResumeId
+        : null,
+    }
+  },
   useResumes: () => resumes,
 }))
 mock.module('@/composables/useStatistics', () => ({
@@ -163,6 +231,235 @@ beforeAll(async () => {
 afterAll(() => interval.mockRestore())
 
 describe('workbench synchronization and mutation boundary', () => {
+  test.each([true, false])(
+    'deletes a plan and its binding while preserving the active plan when possible: active=%s',
+    async (active) => {
+      const originalPreset = preset.value
+      const originalPresets = [...conf.formDataPresets.value]
+      const originalResume = resumes.currentResumeId.value
+      const originalBindings = new Map(resumePresetIds)
+      const originalStoredPreset = stored.get('preset')
+      try {
+        conf.formDataPresets.value = [
+          { label: '默认配置', value: 'default' },
+          { label: 'Product', value: 'product' },
+        ]
+        preset.value = active ? 'product' : 'default'
+        stored.set('preset', preset.value)
+        resumePresetIds.set('default', 'resume-default')
+        resumePresetIds.set('product', 'resume-product')
+        resumes.currentResumeId.value = active ? 'resume-product' : 'resume-default'
+        await store.deletePlan('product')
+        expect(conf.formDataPresets.value.map((item) => item.value)).toEqual(['default'])
+        expect(preset.value).toBe('default')
+        expect(resumes.currentResumeId.value).toBe('resume-default')
+        expect(resumePresetIds.has('product')).toBe(false)
+        await expect(store.deletePlan('default')).rejects.toThrow()
+        expect(resumePresetIds.get('default')).toBe('resume-default')
+      } finally {
+        preset.value = originalPreset
+        conf.formDataPresets.value = originalPresets
+        resumes.currentResumeId.value = originalResume
+        resumePresetIds.clear()
+        for (const [key, value] of originalBindings) resumePresetIds.set(key, value)
+        if (originalStoredPreset === undefined) stored.delete('preset')
+        else stored.set('preset', originalStoredPreset)
+      }
+    },
+  )
+
+  test('switches plans with their associated resume and creates plans from saved settings', async () => {
+    const originalConfig = jsonClone(config)
+    const originalPreset = preset.value
+    const originalCurrentResumeId = resumes.currentResumeId.value
+    const originalPresets = [...conf.formDataPresets.value]
+    const originalPresetIds = new Map(resumePresetIds)
+    const originalStoredPreset = stored.get('preset')
+    const originalStoredConfig = stored.get('config')
+    planResumeCalls.length = 0
+    presetCreations.length = 0
+    try {
+      stored.set('preset', 'default')
+      stored.set('config', jsonClone(defaultFormData))
+      preset.value = 'default'
+      resumes.currentResumeId.value = 'resume-default'
+      resumePresetIds.set('default', 'resume-default')
+      resumePresetIds.set('engineering', 'resume-engineering')
+
+      await store.switchPlan('engineering')
+
+      expect(planResumeCalls).toEqual([
+        ['select', 'default', 'resume-default'],
+        ['activate', 'engineering'],
+      ])
+      expect(resumes.currentResumeId.value).toBe('resume-engineering')
+
+      preset.value = 'default'
+      stored.set('preset', 'default')
+      resumes.currentResumeId.value = 'resume-default'
+      config.deliveryLimit.value = 77
+      stored.set('config', jsonClone(config))
+      await store.createPlan('产品负责人')
+
+      expect(presetCreations).toHaveLength(1)
+      expect(presetCreations[0].label).toBe('产品负责人')
+      expect(presetCreations[0].config.deliveryLimit.value).toBe(77)
+      expect(planResumeCalls.slice(-2)).toEqual([
+        ['select', 'default', 'resume-default'],
+        ['select', 'plan-1', 'resume-default'],
+      ])
+      expect(resumePresetIds.get('plan-1')).toBe('resume-default')
+    } finally {
+      Object.assign(config, originalConfig)
+      preset.value = originalPreset
+      resumes.currentResumeId.value = originalCurrentResumeId
+      conf.formDataPresets.value.splice(0, conf.formDataPresets.value.length, ...originalPresets)
+      resumePresetIds.clear()
+      for (const [key, value] of originalPresetIds) resumePresetIds.set(key, value)
+      if (originalStoredPreset === undefined) stored.delete('preset')
+      else stored.set('preset', originalStoredPreset)
+      if (originalStoredConfig === undefined) stored.delete('config')
+      else stored.set('config', originalStoredConfig)
+    }
+  })
+
+  test('reports model and resume storage counts without exposing saved values', async () => {
+    const originalConfig = stored.get('config')
+    const originalModels = stored.get('conf-model')
+    const originalResumes = stored.get('local:boss-helper:resumes:v1')
+    stored.set('conf-model', [
+      {
+        key: 'private-model-id',
+        name: 'private-model-name',
+        data: {
+          api_key: 'private-api-key',
+          base_url: 'https://private-model.example/v1',
+          model: 'private-model',
+        },
+      },
+    ])
+    stored.set('local:boss-helper:resumes:v1', {
+      resumes: [
+        {
+          id: 'private-resume-id',
+          name: 'private-resume-name',
+          content: 'private-resume-content',
+          createdAt: '2026-10-20T00:00:00.000Z',
+          updatedAt: '2026-10-20T00:00:00.000Z',
+        },
+      ],
+      currentResumeId: 'private-resume-id',
+    })
+    try {
+      await store.initializeWorkbench()
+      await settle()
+      const diagnostics = getDiagnostics()
+      expect(
+        diagnostics.filter((event) => event.operation === 'settings.storage.models').at(-1),
+      ).toMatchObject({ context: { count: 1, status: 'valid' } })
+      expect(
+        diagnostics.filter((event) => event.operation === 'settings.storage.resumes').at(-1),
+      ).toMatchObject({ context: { count: 1, phase: 'selected', status: 'valid' } })
+      const output = JSON.stringify([
+        diagnostics.filter((event) => event.operation === 'settings.storage.models').at(-1),
+        diagnostics.filter((event) => event.operation === 'settings.storage.resumes').at(-1),
+      ])
+      expect(output).not.toContain('private-')
+
+      stored.set('conf-model', [{ key: 'invalid', name: {} }])
+      await store.initializeWorkbench()
+      expect(
+        getDiagnostics()
+          .filter((event) => event.operation === 'settings.storage.models')
+          .at(-1),
+      ).toMatchObject({ context: { count: 1, status: 'invalid' } })
+      expect(
+        getDiagnostics()
+          .filter((event) => event.operation === 'settings.storage.resumes')
+          .at(-1),
+      ).toMatchObject({ context: { count: 1, phase: 'selected', status: 'valid' } })
+
+      stored.set('conf-model', [{ key: 'invalid', name: {} }])
+      stored.set('local:boss-helper:resumes:v1', {})
+      stored.set('config', { ...jsonClone(defaultFormData), resumeText: 'private-legacy-resume' })
+      await store.initializeWorkbench()
+      const resumeSummary = getDiagnostics()
+        .filter((event) => event.operation === 'settings.storage.resumes')
+        .at(-1)
+      expect(resumeSummary).toMatchObject({
+        context: { count: 1, phase: 'legacy', status: 'valid' },
+      })
+      expect(JSON.stringify(resumeSummary)).not.toContain('private-legacy')
+
+      modelReadError = true
+      await store.initializeWorkbench()
+      expect(
+        getDiagnostics()
+          .filter((event) => event.operation === 'settings.storage.models')
+          .at(-1),
+      ).toMatchObject({ context: { status: 'unavailable' } })
+      expect(
+        getDiagnostics()
+          .filter((event) => event.operation === 'settings.storage.resumes')
+          .at(-1),
+      ).toMatchObject({ context: { count: 1, phase: 'legacy', status: 'valid' } })
+    } finally {
+      modelReadError = false
+      if (originalConfig === undefined) stored.delete('config')
+      else stored.set('config', originalConfig)
+      if (originalModels === undefined) stored.delete('conf-model')
+      else stored.set('conf-model', originalModels)
+      if (originalResumes === undefined) stored.delete('local:boss-helper:resumes:v1')
+      else stored.set('local:boss-helper:resumes:v1', originalResumes)
+      await store.initializeWorkbench()
+      await settle()
+    }
+  })
+
+  test('reports model and resume summaries even when configuration initialization fails', async () => {
+    const originalModels = stored.get('conf-model')
+    const originalResumes = stored.get('local:boss-helper:resumes:v1')
+    stored.set('conf-model', [{ key: 'private-model', name: 'private name' }])
+    stored.set('local:boss-helper:resumes:v1', {
+      resumes: [
+        {
+          id: 'private-resume',
+          name: 'private resume',
+          content: 'private body',
+          createdAt: '2026-10-20T00:00:00.000Z',
+          updatedAt: '2026-10-20T00:00:00.000Z',
+        },
+      ],
+      currentResumeId: 'private-resume',
+    })
+    configReadError = true
+    try {
+      await store.initializeWorkbench()
+      const diagnostics = getDiagnostics()
+      const modelSummary = diagnostics
+        .filter((event) => event.operation === 'settings.storage.models')
+        .at(-1)
+      const resumeSummary = diagnostics
+        .filter((event) => event.operation === 'settings.storage.resumes')
+        .at(-1)
+      expect(modelSummary).toMatchObject({
+        context: { count: 1, status: 'valid' },
+      })
+      expect(resumeSummary).toMatchObject({
+        context: { count: 1, phase: 'selected', status: 'valid' },
+      })
+      expect(JSON.stringify([modelSummary, resumeSummary])).not.toContain('private')
+    } finally {
+      configReadError = false
+      if (originalModels === undefined) stored.delete('conf-model')
+      else stored.set('conf-model', originalModels)
+      if (originalResumes === undefined) stored.delete('local:boss-helper:resumes:v1')
+      else stored.set('local:boss-helper:resumes:v1', originalResumes)
+      await store.initializeWorkbench()
+      await settle()
+    }
+  })
+
   test('bulk deletes saved jobs through background storage without executor messages', async () => {
     const original = stored.get(JOB_LIBRARY_STORAGE_KEY)
     try {
@@ -326,6 +623,256 @@ describe('workbench synchronization and mutation boundary', () => {
     } finally {
       tabs.splice(0, tabs.length, ...original)
       await store.refreshTabs()
+    }
+  })
+
+  test('tracks the active detail job separately from executor tabs', async () => {
+    const original = [...tabs]
+    try {
+      tabs.splice(0, tabs.length, {
+        id: 10,
+        title: '产品经理',
+        url: 'https://www.zhipin.com/job_detail/one.html',
+        active: true,
+      })
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().tabs).toEqual([])
+      expect(store.getWorkbenchState().tabId).toBeNull()
+      expect(store.getWorkbenchState().activeDetailJobId).toBe('one')
+    } finally {
+      tabs.splice(0, tabs.length, ...original)
+      await store.refreshTabs()
+    }
+  })
+
+  test('runs analysis and greeting for the active detail job without an executor tab', async () => {
+    const originalTabs = [...tabs]
+    const savedModels = stored.get('conf-model')
+    const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    try {
+      tabs.splice(0, tabs.length, {
+        id: 10,
+        title: '详情岗位',
+        url: 'https://www.zhipin.com/job_detail/detail-job.html',
+        active: true,
+      })
+      stored.set('conf-model', [
+        {
+          key: 'model',
+          name: '模型',
+          data: { api_key: 'test', base_url: 'https://model.invalid/v1', model: 'saved-model' },
+        },
+      ])
+      resumes.currentResume.value = { id: 'resume', name: '主简历', content: '完整简历正文' }
+      const records = mergeJobRecords(
+        [],
+        [{ encryptJobId: 'detail-job', jobName: '详情岗位', brandName: '详情公司' }],
+        '手动详情页',
+        'manual-detail',
+      ).records
+      Object.assign(records[0], {
+        detailStatus: 'complete',
+        detail: {
+          jobInfo: {
+            encryptId: 'detail-job',
+            postDescription: '完整的产品规划与需求分析岗位职责和任职要求',
+          },
+        },
+      })
+      stored.set(JOB_LIBRARY_STORAGE_KEY, records)
+      calls.length = 0
+      modelCalls.length = 0
+      await store.refreshTabs()
+
+      await store.command({ type: 'analyzeOne', jobId: 'detail-job' })
+      for (let i = 0; i < 100 && store.getWorkbenchState().analysisBusy; i++) await settle()
+      await store.command({ type: 'generateGreeting', jobId: 'detail-job' })
+
+      expect(calls).toEqual([])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings', 'greetings'])
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('你好，期待沟通。')
+      await expect(
+        store.command({ type: 'sendGreeting', jobId: 'detail-job', greeting: '你好' }),
+      ).rejects.toThrow('详情页仅支持生成招呼语')
+    } finally {
+      tabs.splice(0, tabs.length, ...originalTabs)
+      stored.set('conf-model', savedModels ?? [])
+      stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      resumes.currentResume.value = null
+      await store.refreshTabs()
+    }
+  })
+
+  test('previews an unsaved detail without writing storage, then saves only on an explicit action', async () => {
+    const originalTabs = [...tabs]
+    const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const originalRead = readDetail
+    const detail = {
+      jobInfo: {
+        encryptId: 'preview',
+        jobName: '预览岗位',
+        postDescription: '负责产品规划、需求分析和项目交付的完整职责描述。',
+      },
+      brandComInfo: { brandName: '预览公司' },
+    }
+    try {
+      stored.set(JOB_LIBRARY_STORAGE_KEY, [])
+      await store.refreshLibrary()
+      tabs.splice(0, tabs.length, {
+        id: 10,
+        url: 'https://www.zhipin.com/job_detail/preview.html',
+        active: true,
+      })
+      readDetail = async () => ({ status: 'pending', error: '等待正文' })
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().activeDetail).toBeNull()
+      readDetail = async () => ({ status: 'ready', jobId: 'preview', detail })
+      await store.refreshRuntime()
+      expect(store.getWorkbenchState().activeDetail).toEqual(detail)
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)).toEqual([])
+      expect(store.getWorkbenchState().records).toEqual([])
+
+      calls.length = 0
+      await store.command({ type: 'captureJob', key: 'boss::preview' })
+      await store.command({ type: 'captureJob', key: 'boss::preview' })
+      expect(calls).toEqual([])
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(1)
+      expect(store.getWorkbenchState().records[0]).toMatchObject({
+        encryptJobId: 'preview',
+        detailStatus: 'complete',
+        snapshot: { jobName: '预览岗位', brandName: '预览公司' },
+        detail,
+      })
+      tabs.length = 0
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().activeDetail).toBeNull()
+    } finally {
+      readDetail = originalRead
+      tabs.splice(0, tabs.length, ...originalTabs)
+      stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      await store.refreshLibrary()
+      await store.refreshTabs()
+    }
+  })
+
+  test('rejects mismatched previews and drops a late preview after the active tab changes', async () => {
+    const originalTabs = [...tabs]
+    const originalRead = readDetail
+    try {
+      tabs.splice(0, tabs.length, {
+        id: 10,
+        url: 'https://www.zhipin.com/job_detail/preview.html',
+        active: true,
+      })
+      readDetail = async () => ({
+        status: 'ready',
+        jobId: 'wrong',
+        detail: { jobInfo: { encryptId: 'wrong', postDescription: 'Wrong JD' } },
+      })
+      await store.refreshTabs()
+      expect(store.getWorkbenchState().activeDetail).toBeNull()
+      let finish
+      readDetail = () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+      const reading = store.refreshRuntime()
+      await settle()
+      tabs.length = 0
+      await store.refreshTabs()
+      finish({
+        status: 'ready',
+        jobId: 'preview',
+        detail: { jobInfo: { encryptId: 'preview', postDescription: 'Late JD' } },
+      })
+      await reading
+      expect(store.getWorkbenchState().activeDetailJobId).toBeNull()
+      expect(store.getWorkbenchState().activeDetail).toBeNull()
+    } finally {
+      readDetail = originalRead
+      tabs.splice(0, tabs.length, ...originalTabs)
+      await store.refreshTabs()
+    }
+  })
+
+  test('analyzes an unsaved detail preview on demand without a BOSS executor', async () => {
+    const originalTabs = [...tabs]
+    const originalRead = readDetail
+    const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const jd = '负责产品规划、需求分析和项目交付的完整职责描述。'
+    try {
+      stored.set(JOB_LIBRARY_STORAGE_KEY, [])
+      await store.refreshLibrary()
+      tabs.splice(0, tabs.length, {
+        id: 10,
+        url: 'https://www.zhipin.com/job_detail/preview.html',
+        active: true,
+      })
+      readDetail = async () => ({
+        status: 'ready',
+        jobId: 'preview',
+        detail: { jobInfo: { encryptId: 'preview', jobName: '预览岗位', postDescription: jd } },
+      })
+      resumes.currentResume.value = { id: 'resume', name: '主简历', content: '完整简历正文' }
+      await store.refreshTabs()
+      modelCalls.length = 0
+      calls.length = 0
+      await store.command({ type: 'analyzeOne', jobId: 'preview' })
+      await store.command({ type: 'generateGreeting', jobId: 'preview' })
+      expect(calls).toEqual([])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings', 'greetings'])
+      expect(modelCalls.every((call) => call.jd === jd)).toBe(true)
+      expect(store.getWorkbenchState().records[0]).toMatchObject({
+        encryptJobId: 'preview',
+        analysisStatus: 'ready',
+        finalGreeting: '你好，期待沟通。',
+      })
+    } finally {
+      resumes.currentResume.value = null
+      readDetail = originalRead
+      tabs.splice(0, tabs.length, ...originalTabs)
+      stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      await store.refreshLibrary()
+      await store.refreshTabs()
+    }
+  })
+
+  test('returns from a detail tab to the selected BOSS list before opening its job', async () => {
+    const originalSend = send
+    const originalTabs = [...tabs]
+    try {
+      tabs.push({
+        id: 10,
+        title: 'detail',
+        url: 'https://www.zhipin.com/job_detail/a.html',
+        active: true,
+      })
+      await store.refreshTabs()
+      store.selectTab(2)
+      await settle()
+      navigationCalls.length = 0
+      send = async (id, request) => {
+        if (request.command.type === 'openJob')
+          navigationCalls.push(['openJob', id, request.command.key])
+        return { ok: true, data: { ready: true, error: '' } }
+      }
+
+      await store.command({ type: 'openJob', key: 'boss::a' })
+
+      expect(navigationCalls).toEqual([
+        ['tab', 2, { active: true }],
+        ['window', 7, { focused: true }],
+        ['openJob', 2, 'boss::a'],
+      ])
+      navigationCalls.length = 0
+      await store.command({ type: 'captureJob', key: 'boss::a' })
+      expect(navigationCalls).toEqual([])
+    } finally {
+      send = originalSend
+      tabs.splice(0, tabs.length, ...originalTabs)
+      await store.refreshTabs()
+      store.selectTab(1)
+      await settle()
     }
   })
 

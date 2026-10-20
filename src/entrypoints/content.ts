@@ -11,12 +11,16 @@ import { EXECUTOR_NAMESPACE, handleExecutorMessage } from '@/workbench/protocol'
 import { connectBridge, observeProvider } from '../message/bridge'
 import { forwardPageDiagnostics, startExtensionDiagnostics } from '../message/diagnostics'
 import { diagnostic } from '../utils/diagnostics'
+import { installJobDetailReader } from './boss/jobDetailContent'
+import { jobIdFromUrl } from './boss/jobDetails'
 
 export default defineContentScript({
   matches: ['*://zhipin.com/*', '*://*.zhipin.com/*'],
   runAt: 'document_start',
   world: 'ISOLATED',
   async main() {
+    installJobDetailReader(browser.runtime, document)
+    if (jobIdFromUrl(location.href) || !/^\/web\/geek\//.test(location.pathname)) return
     startExtensionDiagnostics('content')
     const [, injectBackgroundCounter] = defineProxy(() => ({}) as BackgroundCounter, {
       namespace: '__boss-helper-background__',

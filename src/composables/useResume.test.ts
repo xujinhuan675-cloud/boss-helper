@@ -111,6 +111,27 @@ describe('resume store', () => {
     expect(refreshed.resumes.value).toEqual(store.resumes.value)
   })
 
+  it('keeps resume selection scoped to each job plan', async () => {
+    const storage = fakeStorage()
+    const store = createResumeStore(storage)
+    await store.init()
+    const first = await store.createResume('Resume A', 'Body A')
+    const second = await store.createResume('Resume B', 'Body B')
+
+    await store.selectResumeForPreset('default', first.id)
+    await store.selectResumeForPreset('senior', second.id)
+    await store.activatePreset('default')
+    expect(store.currentResumeId.value).toBe(first.id)
+    await store.activatePreset('senior')
+    expect(store.currentResumeId.value).toBe(second.id)
+
+    const refreshed = createResumeStore(storage)
+    await refreshed.init()
+    await refreshed.activatePreset('default')
+    expect(refreshed.currentResumeId.value).toBe(first.id)
+    expect(storage.read().presetResumeIds).toEqual({ default: first.id, senior: second.id })
+  })
+
   it('does not mutate in-memory data when persistence fails', async () => {
     const storage = fakeStorage()
     const store = createResumeStore(storage)
@@ -125,5 +146,24 @@ describe('resume store', () => {
     await expect(store.deleteResume(first.id, null)).rejects.toThrow('保存失败')
     expect(store.resumes.value).toEqual(before)
     expect(store.currentResumeId.value).toBe(first.id)
+  })
+
+  it('removes a plan binding without deleting shared resumes or changing the current selection', async () => {
+    const storage = fakeStorage()
+    const store = createResumeStore(storage)
+    await store.init()
+    const first = await store.createResume('Resume A', 'Body A')
+    const second = await store.createResume('Resume B', 'Body B')
+    await store.selectResumeForPreset('product', second.id)
+    await store.selectResumeForPreset('default', first.id)
+    await store.removePreset('product')
+    expect(storage.read().presetResumeIds).toEqual({ default: first.id })
+    expect(storage.read().resumes).toHaveLength(2)
+    expect(store.currentResumeId.value).toBe(first.id)
+    storage.storageSet = async () => {
+      throw new Error('保存失败')
+    }
+    await expect(store.removePreset('default')).rejects.toThrow('保存失败')
+    expect(store.presetResumeIds.value).toEqual({ default: first.id })
   })
 })

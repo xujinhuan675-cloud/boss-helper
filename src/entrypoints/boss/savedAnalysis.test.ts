@@ -122,6 +122,10 @@ function fixture(count = 2) {
     notification: async () => {},
     claimJobAnalysis: async () => true,
     releaseJobAnalysis: async () => {},
+    saveJobGreeting: async (id, greeting) => {
+      records.find((record) => record.encryptJobId === id).finalGreeting = greeting
+      return true
+    },
     getJobLibrary: async () => jsonClone(records),
     getSavedJobData: (record: any) => ({
       jobData: {
@@ -162,6 +166,44 @@ beforeEach(() => {
 })
 
 describe('saved job analysis', () => {
+  it('generates only a greeting for a filtered-out job without changing its analysis', async () => {
+    const { analyzer, records, host } = fixture(1)
+    records[0].analysisStatus = 'ready'
+    records[0].analysis = { passed: false, rating: 45 }
+    host.conf.formData.aiFiltering.prompt = []
+    const before = jsonClone(records[0].analysis)
+    await analyzer.generateGreetingOne('0')
+    expect(requests).toEqual([{ role: 'greetings', id: '0' }])
+    expect(records[0].analysis).toEqual(before)
+    expect(records[0].analysisStatus).toBe('ready')
+    expect(records[0].finalGreeting).toBe('已有提示词生成的招呼语')
+    expect(chatSnapshots).toEqual(['主简历正文 A'])
+    expect(analyzer.busy.value).toBe(false)
+  })
+
+  it('keeps existing drafts and releases the claim when greeting generation fails', async () => {
+    const { analyzer, records, host } = fixture(1)
+    records[0].finalGreeting = '已有草稿'
+    const released = []
+    host.releaseJobAnalysis = async (id) => {
+      released.push(id)
+    }
+    respond = async () => '  '
+    await expect(analyzer.generateGreetingOne('0')).rejects.toThrow('空招呼语')
+    expect(records[0].finalGreeting).toBe('已有草稿')
+    expect(released).toEqual(['0'])
+    expect(analyzer.busy.value).toBe(false)
+  })
+
+  it.each([{ processingStatus: 'excluded' }, { reviewStatus: 'approved' }, { sendStatus: 'sent' }])(
+    'does not generate a draft for a protected job: %j',
+    async (patch) => {
+      const { analyzer, records } = fixture(1)
+      Object.assign(records[0], patch)
+      await expect(analyzer.generateGreetingOne('0')).rejects.toThrow()
+      expect(requests).toEqual([])
+    },
+  )
   it('skips a job claimed by another analyzer without making duplicate model requests', async () => {
     const { analyzer, host } = fixture(1)
     const storage = new Map()
@@ -669,6 +711,7 @@ describe('saved job analysis', () => {
 
   it.each([
     { analysisStatus: 'ready' },
+    { processingStatus: 'excluded' },
     { reviewStatus: 'approved' },
     { reviewStatus: 'rejected' },
     { sendStatus: 'queued' },

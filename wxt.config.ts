@@ -60,7 +60,12 @@ export default defineConfig({
     name: '__MSG_extName__',
     description: '__MSG_extDescription__',
     icons,
-    permissions: ['storage', 'notifications', ...(browser === 'firefox' ? [] : ['sidePanel'])],
+    permissions: [
+      'storage',
+      'notifications',
+      ...(browser === 'chrome' ? ['nativeMessaging'] : []),
+      ...(browser === 'firefox' ? [] : ['sidePanel']),
+    ],
     action: { default_title: '打开 OfferHunt 侧边栏', default_icon: icons },
     web_accessible_resources: [
       {
@@ -87,6 +92,11 @@ export default defineConfig({
   }),
   webExt: {
     disabled: true,
+  },
+  hooks: {
+    'build:publicAssets': (wxt, files) => {
+      files.push({ absoluteSrc: resolve(wxt.config.root, 'LICENSE'), relativeDest: 'LICENSE' })
+    },
   },
   // hooks: {
   //   'build:manifestGenerated': (wxt, manifest) => {

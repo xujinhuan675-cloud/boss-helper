@@ -52,6 +52,7 @@ export interface FormData {
   delayCollectionScrollMax: number
   delayCollectionDetailMin: number
   delayCollectionDetailMax: number
+  collectionMaxRuntimeMinutes: number
   delayKeywordRotationMin: number
   delayKeywordRotationMax: number
   keywordRotationBatchSize: number

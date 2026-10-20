@@ -34,6 +34,191 @@ const analyze = () =>
     },
   })
 
+test('retains a standalone greeting through normalization and later library mutations', async () => {
+  await library.update({ type: 'greeting', jobId: 'one', greeting: '独立招呼语' })
+  await library.update({ type: 'normalize' })
+  await library.update({ type: 'funnel', jobId: 'one', stage: 'collected' })
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('独立招呼语')
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].analysis).toBeUndefined()
+})
+
+test('imports missing jobs without replacing existing records or their statuses', async () => {
+  const existing = data.get(JOB_LIBRARY_STORAGE_KEY)[0]
+  existing.reviewStatus = 'approved'
+  existing.analysisStatus = 'ready'
+  existing.analysis = { scoringVersion: MATCH_SCORING_VERSION, rating: 88 }
+  const imported = mergeJobRecords(
+    [],
+    [{ encryptJobId: 'one' }, { encryptJobId: 'two' }],
+    '历史导入',
+    'merged',
+  ).records
+
+  const result = await library.update({ type: 'import', records: imported })
+
+  expect(result).toMatchObject({ newCount: 1, duplicateCount: 1, updated: true })
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(2)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
+    encryptJobId: 'one',
+    reviewStatus: 'approved',
+    analysisStatus: 'ready',
+    analysis: { rating: 88 },
+  })
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[1].encryptJobId).toBe('two')
+})
+
+test('queues a send only once and only for the draft the user confirmed', async () => {
+  await library.update({ type: 'greeting', jobId: 'one', greeting: '新草稿' })
+  await expect(
+    library.update({ type: 'send', jobId: 'one', status: 'queued', greeting: '旧草稿' }),
+  ).rejects.toThrow('确认')
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus).toBe('pending')
+  const queue = () =>
+    library.update({ type: 'send', jobId: 'one', status: 'queued', greeting: '新草稿' })
+  expect((await queue()).updated).toBe(true)
+  expect((await queue()).updated).toBe(false)
+  await library.update({ type: 'send', jobId: 'one', status: 'unknown' })
+  expect((await queue()).updated).toBe(false)
+})
+
+test('saves a greeting for an analyzed job without overwriting analysis or protected states', async () => {
+  await analyze()
+  const before = structuredClone(data.get(JOB_LIBRARY_STORAGE_KEY)[0].analysis)
+  expect(
+    (await library.update({ type: 'greeting', jobId: 'one', greeting: '新草稿' })).updated,
+  ).toBe(true)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].analysis).toEqual(before)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('新草稿')
+  await expect(library.update({ type: 'greeting', jobId: 'one', greeting: '  ' })).rejects.toThrow()
+  for (const patch of [
+    { processingStatus: 'excluded' },
+    { reviewStatus: 'approved' },
+    { sendStatus: 'queued' },
+  ]) {
+    Object.assign(data.get(JOB_LIBRARY_STORAGE_KEY)[0], patch)
+    expect(
+      (await library.update({ type: 'greeting', jobId: 'one', greeting: '禁止覆盖' })).updated,
+    ).toBe(false)
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('新草稿')
+    Object.assign(data.get(JOB_LIBRARY_STORAGE_KEY)[0], {
+      processingStatus: 'active',
+      reviewStatus: 'pending',
+      sendStatus: 'pending',
+    })
+  }
+})
+
+test('detail writes reject mismatched identities and previews without modifying the library', async () => {
+  const before = structuredClone(data.get(JOB_LIBRARY_STORAGE_KEY))
+  for (const jobInfo of [
+    { encryptId: 'other', postDescription: 'Wrong JD' },
+    { encryptId: 'one', postDescription: '登录查看完整内容' },
+    { encryptId: 'one', postDescription: '' },
+  ]) {
+    await expect(
+      library.update({
+        type: 'detail',
+        jobId: 'one',
+        patch: { detailStatus: 'complete', detail: { jobInfo } },
+      }),
+    ).rejects.toThrow()
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(before)
+  }
+})
+
+test('late failure cannot downgrade a complete detail or resurrect an excluded job', async () => {
+  const record = data.get(JOB_LIBRARY_STORAGE_KEY)[0]
+  record.detailStatus = 'complete'
+  record.detail = { jobInfo: { encryptId: 'one', postDescription: 'Complete existing JD' } }
+  record.reviewStatus = 'approved'
+  record.sendStatus = 'sent'
+  expect(
+    (
+      await library.update({
+        type: 'detail',
+        jobId: 'one',
+        patch: { detailStatus: 'failed', failureReason: 'timeout' },
+      })
+    ).updated,
+  ).toBe(false)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toEqual(record)
+  await library.update({ type: 'processing', jobId: 'one', status: 'excluded' })
+  expect(
+    (
+      await library.update({
+        type: 'detail',
+        jobId: 'one',
+        patch: {
+          detailStatus: 'complete',
+          detail: { jobInfo: { encryptId: 'one', postDescription: 'New JD' } },
+        },
+      })
+    ).updated,
+  ).toBe(false)
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].processingStatus).toBe('excluded')
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detail.jobInfo.postDescription).toBe(
+    'Complete existing JD',
+  )
+})
+
+test('history completion fixes candidate IDs, excludes complete/excluded jobs and has one owner', async () => {
+  const records = mergeJobRecords(
+    [],
+    ['one', 'two', 'done', 'excluded'].map((encryptJobId) => ({ encryptJobId })),
+    '',
+    '',
+  ).records
+  records[2].detailStatus = 'complete'
+  records[2].detail = { jobInfo: { postDescription: 'JD' } }
+  records[3].processingStatus = 'excluded'
+  data.set(JOB_LIBRARY_STORAGE_KEY, records)
+  const run = await library.historyDetails({ type: 'start', token: 'a' })
+  expect(run.jobIds).toEqual(['one', 'two'])
+  expect(run.cursor).toBe(0)
+  await expect(library.historyDetails({ type: 'resume', token: 'b' })).rejects.toThrow('另一页面')
+  await library.historyDetails({ type: 'finish', token: 'a', status: 'stopped' })
+  const resumed = await library.historyDetails({ type: 'resume', token: 'b' })
+  expect(resumed.id).toBe(run.id)
+  expect(resumed.cursor).toBe(0)
+})
+
+test('history checkpoint requires a confirmed detail save and rejects a displaced writer', async () => {
+  await library.historyDetails({ type: 'start', token: 'a' })
+  await expect(
+    library.historyDetails({ type: 'advance', token: 'a', jobId: 'one', result: 'completed' }),
+  ).rejects.toThrow('保存')
+  const patch = {
+    detailStatus: 'complete',
+    detail: { jobInfo: { encryptId: 'one', postDescription: 'JD' } },
+  }
+  await library.update({ type: 'detail', jobId: 'one', patch, historyToken: 'a' })
+  const run = await library.historyDetails({
+    type: 'advance',
+    token: 'a',
+    jobId: 'one',
+    result: 'completed',
+  })
+  expect(run).toMatchObject({ cursor: 1, completed: 1 })
+  await library.historyDetails({ type: 'finish', token: 'a', status: 'completed' })
+  await expect(
+    library.update({ type: 'detail', jobId: 'one', patch, historyToken: 'a' }),
+  ).rejects.toThrow('所有权')
+})
+
+test('history lease can be recovered after page loss without allowing late writes', async () => {
+  const run = await library.historyDetails({ type: 'start', token: 'a' })
+  const now = Date.now
+  Date.now = () => now() + 120_000
+  try {
+    const resumed = await library.historyDetails({ type: 'resume', token: 'b' })
+    expect(resumed.id).toBe(run.id)
+    await expect(library.historyDetails({ type: 'renew', token: 'a' })).rejects.toThrow('所有权')
+    expect((await library.historyDetails({ type: 'read' })).owner).toBe('b')
+  } finally {
+    Date.now = now
+  }
+})
+
 test('serializes overlapping collection, detail, analysis and local edits without losing fields', async () => {
   await Promise.all([
     library.update({
@@ -48,7 +233,7 @@ test('serializes overlapping collection, detail, analysis and local edits withou
       patch: {
         detailStatus: 'complete',
         detailRetryCount: 0,
-        detail: { jobInfo: { postDescription: '完整 JD' } },
+        detail: { jobInfo: { encryptId: 'one', postDescription: '完整 JD' } },
       },
     }),
     analyze(),

@@ -11,6 +11,14 @@ import { DIAGNOSTICS_KEY, loadDiagnostics, startExtensionDiagnostics } from '../
 import { clearDiagnostics, diagnostic } from '../utils/diagnostics'
 
 export async function startWorkbench(mode: 'sidepanel' | 'workbench') {
+  // Activate the new manifest when an already-open unpacked extension loads this bundle.
+  if (
+    import.meta.env.CHROME &&
+    !browser.runtime.getManifest().permissions?.includes('nativeMessaging')
+  ) {
+    browser.runtime.reload()
+    return
+  }
   startExtensionDiagnostics('workbench')
   void loadDiagnostics().catch((error) => diagnostic('diagnostics.load', { error }))
   browser.storage.onChanged.addListener((changes, area) => {

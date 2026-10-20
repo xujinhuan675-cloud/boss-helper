@@ -13,10 +13,18 @@ let receive
 let sendError = false
 let writeError = false
 let beforeRead
+let nativeError = false
+const snapshots = []
 mock.module('#imports', () => ({
   browser: {
     runtime: {
       id: 'own',
+      getManifest: () => ({ version: '0.5.2.2' }),
+      sendNativeMessage: async (host, snapshot) => {
+        if (nativeError) throw new Error('Specified native messaging host not found.')
+        snapshots.push({ host, snapshot })
+        return { ok: true, path: 'C:/logs/latest.json', exportedAt: '2026-10-18T00:00:00Z' }
+      },
       onMessage: {
         addListener: (fn) => {
           receive = fn
@@ -47,6 +55,7 @@ mock.module('#imports', () => ({
 }))
 const {
   DIAGNOSTICS_KEY,
+  DIAGNOSTICS_MIRROR_KEY,
   clearSavedDiagnostics,
   installDiagnosticReceiver,
   loadDiagnostics,
@@ -58,6 +67,8 @@ beforeEach(() => {
   sendError = false
   writeError = false
   beforeRead = undefined
+  nativeError = false
+  snapshots.length = 0
   installDiagnosticReceiver()
 })
 const event = (index) => ({
@@ -140,4 +151,47 @@ test('recovers the write queue after a persistence failure', async () => {
     { ok: true },
   )
   expect(values.get(DIAGNOSTICS_KEY).map((entry) => entry.id)).toEqual(['2'])
+})
+
+test('automatically mirrors only normalized diagnostics and clears the machine snapshot', async () => {
+  await receive(
+    {
+      type: 'boss-helper:diagnostic',
+      event: { ...event(1), context: { token: 'secret', status: 'captcha' } },
+    },
+    { id: 'own' },
+  )
+  expect(snapshots.at(-1).host).toBe('cc.offerhunt.diagnostics')
+  expect(snapshots.at(-1).snapshot.events[0].context).toEqual({ status: 'captcha' })
+  expect(values.get(DIAGNOSTICS_MIRROR_KEY)).toMatchObject({
+    ok: true,
+    path: 'C:/logs/latest.json',
+  })
+  await clearSavedDiagnostics()
+  expect(snapshots.at(-1).snapshot.events).toEqual([])
+})
+
+test('keeps logs saved when native mirroring fails and exposes a recoverable status', async () => {
+  nativeError = true
+  expect(await receive({ type: 'boss-helper:diagnostic', event: event(1) }, { id: 'own' })).toEqual(
+    { ok: true },
+  )
+  expect(values.get(DIAGNOSTICS_KEY)).toHaveLength(1)
+  expect(values.get(DIAGNOSTICS_MIRROR_KEY)).toMatchObject({ ok: false })
+  nativeError = false
+  await receive({ type: 'boss-helper:diagnostic', event: event(2) }, { id: 'own' })
+  expect(snapshots.at(-1).snapshot.events).toHaveLength(2)
+  expect(values.get(DIAGNOSTICS_MIRROR_KEY).ok).toBe(true)
+})
+
+test('reconciles an offline clear with the mirror after reconnection', async () => {
+  await receive({ type: 'boss-helper:diagnostic', event: event(1) }, { id: 'own' })
+  nativeError = true
+  await clearSavedDiagnostics()
+  expect(values.get(DIAGNOSTICS_KEY)).toBeUndefined()
+  expect(values.get(DIAGNOSTICS_MIRROR_KEY).ok).toBe(false)
+  expect(snapshots.at(-1).snapshot.events).toHaveLength(1)
+  nativeError = false
+  await receive({ type: 'boss-helper:diagnostic-sync' }, { id: 'own' })
+  expect(snapshots.at(-1).snapshot.events).toEqual([])
 })

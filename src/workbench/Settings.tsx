@@ -3,17 +3,21 @@ import {
   Accordion,
   Alert,
   Button,
+  Chip,
   Input,
   Label,
   NumberField,
+  Radio,
+  RadioGroup,
   Separator,
   Slider,
   Switch,
+  Table,
   TextArea,
   TextField,
 } from '@heroui/react'
 import { LocateFixed, Plus, RotateCcw, Save, Trash2 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { defaultFormData } from '@/composables/conf/info'
 import { counter } from '@/message'
@@ -21,8 +25,15 @@ import type { FormData } from '@/types/formData'
 import { isPlainObject, jsonClone } from '@/utils/deepmerge'
 
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
-import { validateConfig } from './settingsValidation'
-import { command, reloadExecutorSettings, saveConfig, services } from './store'
+import {
+  command,
+  createPlan,
+  deletePlan,
+  perform,
+  saveConfig,
+  selectResume,
+  switchPlan,
+} from './store'
 import { useWorkbench } from './useWorkbench'
 
 const filterLabels = {
@@ -62,6 +73,7 @@ const collectionTimingKeys = [
   'delayCollectionScrollMax',
   'delayCollectionDetailMin',
   'delayCollectionDetailMax',
+  'collectionMaxRuntimeMinutes',
 ] as const
 const rotationKeys = [
   'delayKeywordRotationMin',
@@ -225,19 +237,29 @@ function TimeInterval({
   )
 }
 
-export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' }) {
+export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' | 'plan' }) {
   const filters = page === 'filters'
+  const plan = page === 'plan'
+  const showFilters = filters || plan
   const state = useWorkbench()
   const [draft, setDraft] = useState<Partial<FormData>>({})
+  const draftRef = useRef<Partial<FormData>>({})
   const draftPreset = useRef<string | null>(null)
+  const saveTask = useRef<Promise<boolean> | null>(null)
   const [error, setError] = useState('')
   const [presetName, setPresetName] = useState('')
-  const [switchingPreset, setSwitchingPreset] = useState<string | null>(null)
+  const [creatingPreset, setCreatingPreset] = useState(false)
+  const [deletingPreset, setDeletingPreset] = useState<{ label: string; value: string } | null>(
+    null,
+  )
   const [clearingCache, setClearingCache] = useState(false)
   const runtime = state.runtime
   const config = { ...state.config, ...draft }
+  const detailCapacity = Math.floor(
+    (config.collectionMaxRuntimeMinutes * 60) /
+      ((config.delayCollectionDetailMin + config.delayCollectionDetailMax) / 2),
+  )
   const dirty = Object.keys(draft).length > 0
-  const presetConflict = dirty && draftPreset.current !== state.preset
   const busy =
     state.loading ||
     state.saving ||
@@ -253,7 +275,8 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
 
   function stageDraft(patch: Partial<FormData>) {
     draftPreset.current ??= state.preset
-    setDraft((current) => ({ ...current, ...patch }))
+    draftRef.current = { ...draftRef.current, ...patch }
+    setDraft(draftRef.current)
     setError('')
   }
 
@@ -265,90 +288,73 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
     stageDraft(Object.fromEntries(keys.map((key) => [key, jsonClone(defaultFormData[key])])))
   }
 
-  function discardDraft() {
-    setDraft({})
-    draftPreset.current = null
-    setError('')
-  }
+  const save = useCallback((): Promise<boolean> => {
+    if (saveTask.current) return saveTask.current
+    saveTask.current = (async () => {
+      while (Object.keys(draftRef.current).length) {
+        const pending = draftRef.current
+        const preset = draftPreset.current!
+        const patch = jsonClone(pending)
+        for (const key of Object.keys(filterLabels) as (keyof typeof filterLabels)[]) {
+          const filter = patch[key]
+          if (filter) filter.value = filter.value.map((item) => item.trim()).filter(Boolean)
+        }
+        if (patch.record?.model)
+          patch.record.model = patch.record.model.map((item) => item.trim()).filter(Boolean)
+        try {
+          await perform(() => saveConfig(patch, preset))
+        } catch (error) {
+          setError(`自动保存失败：${error instanceof Error ? error.message : String(error)}`)
+          return false
+        }
+        if (draftRef.current === pending) {
+          draftRef.current = {}
+          draftPreset.current = null
+          setDraft({})
+        }
+      }
+      setError('')
+      return true
+    })().finally(() => {
+      saveTask.current = null
+    })
+    return saveTask.current
+  }, [])
 
-  function assertDraftPreset() {
-    if (
-      draftPreset.current !== null &&
-      draftPreset.current !== services.conf.formDataPreset.value
-    ) {
-      throw new Error('配置预设已变更，请先放弃草稿并重新加载当前预设')
-    }
-  }
+  useEffect(() => {
+    if (!dirty || busy || error) return
+    const timer = setTimeout(() => {
+      void save()
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [draft, dirty, busy, error, save])
 
-  function preparedConfig() {
-    assertDraftPreset()
-    const next = jsonClone(config)
-    for (const key of Object.keys(filterLabels) as (keyof typeof filterLabels)[])
-      next[key].value = next[key].value.map((item) => item.trim()).filter(Boolean)
-    if (next.record.model)
-      next.record.model = next.record.model.map((item) => item.trim()).filter(Boolean)
-    validateConfig(next)
-    return next
-  }
-
-  async function save() {
-    if (busy || !dirty) return
-    setError('')
-    try {
-      const next = preparedConfig()
-      const patch = Object.fromEntries(
-        Object.keys(draft).map((key) => [key, next[key]]),
-      ) as Partial<FormData>
-      if (
-        await act(() => {
-          assertDraftPreset()
-          return saveConfig(patch)
-        }, '配置已保存')
-      )
-        discardDraft()
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error))
-    }
-  }
+  useEffect(
+    () => () => {
+      void save()
+    },
+    [save],
+  )
 
   async function switchPreset(value: string) {
-    if (busy) return
-    if (
-      await act(async () => {
-        await services.conf.switchPreset(value)
-        await reloadExecutorSettings()
-      }, '配置预设已切换')
-    ) {
-      discardDraft()
-      setSwitchingPreset(null)
+    if (busy || value === state.preset || !(await save())) return
+    await act(() => switchPlan(value))
+  }
+
+  async function removePreset() {
+    if (busy || !deletingPreset) return
+    if (!(await save())) return
+    if (await act(() => deletePlan(deletingPreset.value), '求职方案已删除')) {
+      setDeletingPreset(null)
     }
   }
 
   async function createPreset() {
     if (busy || !presetName.trim()) return
-    setError('')
-    try {
-      const next = preparedConfig()
-      const name = presetName.trim()
-      if (
-        await act(async () => {
-          assertDraftPreset()
-          const before = jsonClone(services.conf.formData)
-          Object.assign(services.conf.formData, next)
-          try {
-            await services.conf.createPreset(name)
-          } catch (error) {
-            Object.assign(services.conf.formData, before)
-            throw error
-          }
-          await reloadExecutorSettings()
-        }, '配置预设已创建')
-      ) {
-        discardDraft()
-        setPresetName('')
-      }
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error))
+    if (!(await save())) return
+    if (await act(() => createPlan(presetName.trim()), '求职方案已创建')) {
+      setPresetName('')
+      setCreatingPreset(false)
     }
   }
 
@@ -385,35 +391,33 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
   return (
     <section className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">{filters ? '筛选规则' : '任务设置'}</h1>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" isDisabled={busy || !dirty} onPress={discardDraft}>
-            <RotateCcw size={16} />
-            放弃修改
-          </Button>
+        <div>
+          <h1 className="text-xl font-semibold">
+            {filters ? '筛选规则' : plan ? '求职方案' : '任务设置'}
+          </h1>
+          {plan && (
+            <p className="text-sm text-muted">
+              当前使用：{state.presets.find((preset) => preset.value === state.preset)?.label}
+            </p>
+          )}
+        </div>
+        {plan && (
           <Button
-            isDisabled={busy || !dirty || presetConflict}
+            isDisabled={busy}
             onPress={() => {
-              void save()
+              setPresetName('')
+              setCreatingPreset(true)
             }}
           >
-            <Save size={16} />
-            保存配置
+            <Plus size={16} />
+            新建方案
           </Button>
-        </div>
+        )}
       </div>
-      {dirty && (
+      {dirty && !error && (
         <output className="text-sm text-warning" aria-live="polite">
-          有尚未保存的配置修改
+          正在保存…
         </output>
-      )}
-      {presetConflict && (
-        <Alert status="warning">
-          <Alert.Content>
-            <Alert.Title>配置预设已变更</Alert.Title>
-            <Alert.Description>草稿属于之前的预设。请放弃修改，再编辑当前预设。</Alert.Description>
-          </Alert.Content>
-        </Alert>
       )}
       {error && (
         <Alert status="danger">
@@ -423,46 +427,115 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
           </Alert.Content>
         </Alert>
       )}
-      <div className="field-grid">
-        <SelectField
-          label="当前预设"
-          value={state.preset}
-          options={state.presets}
-          disabled={busy}
-          onChange={(value) => {
-            if (value !== state.preset) {
-              if (dirty) setSwitchingPreset(value)
-              else void switchPreset(value)
-            }
-          }}
-        />
-        <div className="flex items-end gap-2">
-          <TextField
-            value={presetName}
-            onChange={setPresetName}
+      {plan && (
+        <section className="flex flex-col gap-3" aria-label="求职方案">
+          <div className="field-grid">
+            <SelectField
+              label="当前简历"
+              value={state.resumes.currentResumeId ?? '__none__'}
+              disabled={busy}
+              options={[
+                { value: '__none__', label: '不使用简历' },
+                ...state.resumes.resumes.map((resume) => ({
+                  value: resume.id,
+                  label: resume.name,
+                })),
+              ]}
+              onChange={(id) => {
+                void act(() => selectResume(id === '__none__' ? null : id), '方案简历已更新')
+              }}
+            />
+          </div>
+          <RadioGroup
+            aria-label="当前求职方案"
+            value={state.preset}
             isDisabled={busy}
-            className="min-w-0 flex-1"
-          >
-            <Label>新预设名称</Label>
-            <Input />
-          </TextField>
-          <Button
-            variant="secondary"
-            isDisabled={busy || !presetName.trim() || presetConflict}
-            onPress={() => {
-              void createPreset()
+            onChange={(value) => {
+              void switchPreset(value)
             }}
           >
-            <Plus size={16} />
-            创建
-          </Button>
-        </div>
-      </div>
+            <Table variant="secondary">
+              <Table.ScrollContainer>
+                <Table.Content aria-label="求职方案列表">
+                  <Table.Header>
+                    <Table.Column isRowHeader>求职方案</Table.Column>
+                    <Table.Column className="text-right">管理</Table.Column>
+                  </Table.Header>
+                  <Table.Body>
+                    {state.presets.map((preset) => (
+                      <Table.Row key={preset.value} id={preset.value}>
+                        <Table.Cell>
+                          <div className="flex items-center gap-3">
+                            <Radio value={preset.value}>
+                              <Radio.Content aria-label={`使用 ${preset.label}`}>
+                                <Radio.Control>
+                                  <Radio.Indicator />
+                                </Radio.Control>
+                              </Radio.Content>
+                            </Radio>
+                            <span className="break-words">{preset.label}</span>
+                            {preset.value === state.preset && (
+                              <Chip size="sm" className="ml-2">
+                                当前使用
+                              </Chip>
+                            )}
+                          </div>
+                        </Table.Cell>
+                        <Table.Cell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <IconButton
+                              label={`删除 ${preset.label}`}
+                              disabled={busy || preset.value === 'default'}
+                              onPress={() => setDeletingPreset(preset)}
+                            >
+                              <Trash2 size={16} />
+                            </IconButton>
+                          </div>
+                        </Table.Cell>
+                      </Table.Row>
+                    ))}
+                  </Table.Body>
+                </Table.Content>
+              </Table.ScrollContainer>
+            </Table>
+          </RadioGroup>
+          {creatingPreset && (
+            <>
+              <Separator />
+              <section className="flex flex-col gap-4" aria-label="新建方案">
+                <h2 className="text-lg font-semibold">新建方案</h2>
+                <TextField value={presetName} onChange={setPresetName} isDisabled={busy}>
+                  <Label>方案名称</Label>
+                  <Input />
+                </TextField>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    variant="secondary"
+                    isDisabled={busy}
+                    onPress={() => setCreatingPreset(false)}
+                  >
+                    取消编辑
+                  </Button>
+                  <Button
+                    isDisabled={busy || !presetName.trim()}
+                    onPress={() => {
+                      void createPreset()
+                    }}
+                  >
+                    <Save size={16} />
+                    保存方案
+                  </Button>
+                </div>
+              </section>
+            </>
+          )}
+        </section>
+      )}
       <Accordion
         allowsMultipleExpanded
         defaultExpandedKeys={filters ? [] : ['timing', 'rotation', 'collection']}
       >
-        {filters && (
+        {showFilters && (
           <Accordion.Item id="filters">
             <Accordion.Heading>
               <Accordion.Trigger>
@@ -694,7 +767,7 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
           <Accordion.Item id="collection">
             <Accordion.Heading>
               <Accordion.Trigger>
-                采集间隔
+                采集与运行上限
                 <Accordion.Indicator />
               </Accordion.Trigger>
             </Accordion.Heading>
@@ -702,6 +775,14 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
               <Accordion.Body className="space-y-4">
                 <div className="space-y-4">
                   <div className="field-grid">
+                    <NumericField
+                      label="单次运行上限（分钟）"
+                      value={config.collectionMaxRuntimeMinutes}
+                      min={1}
+                      max={1440}
+                      disabled={busy}
+                      onChange={(value) => change('collectionMaxRuntimeMinutes', value)}
+                    />
                     <TimeRange
                       label="滚动间隔"
                       scaleMax={10}
@@ -721,6 +802,18 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
                       }
                     />
                   </div>
+                  <div className="text-sm">
+                    <output aria-label="理论详情数量" aria-live="polite">
+                      理论估算：约{' '}
+                      {Number.isFinite(detailCapacity) && detailCapacity >= 0
+                        ? detailCapacity.toLocaleString('zh-CN')
+                        : '-'}{' '}
+                      条详情 / 次
+                    </output>
+                    <p className="text-muted">
+                      按平均详情间隔计算，未扣除页面加载、滚动、失败和轮换休息。
+                    </p>
+                  </div>
                   <div className="flex justify-end">
                     <Button
                       variant="secondary"
@@ -737,7 +830,7 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
             </Accordion.Panel>
           </Accordion.Item>
         )}
-        {filters && (
+        {showFilters && (
           <Accordion.Item id="commute">
             <Accordion.Heading>
               <Accordion.Trigger>
@@ -866,16 +959,18 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
         )}
       </Accordion>
       <ConfirmDialog
-        open={switchingPreset !== null}
-        title="切换配置预设"
+        open={!!deletingPreset}
+        title="删除求职方案"
+        danger
+        confirmLabel="删除"
         disabled={busy}
-        confirmLabel="放弃修改并切换"
-        onClose={() => setSwitchingPreset(null)}
+        onClose={() => setDeletingPreset(null)}
         onConfirm={() => {
-          if (switchingPreset) void switchPreset(switchingPreset)
+          void removePreset()
         }}
       >
-        <p>当前配置有未保存修改。切换预设将放弃这些修改。</p>
+        <p>确定删除“{deletingPreset?.label}”及其配置？共享简历和岗位记录会保留。</p>
+        {deletingPreset?.value === state.preset && <p>删除后使用默认方案。</p>}
       </ConfirmDialog>
       <ConfirmDialog
         open={clearingCache}

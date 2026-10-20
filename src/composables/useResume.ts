@@ -16,6 +16,7 @@ export type ResumeRecord = {
 export type ResumeStoreData = {
   resumes: ResumeRecord[]
   currentResumeId: string | null
+  presetResumeIds?: Record<string, string | null>
 }
 
 type ResumeStorage = {
@@ -66,25 +67,42 @@ export function normalizeResumeStore(
   const currentResumeId = resumes.some((resume) => resume.id === stored?.currentResumeId)
     ? (stored?.currentResumeId ?? null)
     : null
-  return { resumes, currentResumeId }
+  const presetResumeIds = Object.fromEntries(
+    Object.entries(stored?.presetResumeIds ?? {}).map(([preset, id]) => [
+      preset,
+      id === null || resumes.some((resume) => resume.id === id) ? id : null,
+    ]),
+  )
+  return {
+    resumes,
+    currentResumeId,
+    ...(Object.keys(presetResumeIds).length ? { presetResumeIds } : {}),
+  }
 }
 
 export function createResumeStore(storage: ResumeStorage = counter) {
   const resumes = ref<ResumeRecord[]>([])
   const currentResumeId = ref<string | null>(null)
+  const presetResumeIds = ref<Record<string, string | null>>({})
   const initialized = ref(false)
   const currentResume = computed(() =>
     resumes.value.find((resume) => resume.id === currentResumeId.value),
   )
 
-  async function persist(nextResumes: ResumeRecord[], nextCurrentResumeId: string | null) {
+  async function persist(
+    nextResumes: ResumeRecord[],
+    nextCurrentResumeId: string | null,
+    nextPresetResumeIds = presetResumeIds.value,
+  ) {
     const snapshot: ResumeStoreData = jsonClone({
       resumes: nextResumes,
       currentResumeId: nextCurrentResumeId,
+      ...(Object.keys(nextPresetResumeIds).length ? { presetResumeIds: nextPresetResumeIds } : {}),
     })
     await storage.storageSet(RESUME_STORAGE_KEY, snapshot)
     resumes.value = snapshot.resumes
     currentResumeId.value = snapshot.currentResumeId
+    presetResumeIds.value = snapshot.presetResumeIds ?? {}
   }
 
   async function init(legacyText = '') {
@@ -96,7 +114,15 @@ export function createResumeStore(storage: ResumeStorage = counter) {
       (typeof stored !== 'object' ||
         Array.isArray(stored) ||
         ('resumes' in stored &&
-          (!Array.isArray(stored.resumes) || normalized.resumes.length !== stored.resumes.length)))
+          (!Array.isArray(stored.resumes) ||
+            normalized.resumes.length !== stored.resumes.length)) ||
+        ('presetResumeIds' in stored &&
+          (!stored.presetResumeIds ||
+            typeof stored.presetResumeIds !== 'object' ||
+            Array.isArray(stored.presetResumeIds) ||
+            Object.entries(stored.presetResumeIds).some(
+              ([preset, id]) => !preset.trim() || (id !== null && typeof id !== 'string'),
+            ))))
     ) {
       throw new Error('简历存储格式无效，原有数据已保留')
     }
@@ -105,6 +131,7 @@ export function createResumeStore(storage: ResumeStorage = counter) {
     }
     resumes.value = jsonClone(normalized.resumes)
     currentResumeId.value = normalized.currentResumeId
+    presetResumeIds.value = jsonClone(normalized.presetResumeIds ?? {})
     initialized.value = true
     return normalized
   }
@@ -151,6 +178,26 @@ export function createResumeStore(storage: ResumeStorage = counter) {
     await persist(resumes.value, id)
   }
 
+  async function selectResumeForPreset(preset: string, id: string | null) {
+    if (!preset.trim()) throw new Error('求职方案无效')
+    if (id !== null && !resumes.value.some((resume) => resume.id === id)) {
+      throw new Error('简历不存在')
+    }
+    await persist(resumes.value, id, { ...presetResumeIds.value, [preset]: id })
+  }
+
+  async function activatePreset(preset: string) {
+    const id = presetResumeIds.value[preset] ?? null
+    await persist(resumes.value, id)
+    return id
+  }
+
+  async function removePreset(preset: string) {
+    const remaining = { ...presetResumeIds.value }
+    delete remaining[preset]
+    await persist(resumes.value, currentResumeId.value, remaining)
+  }
+
   async function deleteResume(id: string, replacementId?: string | null) {
     const existing = resumes.value.find((resume) => resume.id === id)
     if (!existing) throw new Error('简历不存在')
@@ -165,12 +212,19 @@ export function createResumeStore(storage: ResumeStorage = counter) {
       }
     }
     const nextCurrent = isCurrent ? (replacementId ?? null) : currentResumeId.value
-    await persist(remaining, nextCurrent)
+    const nextPresetResumeIds = Object.fromEntries(
+      Object.entries(presetResumeIds.value).map(([preset, resumeId]) => [
+        preset,
+        resumeId === id ? (replacementId ?? null) : resumeId,
+      ]),
+    )
+    await persist(remaining, nextCurrent, nextPresetResumeIds)
   }
 
   return {
     resumes,
     currentResumeId,
+    presetResumeIds,
     initialized,
     currentResume,
     init,
@@ -178,6 +232,9 @@ export function createResumeStore(storage: ResumeStorage = counter) {
     updateResume,
     copyResume,
     selectResume,
+    selectResumeForPreset,
+    activatePreset,
+    removePreset,
     deleteResume,
   }
 }

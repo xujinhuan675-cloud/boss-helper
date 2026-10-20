@@ -95,6 +95,12 @@ export function validateConfig(config: FormData) {
     config.delayCollectionDetailMin > config.delayCollectionDetailMax
   )
     throw new Error('采集间隔上限不能小于下限')
+  if (
+    !Number.isSafeInteger(config.collectionMaxRuntimeMinutes) ||
+    config.collectionMaxRuntimeMinutes < 1 ||
+    config.collectionMaxRuntimeMinutes > 1440
+  )
+    throw new Error('单次运行上限必须是 1～1440 分钟的整数')
   for (const [min, max] of [
     [config.delayKeywordRotationMin, config.delayKeywordRotationMax],
     [config.delayKeywordRotationBatchMin, config.delayKeywordRotationBatchMax],

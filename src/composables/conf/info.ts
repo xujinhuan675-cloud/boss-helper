@@ -259,8 +259,9 @@ export const defaultFormData: FormData = {
   delayDeliveryPageNext: 60,
   delayCollectionScrollMin: 1,
   delayCollectionScrollMax: 2,
-  delayCollectionDetailMin: 2,
+  delayCollectionDetailMin: 3,
   delayCollectionDetailMax: 5,
+  collectionMaxRuntimeMinutes: 60,
   delayKeywordRotationMin: 300,
   delayKeywordRotationMax: 900,
   keywordRotationBatchSize: 3,
@@ -269,5 +270,5 @@ export const defaultFormData: FormData = {
   keywordRotationDailyLimit: 10,
   keywordRotationAutoResume: { value: false },
   delayMessageSending: 2,
-  version: '20261016',
+  version: '20261018',
 }

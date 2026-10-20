@@ -14,11 +14,31 @@ export function createExecutorBridge(
   initialize?: () => Promise<void>,
 ): RuntimeBridge {
   let selectedJob: string | null = null
-  function start(operation: string, task: () => Promise<unknown>) {
+  const jobActions: NonNullable<ExecutorSnapshot['jobActions']> = Object.create(null)
+  function start(operation: string, task: () => Promise<unknown>, jobId?: string) {
+    const action = jobId
+      ? {
+          type: operation as 'analyzeOne' | 'generateGreeting' | 'sendGreeting',
+          status: 'running' as 'running' | 'completed' | 'failed',
+          error: '',
+        }
+      : undefined
+    if (action) {
+      if (Object.values(jobActions).some((item) => item.status === 'running'))
+        throw new Error('岗位操作正在进行，请稍后重试')
+      jobActions[jobId!] = action
+    }
     void Promise.resolve()
       .then(task)
+      .then(() => {
+        if (action) action.status = 'completed'
+      })
       .catch((error) => {
         state.lastError = error instanceof Error ? error.message : String(error)
+        if (action) {
+          action.status = 'failed'
+          action.error = state.lastError
+        }
         diagnostic(`task.${operation}`, { error })
       })
     return { accepted: true }
@@ -27,6 +47,7 @@ export function createExecutorBridge(
     async snapshot(chatJobKey) {
       const key =
         chatJobKey ?? selectedJob ?? ctx.currentJob.value ?? ctx.chatModel.jobs.value[0] ?? null
+      const viewedJobId = ctx._jobDetail.value?.jobInfo?.encryptId
       const logs: ExecutorLog[] = ctx._logs.value.map(({ data, ...log }) => {
         if (!data) return log
         const safe: ExecutorLog['data'] = {}
@@ -48,9 +69,11 @@ export function createExecutorBridge(
       })
       const snapshot: ExecutorSnapshot = {
         ...state,
+        jobActions,
         url: typeof location === 'undefined' ? '' : location.href,
         collectionRun: ctx.collectionRun.value,
         detailRun: ctx.detailRun.value,
+        historyDetailRun: ctx.historyDetailRun.value,
         gatheringKind: ctx.gatheringKind.value,
         gatheringBusy: ctx.gatheringBusy.value,
         keywordRotation: ctx.keywordRotation.value,
@@ -71,6 +94,7 @@ export function createExecutorBridge(
             }
           : null,
         currentJob: ctx.currentJob.value,
+        viewedJobKey: viewedJobId ? `boss::${viewedJobId}` : null,
         jobs: ctx.jobList.value,
         results: [...ctx.jobResultMaps],
         logs,
@@ -90,6 +114,11 @@ export function createExecutorBridge(
         switch (command.type) {
           case 'collect':
             return start('collect', () => ctx.collectOnly())
+          case 'completeHistory':
+          case 'resumeHistory':
+            return start(command.type, () =>
+              ctx.completeHistoricalDetails(command.type === 'resumeHistory'),
+            )
           case 'rotate':
             return start('rotate', () =>
               ctx.startKeywordRotation(ctx.keywordRotationKeywords.value),
@@ -105,21 +134,33 @@ export function createExecutorBridge(
           case 'analyze':
             return start('analyze', () => ctx.savedAnalyzer.start({ limit: command.limit }))
           case 'analyzeOne':
-            return start('analyzeOne', async () => {
-              let record = (await ctx.getJobLibrary()).find(
-                (item) => item.encryptJobId === command.jobId,
-              )
-              const key = `boss::${command.jobId}`
-              if (!record && ctx.jobMaps.has(key)) record = await ctx.captureJobSnapshot(key)
-              if (
-                record &&
-                (record.detailStatus !== 'complete' ||
-                  !record.detail?.jobInfo?.postDescription?.trim())
-              ) {
-                await ctx.ensureSavedJobDetails(command.jobId)
-              }
-              return ctx.savedAnalyzer.analyzeOne(command.jobId)
-            })
+          case 'generateGreeting':
+            return start(
+              command.type,
+              async () => {
+                ctx.savedAnalyzer.validateSetup()
+                let record = (await ctx.getJobLibrary()).find(
+                  (item) => item.encryptJobId === command.jobId,
+                )
+                const key = `boss::${command.jobId}`
+                if (!record && ctx.jobMaps.has(key)) record = await ctx.captureJobSnapshot(key)
+                if (
+                  record &&
+                  (record.detailStatus !== 'complete' ||
+                    !record.detail?.jobInfo?.postDescription?.trim())
+                ) {
+                  await ctx.ensureSavedJobDetails(command.jobId)
+                }
+                if (command.type === 'generateGreeting')
+                  return ctx.savedAnalyzer.generateGreetingOne(command.jobId)
+                const run = await ctx.savedAnalyzer.analyzeOne(command.jobId)
+                if (run?.status === 'failed' || run?.status === 'stopped')
+                  throw new Error(run.error || '岗位分析已停止')
+                if (run?.skipped && !run.completed)
+                  throw new Error('岗位状态已变化或正在其他页面分析，请稍后查看结果')
+              },
+              command.jobId,
+            )
           case 'stopAnalysis':
             return ctx.savedAnalyzer.stop()
           case 'startDelivery':
@@ -131,14 +172,20 @@ export function createExecutorBridge(
           case 'selectJob':
             selectedJob = command.key
             return
-          case 'captureJob':
-            return await ctx.captureJobSnapshot(command.key)
+          case 'captureJob': {
+            const record = await ctx.captureJobSnapshot(command.key)
+            return await ctx.ensureSavedJobDetails(record.encryptJobId)
+          }
           case 'openJob':
-            return await ctx.onJobCardClick(command.key)
+            return ctx.openJob(command.key)
           case 'clearLogs':
             return ctx.logs.clear()
           case 'sendGreeting':
-            return start('sendGreeting', () => ctx.sendSavedGreeting(command.jobId))
+            return start(
+              'sendGreeting',
+              () => ctx.sendSavedGreeting(command.jobId, command.greeting),
+              command.jobId,
+            )
           case 'setFunnel':
             return await ctx.updateJobFunnelStage(command.jobId, command.stage)
           case 'setProcessing':

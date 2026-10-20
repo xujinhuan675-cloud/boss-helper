@@ -11,7 +11,9 @@ const saved = new Map()
 let imported
 let storageError: Error | undefined
 let storageWriteError: Error | undefined
+let storageRemoveError: Error | undefined
 let storageWrites = 0
+let afterWrite: ((key: string) => Promise<void>) | undefined
 mock.module('@vueuse/core', () => ({
   useStorageAsync: (_key, value) => ref(value),
   watchThrottled() {},
@@ -26,7 +28,12 @@ mock.module('@/message', () => ({
     storageSet: async (key, value) => {
       storageWrites++
       if (storageWriteError) throw storageWriteError
-      return saved.set(key, jsonClone(value))
+      saved.set(key, jsonClone(value))
+      await afterWrite?.(key)
+    },
+    storageRm: async (key) => {
+      if (storageRemoveError) throw storageRemoveError
+      saved.delete(key)
     },
   },
   ExtStorage: {},
@@ -46,11 +53,125 @@ beforeEach(() => {
   imported = undefined
   storageError = undefined
   storageWriteError = undefined
+  storageRemoveError = undefined
   storageWrites = 0
+  afterWrite = undefined
   const conf = useConf()
   Object.assign(conf.formData, jsonClone(defaults))
   conf.formDataPreset.value = 'default'
   conf.formDataPresets.value = [{ label: '默认配置', value: 'default' }]
+})
+
+describe('preset persistence', () => {
+  it('keeps newly created plans when an older page saves rules with a stale plan list', async () => {
+    const conf = useConf()
+    await conf.createPreset('AI 产品经理')
+    const created = conf.formDataPreset.value
+    const presets = jsonClone(saved.get('local:FormDataPreses'))
+    conf.formDataPresets.value = [{ label: '默认配置', value: 'default' }]
+    conf.formDataPreset.value = 'default'
+    conf.formData.delayDeliveryInterval = 23
+    await conf.confSaving()
+    expect(saved.get('local:FormDataPreses')).toEqual(presets)
+    expect(saved.get('local:FormDataPrese')).toBe(created)
+    await conf.switchPreset('default')
+    await conf.switchPreset(created)
+    expect(conf.formDataPresets.value).toContainEqual({ label: 'AI 产品经理', value: created })
+  })
+
+  it('publishes the complete new plan before selection can trigger a settings refresh', async () => {
+    const conf = useConf()
+    saved.set('local:web-geek-job-FormData', jsonClone(defaults))
+    await conf.confInit()
+    conf.formData.deliveryLimit.value = 77
+    afterWrite = async (key) => {
+      if (key === 'local:FormDataPrese') await conf.confInit()
+    }
+    await conf.createPreset('产品负责人')
+    const created = conf.formDataPreset.value
+    expect(saved.get('local:FormDataPreses')).toContainEqual({
+      label: '产品负责人',
+      value: created,
+    })
+    expect(saved.get(conf.formDataKey(created)).deliveryLimit.value).toBe(77)
+    await conf.switchPreset('default')
+    await conf.switchPreset(created)
+    expect(conf.formData.deliveryLimit.value).toBe(77)
+    expect(conf.formDataPresets.value).toContainEqual({ label: '产品负责人', value: created })
+  })
+
+  it('rejects switching to a missing plan without publishing a phantom selection', async () => {
+    const conf = useConf()
+    const before = [...saved.entries()]
+    await expect(conf.switchPreset('missing')).rejects.toThrow('不存在')
+    expect([...saved.entries()]).toEqual(before)
+    expect(conf.formDataPreset.value).toBe('default')
+  })
+})
+
+describe('preset deletion', () => {
+  async function setup() {
+    saved.set('local:FormDataPreses', [
+      { label: '默认配置', value: 'default' },
+      { label: '产品经理', value: 'product' },
+      { label: '工程师', value: 'engineering' },
+    ])
+    saved.set('local:web-geek-job-FormData', jsonClone(defaults))
+    saved.set('local:web-geek-job-FormData-product', { resumeText: 'product config' })
+    saved.set('local:web-geek-job-FormData-engineering', { resumeText: 'engineering config' })
+    const conf = useConf()
+    await conf.confInit()
+    return conf
+  }
+
+  it('removes only the selected preset and its stored configuration', async () => {
+    const conf = await setup()
+    await conf.deletePreset('product')
+    expect(conf.formDataPresets.value.map((item) => item.value)).toEqual(['default', 'engineering'])
+    expect(saved.get('local:FormDataPreses').map((item) => item.value)).toEqual([
+      'default',
+      'engineering',
+    ])
+    expect(saved.has('local:web-geek-job-FormData-product')).toBe(false)
+    expect(saved.get('local:web-geek-job-FormData-engineering')).toEqual({
+      resumeText: 'engineering config',
+    })
+    expect(saved.get('local:web-geek-job-FormData')).toEqual(defaults)
+    await conf.confInit()
+    expect(conf.formDataPresets.value.map((item) => item.value)).toEqual(['default', 'engineering'])
+  })
+
+  it.each(['default', 'missing'])(
+    'rejects deletion of %s without changing stored data',
+    async (value) => {
+      const conf = await setup()
+      const before = [...saved.entries()]
+      await expect(conf.deletePreset(value)).rejects.toThrow()
+      expect([...saved.entries()]).toEqual(before)
+    },
+  )
+
+  it('requires switching away from the active preset before deleting it', async () => {
+    const conf = await setup()
+    conf.formDataPreset.value = 'product'
+    await expect(conf.deletePreset('product')).rejects.toThrow('切换')
+    expect(saved.has('local:web-geek-job-FormData-product')).toBe(true)
+  })
+
+  it.each(['write', 'remove'])(
+    'retains the preset and config when storage %s fails',
+    async (phase) => {
+      const conf = await setup()
+      const before = [...saved.entries()]
+      const presetsBefore = jsonClone(conf.formDataPresets.value)
+      if (phase === 'write') storageWriteError = new Error('delete write failed')
+      else storageRemoveError = new Error('delete remove failed')
+      await expect(conf.deletePreset('product')).rejects.toThrow('failed')
+      expect([...saved.entries()]).toEqual(before)
+      expect(jsonClone(conf.formDataPresets.value)).toEqual(presetsBefore)
+      expect(conf.isLoading.value).toBe(false)
+    },
+  )
 })
 
 describe('percentage scoring configuration', () => {
@@ -130,14 +251,6 @@ describe('percentage scoring configuration', () => {
     expect(saved.get('local:web-geek-job-FormData')).toEqual(legacy)
   })
   it.each([
-    ['local:FormDataPrese', null],
-    ['local:FormDataPrese', []],
-    ['local:FormDataPrese', ''],
-    ['local:FormDataPreses', null],
-    ['local:FormDataPreses', {}],
-    ['local:FormDataPreses', [null]],
-    ['local:FormDataPreses', [{ label: 'saved', value: 1 }]],
-    ['local:FormDataPreses', [{ label: {}, value: 'saved' }]],
     ['local:web-geek-job-FormData', null],
     ['local:web-geek-job-FormData', []],
     ['local:web-geek-job-FormData', 'broken'],
@@ -158,11 +271,57 @@ describe('percentage scoring configuration', () => {
     },
   )
 
+  it('loads the selected configuration when preset metadata is malformed without rewriting it', async () => {
+    const malformedSelection = null
+    const malformedPresets = [{ label: 'Saved', value: 'saved' }, null]
+    saved.set('local:FormDataPrese', malformedSelection)
+    saved.set('local:FormDataPreses', malformedPresets)
+    saved.set('local:web-geek-job-FormData', { ...jsonClone(defaults), resumeText: 'kept config' })
+    const conf = useConf()
+
+    await conf.confInit()
+
+    expect(conf.formDataPreset.value).toBe('default')
+    expect(jsonClone(conf.formDataPresets.value)).toEqual([
+      { label: 'Saved', value: 'saved' },
+      { label: '默认配置', value: 'default' },
+    ])
+    expect(conf.formData.resumeText).toBe('kept config')
+    expect(saved.get('local:FormDataPrese')).toBe(malformedSelection)
+    expect(saved.get('local:FormDataPreses')).toEqual(malformedPresets)
+    expect(storageWrites).toBe(0)
+
+    await conf.confSaving()
+    expect(saved.get('local:FormDataPrese')).toBe(malformedSelection)
+    expect(saved.get('local:FormDataPreses')).toEqual(malformedPresets)
+  })
+
+  it('keeps a valid selected preset when its preset list contains malformed entries', async () => {
+    saved.set('local:FormDataPrese', 'saved')
+    saved.set('local:FormDataPreses', [null])
+    saved.set('local:web-geek-job-FormData-saved', {
+      ...jsonClone(defaults),
+      resumeText: 'saved preset config',
+    })
+    const conf = useConf()
+
+    await conf.confInit()
+
+    expect(conf.formDataPreset.value).toBe('saved')
+    expect(jsonClone(conf.formDataPresets.value)).toContainEqual({
+      label: '当前方案',
+      value: 'saved',
+    })
+    expect(conf.formData.resumeText).toBe('saved preset config')
+    expect(saved.get('local:FormDataPreses')).toEqual([null])
+    expect(storageWrites).toBe(0)
+  })
+
   it('reads a validated saved preset before replacing active settings', async () => {
     saved.set('local:FormDataPrese', 'saved')
     saved.set('local:FormDataPreses', [{ label: 'Saved', value: 'saved' }])
     saved.set('local:web-geek-job-FormData-saved', {
-      version: '20261016',
+      version: defaults.version,
       resumeText: 'Saved resume',
     })
     const conf = useConf()
@@ -184,10 +343,76 @@ describe('percentage scoring configuration', () => {
     expect(storageWrites).toBe(0)
   })
 
+  it('persists the new collection defaults once without replacing custom timing', async () => {
+    const key = 'local:web-geek-job-FormData'
+    saved.set(key, {
+      version: '20261016',
+      delayCollectionScrollMin: 1,
+      delayCollectionScrollMax: 2,
+      delayCollectionDetailMin: 2,
+      delayCollectionDetailMax: 5,
+      resumeText: 'retained resume',
+    })
+    const conf = useConf()
+    await conf.confInit()
+    expect(saved.get(key)).toMatchObject({
+      version: defaults.version,
+      delayCollectionScrollMin: 1,
+      delayCollectionScrollMax: 2,
+      delayCollectionDetailMin: 3,
+      delayCollectionDetailMax: 5,
+      collectionMaxRuntimeMinutes: 60,
+      resumeText: 'retained resume',
+    })
+    const writes = storageWrites
+    await conf.confInit()
+    expect(storageWrites).toBe(writes)
+
+    saved.set(key, {
+      version: '20261016',
+      delayCollectionDetailMin: 7,
+      delayCollectionDetailMax: 12,
+    })
+    await conf.confInit()
+    expect(conf.formData.delayCollectionDetailMin).toBe(7)
+    expect(conf.formData.delayCollectionDetailMax).toBe(12)
+  })
+
+  it('runs older migrations in order before updating the timing defaults', async () => {
+    const config = await useConf().prepareConfig({
+      version: '20240401',
+      aiGreeting: { prompt: 'retained prompt' },
+      delay: { deliveryInterval: 17 },
+    })
+    expect(config.aiGreeting.prompt).toEqual([{ role: 'user', content: 'retained prompt' }])
+    expect(config.delayDeliveryInterval).toBe(17)
+    expect(config).not.toHaveProperty('delay')
+    expect(config.version).toBe(defaults.version)
+  })
+
+  it('preserves a current-version explicit timing choice and a failed migration write', async () => {
+    const key = 'local:web-geek-job-FormData'
+    saved.set(key, { ...jsonClone(defaults), delayCollectionDetailMin: 2 })
+    const conf = useConf()
+    await conf.confInit()
+    expect(conf.formData.delayCollectionDetailMin).toBe(2)
+    const before = jsonClone(conf.formData)
+    const legacy = { version: '20261016', delayCollectionDetailMin: 2, delayCollectionDetailMax: 5 }
+    saved.set(key, legacy)
+    storageWriteError = new Error('migration write failed')
+    await expect(conf.confInit()).rejects.toThrow('migration write failed')
+    expect(jsonClone(conf.formData)).toEqual(before)
+    expect(saved.get(key)).toEqual(legacy)
+  })
+
   it.each(['createPreset', 'switchPreset'])(
     'propagates preset storage failure through %s',
     async (method) => {
       const conf = useConf()
+      saved.set('local:FormDataPreses', [
+        { label: '默认配置', value: 'default' },
+        { label: 'Another', value: 'another preset' },
+      ])
       storageWriteError = new Error('preset write failed')
       await expect(conf[method]('another preset')).rejects.toThrow('preset write failed')
       expect(conf.isLoading.value).toBe(false)

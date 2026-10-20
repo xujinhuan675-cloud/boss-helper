@@ -4,6 +4,7 @@ import {
   Button,
   Checkbox,
   Chip,
+  Dropdown,
   Modal,
   Pagination,
   Popover,
@@ -14,19 +15,23 @@ import {
 import {
   Copy,
   Download,
+  Ellipsis,
   ExternalLink,
   Filter,
   FilterX,
+  ListRestart,
+  Pause,
+  Play,
   RefreshCw,
   Send,
   Square,
   Trash2,
+  Upload,
   WandSparkles,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SortDescriptor } from 'react-aria-components'
 
-import { formatFilteringMessage } from '@/composables/useApplying/scoring'
 import {
   filterJobLibrary,
   FUNNEL_STAGES,
@@ -40,14 +45,18 @@ import type {
   FunnelStage,
   ProcessingStatusFilter,
 } from '@/entrypoints/boss/jobStore'
-import { exportJson } from '@/utils/jsonImportExport'
+import { exportCsv } from '@/utils/csvExport'
 
+import { parseHistoricalJobLibrary } from '../entrypoints/boss/jobImport'
 import { ConfirmDialog, IconButton, SelectField, act } from './components'
 import { DeliveryStatistics } from './DeliveryStatistics'
+import { JobAnalysisResult } from './JobAnalysisResult'
 import {
   command,
+  selectTab,
   deleteSavedJob,
   deleteSavedJobs,
+  importSavedJobs,
   refreshLibrary,
   startSavedAnalysis,
   stopSavedAnalysis,
@@ -116,6 +125,7 @@ function sortJobs(records: BossJobLibraryRecord[], descriptor: SortDescriptor) {
 
 export function Jobs() {
   const state = useWorkbench()
+  const importInput = useRef<HTMLInputElement>(null)
   const [search, setSearch] = useState('')
   const [company, setCompany] = useState('all')
   const [keyword, setKeyword] = useState('all')
@@ -139,6 +149,8 @@ export function Jobs() {
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [sendConfirm, setSendConfirm] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importSummary, setImportSummary] = useState('')
   const records = useMemo(
     () =>
       sortJobs(
@@ -182,6 +194,24 @@ export function Jobs() {
   const selected = state.records.find((record) => record.encryptJobId === selectedId)
   const busy = state.analysisBusy
   const disabled = state.loading || state.saving || busy
+  const liveHistory = state.runtime?.historyDetailRun
+  const historyBusy =
+    !!liveHistory &&
+    ['running', 'paused'].includes(liveHistory.status) &&
+    !!state.runtime?.gatheringBusy
+  const history =
+    historyBusy || (liveHistory?.error && !liveHistory.id) ? liveHistory : state.historyDetailRun
+  const historyPending = !!history && history.cursor < history.total
+  const historyLocked = !!history?.owner && history.expiresAt > Date.now()
+  const detailStartDisabled =
+    disabled ||
+    !state.connected ||
+    historyLocked ||
+    state.runtime?.gatheringBusy ||
+    state.runtime?.analysisBusy ||
+    state.runtime?.keywordRotationBusy ||
+    state.runtime?.realtimeBusy ||
+    state.runtime?.workflow?.status === 'running'
   const options = (items: (string | undefined)[]) => [
     all,
     ...[...new Set(items)]
@@ -202,17 +232,41 @@ export function Jobs() {
           <h1 className="text-2xl font-semibold">岗位库</h1>
           <p className="mt-1 text-sm text-muted">{state.records.length} 个已保存岗位</p>
         </div>
-        <div className="flex justify-end">
-          <IconButton
-            label="刷新岗位库"
-            onPress={() => {
-              void refreshLibrary()
-            }}
-          >
-            <RefreshCw size={17} />
-          </IconButton>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {state.tabs.length > 1 && (
+            <div className="w-64 max-w-full">
+              <SelectField
+                label="历史补全执行页"
+                hideLabel
+                value={String(state.tabId)}
+                options={state.tabs.map((tab) => ({ value: String(tab.id), label: tab.title }))}
+                disabled={historyBusy || state.saving}
+                onChange={(value) => selectTab(Number(value))}
+              />
+            </div>
+          )}
         </div>
       </div>
+      {history && (
+        <div role="status" aria-live="polite" className="space-y-1 text-sm text-muted">
+          <p>{`历史补全 · ${statusNames[history.status] || history.status} · 已处理 ${history.cursor} / ${history.total} · 补全 ${history.completed} · 失败 ${history.failed} · 跳过 ${history.skipped}`}</p>
+          {historyBusy && (
+            <p>
+              {[
+                history.currentJob,
+                history.phase,
+                history.waitSeconds ? `${history.waitSeconds} 秒` : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          )}
+          {historyLocked && !historyBusy && (
+            <p>历史补全由其他页面执行；页面关闭后最多等待 90 秒可继续。</p>
+          )}
+          {history.error && <p className="text-danger">{history.error}</p>}
+        </div>
+      )}
       {state.libraryError && (
         <Alert status="danger">
           <Alert.Content>
@@ -246,7 +300,34 @@ export function Jobs() {
                 <span className="text-sm text-muted">已选 {selectedIds.size}</span>
               )}
             </div>
-            <div className="flex flex-wrap items-center justify-end gap-1">
+            <div
+              role="group"
+              aria-label="岗位库操作"
+              className="flex flex-wrap items-center justify-end gap-1"
+            >
+              <input
+                ref={importInput}
+                type="file"
+                accept=".json,application/json"
+                className="sr-only"
+                aria-label="导入历史岗位 JSON"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  if (!file) return
+                  setImporting(true)
+                  setImportSummary('')
+                  void act(async () => {
+                    const source = JSON.parse(await file.text())
+                    const records = parseHistoricalJobLibrary(source, file.name)
+                    const removedCount = source.length - records.length
+                    const result = await importSavedJobs(records)
+                    setImportSummary(
+                      `导入完成：新增 ${result.newCount} 条，跳过已有 ${result.duplicateCount} 条，剔除异常 ${removedCount} 条`,
+                    )
+                  }).finally(() => setImporting(false))
+                }}
+              />
               {!!selectedIds.size && (
                 <Button
                   size="sm"
@@ -366,44 +447,136 @@ export function Jobs() {
                         variant="secondary"
                         isDisabled={!records.length || !!state.libraryError}
                         onPress={() => {
-                          void act(async () =>
-                            exportJson(records, 'OfferHunt-job-library-filtered'),
-                          )
+                          const headers = [
+                            '岗位名称',
+                            '公司',
+                            '薪资',
+                            '地点',
+                            '匹配度',
+                            '跟进阶段',
+                            '采集时间',
+                            '岗位链接',
+                          ]
+                          const rows = records.map((record) => [
+                            record.snapshot.jobName || '',
+                            record.detail?.brandComInfo?.brandName ||
+                              record.snapshot.brandName ||
+                              '',
+                            record.snapshot.salaryDesc || '',
+                            [record.snapshot.cityName, record.snapshot.areaDistrict]
+                              .filter(Boolean)
+                              .join(' · '),
+                            typeof record.analysis?.rating === 'number'
+                              ? `${record.analysis.needsConfirmation ? '暂定 ' : ''}${record.analysis.rating}/100`
+                              : statusNames[record.analysisStatus] || '待分析',
+                            record.processingStatus === 'excluded'
+                              ? '本地排除'
+                              : stages[getJobFunnelStage(record)],
+                            timestamp(record.firstSeenAt) === null
+                              ? ''
+                              : new Date(record.firstSeenAt).toLocaleString('zh-CN', {
+                                  hour12: false,
+                                }),
+                            record.jobUrl || '',
+                          ])
+                          exportCsv(headers, rows, 'OfferHunt-job-library-filtered')
                         }}
                       >
                         <Download size={15} />
-                        导出筛选结果
+                        导出
                       </Button>
                     </div>
                   </Popover.Dialog>
                 </Popover.Content>
               </Popover>
-              {!state.analysisBusy ? (
-                <Button
-                  size="sm"
-                  isDisabled={disabled}
-                  onPress={() => {
-                    void act(() => startSavedAnalysis({ limit: Number.MAX_SAFE_INTEGER }))
-                  }}
-                >
-                  <WandSparkles size={15} />
-                  分析待处理岗位
+              <Dropdown>
+                <Button size="sm" variant="ghost">
+                  <Ellipsis size={15} />
+                  更多
                 </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="danger-soft"
-                  isDisabled={state.saving || state.analysisRun?.status === 'stopping'}
-                  onPress={() => {
-                    void act(stopSavedAnalysis)
-                  }}
-                >
-                  <Square size={15} />
-                  停止分析
-                </Button>
-              )}
+                <Dropdown.Popover>
+                  <Dropdown.Menu aria-label="更多">
+                    {historyBusy ? (
+                      <>
+                        <Dropdown.Item
+                          isDisabled={state.saving || !state.connected}
+                          onAction={() =>
+                            void act(() =>
+                              command({
+                                type:
+                                  history?.status === 'paused'
+                                    ? 'resumeGathering'
+                                    : 'pauseGathering',
+                              }),
+                            )
+                          }
+                        >
+                          {history?.status === 'paused' ? <Play size={15} /> : <Pause size={15} />}
+                          {history?.status === 'paused' ? '继续' : '暂停补全'}
+                        </Dropdown.Item>
+                        <Dropdown.Item
+                          isDisabled={state.saving || !state.connected}
+                          onAction={() => void act(() => command({ type: 'stopGathering' }))}
+                        >
+                          <Square size={15} />
+                          停止补全
+                        </Dropdown.Item>
+                      </>
+                    ) : (
+                      <Dropdown.Item
+                        isDisabled={!!detailStartDisabled}
+                        onAction={() =>
+                          void act(() =>
+                            command({
+                              type: historyPending ? 'resumeHistory' : 'completeHistory',
+                            }),
+                          )
+                        }
+                      >
+                        <ListRestart size={15} />
+                        {historyPending ? '继续补全' : '补全'}
+                      </Dropdown.Item>
+                    )}
+                    {!state.analysisBusy ? (
+                      <Dropdown.Item
+                        isDisabled={disabled}
+                        onAction={() =>
+                          void act(() => startSavedAnalysis({ limit: Number.MAX_SAFE_INTEGER }))
+                        }
+                      >
+                        <WandSparkles size={15} />
+                        分析
+                      </Dropdown.Item>
+                    ) : (
+                      <Dropdown.Item
+                        isDisabled={state.saving || state.analysisRun?.status === 'stopping'}
+                        onAction={() => void act(stopSavedAnalysis)}
+                      >
+                        <Square size={15} />
+                        停止分析
+                      </Dropdown.Item>
+                    )}
+                    <Dropdown.Item
+                      isDisabled={disabled || importing}
+                      onAction={() => importInput.current?.click()}
+                    >
+                      <Upload size={15} />
+                      导入
+                    </Dropdown.Item>
+                    <Dropdown.Item onAction={() => void refreshLibrary()}>
+                      <RefreshCw size={15} />
+                      刷新
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
+              </Dropdown>
             </div>
           </div>
+          {importSummary && (
+            <p className="text-sm text-muted" role="status" aria-live="polite">
+              {importSummary}
+            </p>
+          )}
           <Table variant="secondary">
             <Table.ScrollContainer>
               <Table.Content
@@ -716,25 +889,7 @@ export function Jobs() {
                       )}
                     </Tabs.Panel>
                     <Tabs.Panel id="analysis" className="space-y-4 pt-4">
-                      <p className="text-sm font-medium">
-                        {selected.analysis?.passed === true
-                          ? '通过筛选'
-                          : selected.analysis?.passed === false
-                            ? '未通过筛选'
-                            : selected.analysis?.needsConfirmation
-                              ? '待确认'
-                              : '待分析'}
-                      </p>
-                      <pre className="text-sm">
-                        {selected.analysis?.res
-                          ? formatFilteringMessage(JSON.stringify(selected.analysis.res))
-                          : selected.analysis
-                            ? JSON.stringify(selected.analysis, null, 2)
-                            : '尚无分析结果'}
-                      </pre>
-                      {selected.analysisFailureReason && (
-                        <p className="text-sm text-danger">{selected.analysisFailureReason}</p>
-                      )}
+                      <JobAnalysisResult record={selected} />
                       <Button
                         variant="secondary"
                         isDisabled={
@@ -868,16 +1023,21 @@ export function Jobs() {
         disabled={state.saving}
         onConfirm={() => {
           if (selected)
-            void act(() => command({ type: 'sendGreeting', jobId: selected.encryptJobId })).then(
-              (ok) => {
-                if (ok) setSendConfirm(false)
-              },
-            )
+            void act(() =>
+              command({
+                type: 'sendGreeting',
+                jobId: selected.encryptJobId,
+                greeting: selected.finalGreeting || '',
+              }),
+            ).then((ok) => {
+              if (ok) setSendConfirm(false)
+            })
         }}
       >
         <p>
           将向 {selected?.snapshot.brandName} 的「{selected?.snapshot.jobName}」发送已保存的招呼语。
         </p>
+        <p className="whitespace-pre-wrap break-words text-sm">{selected?.finalGreeting}</p>
       </ConfirmDialog>
     </section>
   )

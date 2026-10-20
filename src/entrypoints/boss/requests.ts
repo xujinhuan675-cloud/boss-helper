@@ -22,23 +22,53 @@ export async function getJobDetail(params: { securityId: string; lid: string }):
   message: string
   zpData: BossZpDetailData
 }> {
-  const token = window?.Cookie.get('bst')
+  if (!params.securityId?.trim() || !params.lid?.trim()) throw new Error('缺少历史详情标识')
+  const token = window?.Cookie?.get('bst')
   if (!token) {
     toast.add({
       title: '没有获取到token,请刷新重试',
       color: 'error',
     })
-    throw new PublishError('没有获取到token')
+    throw new Error('登录已失效，请先登录并刷新 BOSS 页面')
   }
   const url = new URL('https://www.zhipin.com/wapi/zpgeek/job/detail.json')
   url.searchParams.set('securityId', params.securityId)
   url.searchParams.set('lid', params.lid)
   url.searchParams.set('_', String(Date.now()))
 
-  return fetch(url.toString(), {
-    headers: { Zp_token: token },
-    signal: AbortSignal.timeout(5000),
-  }).then((r) => r.json())
+  let response: Response
+  try {
+    response = await fetch(url.toString(), {
+      headers: { Zp_token: token },
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {
+    throw new Error('网络异常，历史详情请求未完成；请稍后手动继续')
+  }
+  if (response.status === 401 || /\/web\/user|\/login/.test(response.url))
+    throw new Error(`登录已失效，请先登录（HTTP ${response.status}）`)
+  if (response.status === 403 || response.status === 429)
+    throw new Error(`访问受限，已停止历史补全（HTTP ${response.status}）`)
+  if (!response.ok) throw new Error(`网络异常（HTTP ${response.status}）`)
+  if (/html/i.test(response.headers.get('content-type') ?? ''))
+    throw new Error('详情接口返回验证页面，请检查安全验证或登录状态')
+  let result: unknown
+  try {
+    result = await response.json()
+  } catch (error) {
+    throw new Error(
+      error instanceof SyntaxError ? '历史详情响应格式异常' : '网络异常，详情响应体读取中断',
+    )
+  }
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    typeof (result as { code?: unknown }).code !== 'number'
+  )
+    throw new Error('历史详情响应格式异常')
+  return result as { code: number; message: string; zpData: BossZpDetailData }
 }
 
 export async function sendPublishReq(

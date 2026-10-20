@@ -1,9 +1,17 @@
 /** @jsxImportSource react */
 import { Accordion, Alert, Button, Chip } from '@heroui/react'
-import { Download, Trash2 } from 'lucide-react'
-import { useState, useSyncExternalStore } from 'react'
+import { Copy, Download, RefreshCw, Trash2 } from 'lucide-react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 
-import { clearSavedDiagnostics } from '../message/diagnostics'
+import { browser } from '#imports'
+import { formatFilteringMessage } from '@/composables/useApplying/scoring'
+
+import {
+  clearSavedDiagnostics,
+  DIAGNOSTICS_MIRROR_KEY,
+  syncDiagnosticMirror,
+} from '../message/diagnostics'
+import type { DiagnosticMirrorStatus } from '../message/diagnostics'
 import {
   getDiagnostics,
   hasDiagnosticStorageError,
@@ -11,8 +19,96 @@ import {
 } from '../utils/diagnostics'
 import { exportJson } from '../utils/jsonImportExport'
 import { ConfirmDialog, IconButton, SelectField, act } from './components'
-import { command } from './store'
+import { command, selectChat } from './store'
 import { useWorkbench } from './useWorkbench'
+
+function DiagnosticAccess() {
+  const [status, setStatus] = useState<DiagnosticMirrorStatus>()
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => {
+    let active = true
+    let changed = false
+    const onChange = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+      if (area === 'local' && DIAGNOSTICS_MIRROR_KEY in changes) {
+        changed = true
+        setStatus(changes[DIAGNOSTICS_MIRROR_KEY]?.newValue as DiagnosticMirrorStatus)
+      }
+    }
+    browser.storage.onChanged.addListener(onChange)
+    void browser.storage.local
+      .get(DIAGNOSTICS_MIRROR_KEY)
+      .then((data) => {
+        if (active && !changed) setStatus(data[DIAGNOSTICS_MIRROR_KEY] as DiagnosticMirrorStatus)
+      })
+      .catch(() => {
+        if (active) setStatus({ ok: false, error: '无法读取本机同步状态' })
+      })
+    return () => {
+      active = false
+      browser.storage.onChanged.removeListener(onChange)
+    }
+  }, [])
+  const readCommand = 'npm run diagnostics:read'
+  return (
+    <div className="space-y-2 border-b border-border pb-4 text-sm" aria-label="AI 诊断日志访问">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-semibold">AI 诊断日志访问</h3>
+        <IconButton
+          label="同步诊断到本机"
+          disabled={syncing}
+          onPress={() => {
+            setSyncing(true)
+            void syncDiagnosticMirror()
+              .then(setStatus)
+              .catch(() => setStatus({ ok: false, error: '后台连接失败，请重新打开工作台' }))
+              .finally(() => setSyncing(false))
+          }}
+        >
+          <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
+        </IconButton>
+      </div>
+      <output className="block text-muted">
+        {syncing
+          ? '正在同步'
+          : status?.ok
+            ? `已同步 · ${new Date(status.exportedAt!).toLocaleString()}`
+            : '本机日志镜像未连接'}
+      </output>
+      {status?.ok && <p className="break-all font-mono text-xs">{status.path}</p>}
+      {status?.error && <p className="break-words text-warning">{status.error}</p>}
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 break-all text-xs">{readCommand}</code>
+        <IconButton
+          label="复制诊断读取命令"
+          onPress={() => void act(() => navigator.clipboard.writeText(readCommand))}
+        >
+          <Copy size={14} />
+        </IconButton>
+      </div>
+      <details className="text-muted">
+        <summary className="cursor-pointer">访问方式与连接配置</summary>
+        <div className="mt-2 space-y-2 break-words">
+          <p>
+            本机 AI 可在项目根目录执行读取命令，或直接读取
+            %LOCALAPPDATA%\OfferHunt\diagnostics\latest.json。
+          </p>
+          <p>
+            首次连接（Windows Chrome，Node.js 22.18+）：在项目根目录执行{' '}
+            <code>npm run diagnostics:install</code>，重载扩展后自动同步。
+          </p>
+          <p>
+            镜像保留最近 200
+            条脱敏诊断；清空诊断时同步清空。未连接时旧镜像保留，恢复连接后更新。镜像不包含原始模型请求、简历或岗位全文。
+          </p>
+          <p>
+            FlowGuide 当前不能直接读取其他扩展页面，现有本机诊断接口尚未支持
+            OfferHunt。仍可通过“导出诊断”取得 JSON。
+          </p>
+        </div>
+      </details>
+    </div>
+  )
+}
 
 export function Logs() {
   const state = useWorkbench()
@@ -32,6 +128,7 @@ export function Logs() {
         <h1 className="text-2xl font-semibold">运行日志</h1>
       </div>
       <div className="space-y-3 border-b border-border pb-5">
+        <DiagnosticAccess />
         {diagnosticStorageError && (
           <p role="alert" className="text-sm text-danger">
             诊断保存失败，当前记录仍可导出；关闭此页可能丢失未保存记录。
@@ -92,6 +189,78 @@ export function Logs() {
             <Alert.Title>连接 BOSS 标签页后查看运行记录</Alert.Title>
           </Alert.Content>
         </Alert>
+      )}
+      {state.connected && (
+        <details className="border-b border-border pb-4" aria-label="AI 过程">
+          <summary className="cursor-pointer text-base font-semibold">AI 过程</summary>
+          <div className="mt-4 space-y-4">
+            <SelectField
+              label="岗位对话"
+              value={runtime?.chatJobKey || 'none'}
+              disabled={!runtime?.chatJobs?.length}
+              options={
+                runtime?.chatJobs?.length
+                  ? runtime.chatJobs.map((key) => {
+                      const job = runtime.jobs.find((item) => item.key === key)
+                      return {
+                        value: key,
+                        label: job ? `${job.jobName} · ${job.brand?.name || key}` : key,
+                      }
+                    })
+                  : [{ value: 'none', label: '暂无对话' }]
+              }
+              onChange={selectChat}
+            />
+            {!runtime?.messages?.length && (
+              <p className="py-4 text-sm text-muted">暂无岗位 AI 消息</p>
+            )}
+            <div className="max-h-[32rem] space-y-4 overflow-y-auto">
+              {runtime?.messages?.map((message, index) => (
+                <article
+                  key={message.id || index}
+                  className="space-y-3 border-b border-border pb-4"
+                >
+                  <Chip size="sm">
+                    {message.role === 'assistant'
+                      ? 'AI'
+                      : message.role === 'user'
+                        ? '用户'
+                        : '系统'}{' '}
+                    ·{' '}
+                    {{
+                      system: '系统规则',
+                      user: '用户输入',
+                      assistant: '模型回复',
+                      boss: '招聘者消息',
+                      jd: '岗位描述',
+                      filtering: '岗位匹配',
+                      greetings: '招呼语生成',
+                      keywords: '关键词提取',
+                    }[message.uiRole] || message.uiRole}
+                  </Chip>
+                  {message.parts?.map((part, i) =>
+                    part.type === 'text' ? (
+                      <p key={i} className="whitespace-pre-wrap break-words text-sm">
+                        {message.uiRole === 'filtering'
+                          ? formatFilteringMessage(part.text)
+                          : part.text}
+                      </p>
+                    ) : part.type === 'reasoning' ? (
+                      <details key={i} className="text-sm text-muted">
+                        <summary className="cursor-pointer">思考过程</summary>
+                        <p className="mt-2 whitespace-pre-wrap break-words">{part.text}</p>
+                      </details>
+                    ) : (
+                      <p key={i} className="text-xs text-muted">
+                        {part.type}
+                      </p>
+                    ),
+                  )}
+                </article>
+              ))}
+            </div>
+          </div>
+        </details>
       )}
       <div className="space-y-4">
         <div className="flex flex-wrap items-end justify-end gap-4">
@@ -191,7 +360,9 @@ export function Logs() {
           })
         }}
       >
-        <p>清空扩展本地保存的运行诊断。</p>
+        <p>
+          清空扩展本地保存的运行诊断。本机通道连接时同步清空镜像；未连接时旧镜像会保留到下次成功同步。
+        </p>
       </ConfirmDialog>
       <ConfirmDialog
         open={clear}

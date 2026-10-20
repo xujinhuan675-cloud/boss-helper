@@ -5,11 +5,43 @@ import type { Browser } from '#imports'
 import { browser, storage } from '#imports'
 import type { ResponseType } from '@/utils/request'
 
+import { DetailTabAccess } from '../entrypoints/boss/detailAccess'
+import type { HistoryDetailCommand } from '../entrypoints/boss/historyDetails'
+import { DETAIL_MESSAGE } from '../entrypoints/boss/jobDetails'
 import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
 import type { JobLibraryMutation } from '../entrypoints/boss/jobLibraryStorage'
 import { diagnostic, traceDiagnostic } from '../utils/diagnostics'
 
 const jobLibrary = new JobLibraryStorage(storage)
+
+export function installDetailAccess() {
+  const access = new DetailTabAccess(browser.tabs, storage, jobLibrary)
+  browser.runtime.onMessage.addListener((message, sender) => {
+    if (
+      message?.type !== DETAIL_MESSAGE ||
+      sender.id !== browser.runtime.id ||
+      sender.tab?.id === undefined ||
+      sender.frameId !== 0
+    )
+      return
+    const work =
+      message.action === 'access'
+        ? access.command(message.command, sender.tab.id)
+        : message.action === 'passive'
+          ? access.passive(message.page, { id: sender.tab.id, url: sender.url ?? '' })
+          : null
+    if (!work) return
+    return work
+      .then((page) => ({ ok: true, page }))
+      .catch((error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+  })
+  browser.tabs.onRemoved.addListener((tabId) => {
+    void access.tabRemoved(tabId).catch(() => {})
+  })
+}
 
 export const userKey = 'local:conf-user'
 
@@ -27,6 +59,10 @@ async function initDB() {
 }
 
 export class BackgroundCounter {
+  async historyDetails(command: HistoryDetailCommand) {
+    return jobLibrary.historyDetails(command)
+  }
+
   async updateJobLibrary(mutation: JobLibraryMutation) {
     return jobLibrary.update(mutation)
   }

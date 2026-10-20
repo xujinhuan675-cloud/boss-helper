@@ -5,6 +5,7 @@ import type { CollectionRun, DetailRun, FunnelStage } from '@/entrypoints/boss/j
 import type { KeywordRotationPlan } from '@/entrypoints/boss/keywordRotation'
 import type { SavedAnalysisRun } from '@/entrypoints/boss/savedAnalysis'
 
+import type { HistoryDetailRun } from '../entrypoints/boss/historyDetails'
 import { isFunnelStage } from '../entrypoints/boss/jobStore'
 import type { NativeSearchFilters } from '../entrypoints/boss/nativeSearch'
 import { isNativeSearchFilters } from '../entrypoints/boss/nativeSearch'
@@ -16,6 +17,8 @@ export type ExecutorCommand =
   | {
       type:
         | 'collect'
+        | 'completeHistory'
+        | 'resumeHistory'
         | 'rotate'
         | 'stopRotation'
         | 'pauseGathering'
@@ -30,7 +33,8 @@ export type ExecutorCommand =
         | 'clearCache'
     }
   | { type: 'analyze'; limit: number }
-  | { type: 'analyzeOne' | 'sendGreeting'; jobId: string }
+  | { type: 'analyzeOne' | 'generateGreeting'; jobId: string }
+  | { type: 'sendGreeting'; jobId: string; greeting: string }
   | { type: 'selectJob' | 'captureJob' | 'openJob'; key: string }
   | { type: 'setFunnel'; jobId: string; stage: FunnelStage | null }
   | { type: 'setProcessing'; jobId: string; status: 'active' | 'excluded' }
@@ -62,8 +66,17 @@ export type ExecutorSnapshot = {
   url: string
   error: string
   lastError: string
+  jobActions?: Record<
+    string,
+    {
+      type: 'analyzeOne' | 'generateGreeting' | 'sendGreeting'
+      status: 'running' | 'completed' | 'failed'
+      error?: string
+    }
+  >
   collectionRun: CollectionRun | null
   detailRun: DetailRun | null
+  historyDetailRun: HistoryDetailRun | null
   gatheringKind: 'collection' | 'detail'
   gatheringBusy: boolean
   keywordRotation: KeywordRotationPlan | null
@@ -78,6 +91,7 @@ export type ExecutorSnapshot = {
   analysisBusy: boolean
   workflow: { status: string; current: number; total: number } | null
   currentJob: string | null
+  viewedJobKey: string | null
   jobs: JobData[]
   results: [string, TaskResult][]
   logs: ExecutorLog[]
@@ -121,8 +135,10 @@ export function isExecutorCommand(value: unknown): value is ExecutorCommand {
         Number(value.limit) > 0
       )
     case 'analyzeOne':
-    case 'sendGreeting':
+    case 'generateGreeting':
       return keys(value, ['type', 'jobId']) && text(value.jobId)
+    case 'sendGreeting':
+      return keys(value, ['type', 'jobId', 'greeting']) && text(value.jobId) && text(value.greeting)
     case 'selectJob':
     case 'captureJob':
     case 'openJob':
@@ -147,6 +163,8 @@ export function isExecutorCommand(value: unknown): value is ExecutorCommand {
     case 'setPendingMessage':
       return keys(value, ['type', 'value']) && typeof value.value === 'string'
     case 'collect':
+    case 'completeHistory':
+    case 'resumeHistory':
     case 'rotate':
     case 'stopRotation':
     case 'pauseGathering':

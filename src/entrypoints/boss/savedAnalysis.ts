@@ -31,6 +31,7 @@ export type SavedAnalysisHost = Pick<
   | 'getJobLibrary'
   | 'getSavedJobData'
   | 'saveJobAnalysis'
+  | 'saveJobGreeting'
   | 'claimJobAnalysis'
   | 'releaseJobAnalysis'
 > &
@@ -47,7 +48,6 @@ export type SavedAnalysisHost = Pick<
       | 'collectOnly'
       | 'keywordRotationBusy'
       | 'notification'
-      | 'scheduleBackgroundDetailCompletion'
     >
   >
 
@@ -92,18 +92,12 @@ export class SavedJobAnalyzer {
     }
   }
 
-  async start({
-    limit = 20,
-    collectNew = false,
-    jobId,
-  }: {
-    limit?: number
-    collectNew?: boolean
-    jobId?: string
-  }): Promise<SavedAnalysisRun> {
+  validateSetup() {
     if (this.busy.value) throw new Error('本地岗位分析正在进行，请等待当前请求结束')
     this.checkOtherWork()
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('批次数量必须是正整数')
+    const resume = this.host.resumes.currentResume.value
+    const resumeText = resume?.content.trim()
+    if (!resume || !resumeText) throw new Error('请先在简历页选择并保存完整简历，再开始分析')
     const selectedKey = this.host.models.getDefaultModelKey()
     const model = this.host.models.modelData.value.find((item) => item.key === selectedKey)
     if (
@@ -114,6 +108,20 @@ export class SavedJobAnalyzer {
     ) {
       throw new Error('请先配置并选择模型、接口地址与 API Key')
     }
+    return { selectedKey, model, resume, resumeText }
+  }
+
+  async start({
+    limit = 20,
+    collectNew = false,
+    jobId,
+  }: {
+    limit?: number
+    collectNew?: boolean
+    jobId?: string
+  }): Promise<SavedAnalysisRun> {
+    const { selectedKey, model, resume, resumeText } = this.validateSetup()
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('批次数量必须是正整数')
     const filtering = {
       ...jsonClone(this.host.conf.formData.aiFiltering),
       enable: true,
@@ -130,11 +138,6 @@ export class SavedJobAnalyzer {
       )
     ) {
       throw new Error('请先保存筛选标准、分数阈值与招呼语提示词')
-    }
-    const resume = this.host.resumes.currentResume.value
-    const resumeText = resume?.content.trim()
-    if (!resume || !resumeText) {
-      throw new Error('请先在简历页选择并保存完整简历，再开始分析')
     }
     if (collectNew && (!this.host.collectOnly || !this.host.waitForCollectionAnalysis))
       throw new Error('采集新岗位需要连接 BOSS 岗位页')
@@ -155,7 +158,7 @@ export class SavedJobAnalyzer {
       const metadata = {
         modelKey: selectedKey,
         modelName: model.name,
-        model: model.data.model,
+        model: model.data!.model,
         resumeId: resume.id,
         resumeName: resume.name,
         scoreThreshold: filtering.score,
@@ -322,7 +325,6 @@ export class SavedJobAnalyzer {
           `${task}${status}：完成 ${run.completed}/${run.total}，失败 ${run.failed}，跳过 ${run.skipped}${run.error ? `；${run.error}` : ''}`,
         )
       }
-      if (run.status === 'completed') this.host.scheduleBackgroundDetailCompletion?.()
     }
     return run
   }
@@ -337,6 +339,7 @@ export class SavedJobAnalyzer {
       if (record.detailStatus !== 'complete' || !record.detail?.jobInfo?.postDescription?.trim())
         throw new Error('请先在 BOSS 当前岗位页补全此岗位详情')
       if (
+        isJobExcluded(record) ||
         record.analysisStatus === 'ready' ||
         record.reviewStatus !== 'pending' ||
         record.sendStatus !== 'pending'
@@ -348,5 +351,49 @@ export class SavedJobAnalyzer {
   async analyzeOne(jobId: string) {
     await this.validateOne(jobId)
     return this.start({ limit: 1, jobId })
+  }
+
+  async generateGreetingOne(jobId: string) {
+    if (!jobId?.trim()) throw new Error('缺少岗位 ID')
+    const { model, resumeText } = this.validateSetup()
+    const config = { ...jsonClone(this.host.conf.formData.aiGreeting), enable: true }
+    if (!Array.isArray(config.prompt) || !config.prompt.some((message) => message.content?.trim()))
+      throw new Error('请先保存招呼语提示词')
+    const token = crypto.randomUUID()
+    let claimed = false
+    this.busy.value = true
+    try {
+      claimed = await this.host.claimJobAnalysis(
+        jobId,
+        token,
+        (model.data?.other?.timeout ?? 60000) + 30000,
+      )
+      if (!claimed) throw new Error('该岗位正在另一页面处理中，请稍后重试')
+      const record = (await this.host.getJobLibrary()).find((item) => item.encryptJobId === jobId)
+      if (!record) throw new Error('未找到已保存岗位')
+      if (
+        isJobExcluded(record) ||
+        record.reviewStatus !== 'pending' ||
+        record.sendStatus !== 'pending'
+      )
+        throw new Error('该岗位已排除、已审核或已进入发送流程，不能覆盖招呼语')
+      if (record.detailStatus !== 'complete' || !record.detail?.jobInfo?.postDescription?.trim())
+        throw new Error('请先补全此岗位详情')
+      const chat = new ChatModel(this.host, resumeText)
+      if (!chat.createAgent(config, 'greetings')) throw new Error('模型未配置，无法生成招呼语')
+      const text = await chat
+        .chat('greetings', this.host.getSavedJobData(record), { disableMessages: true })
+        .then((response) => response.text)
+      if (typeof text !== 'string' || !text.trim()) throw new Error('模型返回了空招呼语')
+      this.checkOtherWork()
+      if (!(await this.host.saveJobGreeting(jobId, text.trim())))
+        throw new Error('岗位状态已变化，招呼语未保存，请重新查看岗位')
+    } finally {
+      try {
+        if (claimed) await this.host.releaseJobAnalysis(jobId, token)
+      } finally {
+        this.busy.value = false
+      }
+    }
   }
 }

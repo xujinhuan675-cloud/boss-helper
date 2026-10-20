@@ -42,6 +42,7 @@ export type BossJobLibraryRecord = {
   reviewStatus: ReviewStatus
   sendStatus: SendStatus
   detail?: BossZpDetailData
+  jobUrl?: string
   analysis?: Record<string, unknown>
   analysisFailureReason?: string
   finalGreeting?: string
@@ -91,6 +92,7 @@ export function assertJobLibrary(records: unknown): asserts records is BossJobLi
           'failureReason',
           'analysisFailureReason',
           'finalGreeting',
+          'jobUrl',
         ]) ||
         !hasOptionalTextFields(record.snapshot, [
           'jobName',
@@ -132,7 +134,6 @@ export function normalizeJobLibraryAnalysis(
           record.analysis?.scoringVersion !== scoringVersion &&
           (record.analysis !== undefined ||
             record.analysisStatus === 'ready' ||
-            record.finalGreeting !== undefined ||
             record.matchedAt !== undefined),
       )
       .map((record) => record.encryptJobId),
@@ -173,6 +174,8 @@ export type CollectionRun = {
   savedCount: number
   newCount: number
   duplicateCount: number
+  detailCompletedCount?: number
+  detailFailedCount?: number
   lastScrollTop: number
   lastScrollHeight: number
   visibleCount?: number
@@ -299,6 +302,7 @@ function createRecord(item: BossZpJobItemData, keyword: string, batchId: string,
     reviewStatus: 'pending' as const,
     sendStatus: 'pending' as const,
     detailRetryCount: 0,
+    jobUrl: `https://www.zhipin.com/job_detail/${item.encryptJobId}.html`,
   }
 }
 

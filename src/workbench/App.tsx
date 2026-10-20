@@ -5,12 +5,11 @@ import {
   BriefcaseBusiness,
   ClipboardList,
   FileUser,
-  Filter,
   LayoutDashboard,
   Moon,
   RefreshCw,
-  Settings2,
   Sun,
+  Target,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
@@ -26,24 +25,27 @@ import { useWorkbench } from './useWorkbench'
 
 const views = [
   { id: 'jobs', label: '岗位库', icon: BriefcaseBusiness, group: '求职管理' },
-  { id: 'resumes', label: '简历与方向', icon: FileUser, group: '求职管理' },
-  { id: 'filters', label: '筛选规则', icon: Filter, group: '自动化配置' },
-  { id: 'models', label: '模型与提示词', icon: Bot, group: '自动化配置' },
-  { id: 'settings', label: '任务设置', icon: Settings2, group: '自动化配置' },
+  { id: 'plans', label: '求职方案', icon: Target, group: '求职管理' },
+  { id: 'resumes', label: '简历库', icon: FileUser, group: '共享资源' },
+  { id: 'models', label: '模型与提示词', icon: Bot, group: '共享资源' },
   { id: 'logs', label: '运行日志', icon: ClipboardList, group: '运行排查' },
 ] as const
+const legacyPlanRoutes = new Set(['filters', 'settings'])
+
+function resolveView(route: string) {
+  if (legacyPlanRoutes.has(route)) return 'plans'
+  return views.some((item) => item.id === route) ? route : 'jobs'
+}
 
 export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
   const state = useWorkbench()
   const compact = mode === 'sidepanel'
-  const [view, setView] = useState(() =>
-    views.some((item) => item.id === location.hash.slice(1)) ? location.hash.slice(1) : 'jobs',
-  )
+  const [view, setView] = useState(() => resolveView(location.hash.slice(1)))
   const [dark, setDark] = useState(() => localStorage.getItem('boss-helper-theme') === 'dark')
   useEffect(() => {
     const route = () => {
       const requested = location.hash.slice(1)
-      const next = views.some((item) => item.id === requested) ? requested : 'jobs'
+      const next = resolveView(requested)
       setView(next)
       if (requested !== next && !compact)
         location.replace(`${location.pathname}${location.search}#${next}`)
@@ -156,7 +158,7 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
           ) : (
             <div className="workbench-layout">
               <nav aria-label="工作台导航" className="workbench-navigation">
-                {['求职管理', '自动化配置', '运行排查'].map((group) => (
+                {['求职管理', '共享资源', '运行排查'].map((group) => (
                   <div key={group} className="workbench-nav-group">
                     <h2 className="px-3 text-xs font-medium text-muted">{group}</h2>
                     <div className="workbench-nav-links">
@@ -179,10 +181,9 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
               </nav>
               <main className="workbench-panel" key={view}>
                 {view === 'jobs' && <Jobs />}
+                {view === 'plans' && <Settings page="plan" />}
                 {view === 'resumes' && <Resumes />}
                 {view === 'models' && <Models />}
-                {view === 'settings' && <Settings />}
-                {view === 'filters' && <Settings page="filters" />}
                 {view === 'logs' && <Logs />}
               </main>
             </div>

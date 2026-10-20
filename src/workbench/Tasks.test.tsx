@@ -29,6 +29,7 @@ const state = {
   statistics: [],
   tabs: [],
   tabId: null,
+  activeDetailJobId: null,
   runtime: null,
 }
 await mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
@@ -36,6 +37,8 @@ await mock.module('@/entrypoints/boss/jobStore', () => ({ getJobFunnel }))
 await mock.module('./store', () => ({
   saveConfig: async () => {},
   command: async () => {},
+  startSavedAnalysis: async () => {},
+  generateSavedGreeting: async () => {},
   perform: async (work) => work(),
   selectResume: async () => {},
   openTaskPanel: async () => {},
@@ -60,6 +63,7 @@ const snapshot = () => ({
   results: [],
   logs: [],
   workflow: null,
+  viewedJobKey: null,
 })
 
 beforeEach(() => {
@@ -73,10 +77,43 @@ beforeEach(() => {
     statistics: [],
     tabs: [],
     tabId: null,
+    activeDetailJobId: null,
+    activeDetail: null,
   })
 })
 
 describe('task panel responsibilities', () => {
+  test('shows URL phase, failed count and remaining missing details without another action group', () => {
+    state.connected = true
+    state.records = [
+      {
+        encryptJobId: 'one',
+        detailStatus: 'complete',
+        detail: { jobInfo: { encryptId: 'one', postDescription: 'Complete JD' } },
+        snapshot: {},
+      },
+      { encryptJobId: 'two', detailStatus: 'failed', snapshot: {} },
+      { encryptJobId: 'three', detailStatus: 'pending', snapshot: {} },
+    ]
+    state.runtime = {
+      ...snapshot(),
+      gatheringKind: 'detail',
+      gatheringBusy: true,
+      detailRun: {
+        status: 'running',
+        completed: 1,
+        failed: 1,
+        total: 3,
+        retryable: 1,
+        phase: '正在通过 URL 获取详情',
+      },
+    }
+    const text = new JSDOM(render()).window.document.body.textContent
+    expect(text).toContain('正在通过 URL 获取详情')
+    expect(text).toContain('成功 1')
+    expect(text).toContain('失败 1')
+    expect(text).toContain('待补全 2')
+  })
   test('pairs three cumulative statistics with their own daily increases', () => {
     const now = new Date()
     const yesterday = new Date(now)
@@ -191,6 +228,157 @@ describe('task panel responsibilities', () => {
     expect(render()).toContain('停止投递')
   })
 
+  test('shows the active detail job card even when there is no search-page executor', () => {
+    state.activeDetailJobId = 'detail-job'
+    state.records = [
+      {
+        encryptJobId: 'detail-job',
+        key: 'boss::detail-job',
+        snapshot: {
+          encryptJobId: 'detail-job',
+          jobName: '当前详情岗位',
+          salaryDesc: '20-30K',
+          brandName: '详情公司',
+        },
+        sourceKeywords: ['手动详情页'],
+        batches: ['manual-detail'],
+        firstSeenAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+        detailStatus: 'complete',
+        analysisStatus: 'pending',
+        reviewStatus: 'pending',
+        sendStatus: 'pending',
+        detailRetryCount: 0,
+        detail: {
+          jobInfo: {
+            encryptId: 'detail-job',
+            jobName: '当前详情岗位',
+            postDescription: '负责产品规划、需求分析与跨团队项目交付。',
+          },
+        },
+      },
+    ]
+
+    dom.window.document.body.innerHTML = render()
+
+    const row = dom.window.document.querySelector('ul[aria-label="当前页面岗位"] li')
+    expect(row?.textContent).toContain('当前详情岗位')
+    expect(row?.querySelector('button[aria-label="分析岗位"]')?.disabled).toBe(false)
+    expect(row?.textContent).toContain('正在浏览')
+  })
+
+  test('shows an unsaved detail preview with save and analysis actions without a saved badge', () => {
+    state.activeDetailJobId = 'preview'
+    state.activeDetail = {
+      jobInfo: {
+        encryptId: 'preview',
+        jobName: '预览岗位',
+        salaryDesc: '20-30K',
+        postDescription: '负责产品规划、需求分析与跨团队项目交付。',
+      },
+      brandComInfo: { brandName: '预览公司' },
+    }
+    dom.window.document.body.innerHTML = render()
+    const row = dom.window.document.querySelector('ul[aria-label="当前页面岗位"] li')
+    expect(row?.textContent).toContain('预览岗位')
+    expect(row?.textContent).toContain('预览公司')
+    expect(row?.textContent).not.toContain('已入库')
+    for (const label of ['保存岗位', '分析岗位', '生成招呼语'])
+      expect(row?.querySelector(`button[aria-label="${label}"]`)?.disabled).toBe(false)
+  })
+
+  test('adds an independent detail URL alongside the existing BOSS summary action', () => {
+    Object.assign(state, { connected: true, runtime: snapshot() })
+    state.runtime.jobs = [
+      {
+        key: 'boss::one',
+        jobName: '产品经理',
+        salary: '20-30K',
+        brand: { name: '示例公司' },
+        link: 'https://www.zhipin.com/web/geek/jobs?jobId=one',
+      },
+    ]
+    dom.window.document.body.innerHTML = render()
+    const row = dom.window.document.querySelector('ul[aria-label="当前页面岗位"] li')
+    const link = row.querySelector('a[aria-label="打开岗位详情页"]')
+    expect(link.getAttribute('href')).toBe('https://www.zhipin.com/job_detail/one.html')
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+    expect(link.textContent).toBe('')
+    expect(link.querySelector('svg.lucide-file-text')).not.toBeNull()
+    expect(link.classList.contains('button--icon-only')).toBe(true)
+    const summary = row.querySelector('button[aria-label="在 BOSS 打开岗位"]')
+    expect(summary.querySelector('svg.lucide-external-link')).not.toBeNull()
+  })
+
+  test('marks only the viewed job next to its save and analyze actions', () => {
+    Object.assign(state, { connected: true, runtime: snapshot() })
+    state.runtime.currentJob = 'boss::one'
+    state.runtime.jobs = ['one', 'two'].map((id) => ({
+      key: `boss::${id}`,
+      jobName: `岗位 ${id}`,
+      salary: '20-30K',
+      brand: { name: '示例公司' },
+    }))
+    for (const key of [null, 'boss::two', 'boss::one', 'boss::missing', null]) {
+      state.runtime.viewedJobKey = key
+      dom.window.document.body.innerHTML = render()
+      const list = dom.window.document.querySelector('ul[aria-label="当前页面岗位"]')
+      const rows = list.querySelectorAll('[aria-current="true"]')
+      const expected = state.runtime.jobs.find((job) => job.key === key)
+      expect(rows).toHaveLength(expected ? 1 : 0)
+      if (expected) {
+        expect(rows[0].textContent).toContain(expected.jobName)
+        expect(rows[0].textContent).toContain('正在浏览')
+        expect(rows[0].querySelector('[aria-label="保存岗位"]')).not.toBeNull()
+        expect(rows[0].querySelector('[aria-label="分析岗位"]')).not.toBeNull()
+      } else expect(list.textContent).not.toContain('正在浏览')
+    }
+  })
+
+  test('marks stored page jobs even when details are pending and disables duplicate saves', () => {
+    Object.assign(state, { connected: true, runtime: snapshot() })
+    state.runtime.jobs = ['pending', 'complete', 'new'].map((id) => ({
+      key: `boss::${id}`,
+      jobName: `岗位 ${id}`,
+      salary: '20-30K',
+      brand: { name: '示例公司' },
+    }))
+    state.records = [
+      { encryptJobId: 'pending', detailStatus: 'pending', snapshot: {} },
+      {
+        encryptJobId: 'complete',
+        detailStatus: 'complete',
+        snapshot: {},
+        detail: { jobInfo: { encryptId: 'complete', postDescription: 'Full JD' } },
+      },
+    ]
+    dom.window.document.body.innerHTML = render()
+    const rows = dom.window.document.querySelectorAll('ul[aria-label="当前页面岗位"] > li')
+    expect(rows[0].textContent).toContain('已入库')
+    expect(rows[0].textContent).toContain('待补详情')
+    expect(rows[1].textContent).toContain('已入库')
+    expect(rows[1].textContent).not.toContain('待补详情')
+    expect(rows[2].textContent).not.toContain('已入库')
+    expect([...rows].every((row) => !row.textContent.includes('待处理'))).toBe(true)
+    expect(rows[0].querySelector('button[aria-label="保存岗位"]')?.disabled).toBe(true)
+    expect(rows[2].querySelector('button[aria-label="保存岗位"]')?.disabled).toBe(false)
+    state.runtime.results = [
+      ['boss::pending', { status: 'ai', msg: '正在分析' }],
+      ['boss::complete', { status: 'error', msg: '任务失败' }],
+    ]
+    dom.window.document.body.innerHTML = render()
+    const updatedRows = dom.window.document.querySelectorAll('ul[aria-label="当前页面岗位"] > li')
+    expect(updatedRows[0].textContent).toContain('分析中')
+    expect(updatedRows[1].textContent).toContain('失败')
+    expect(updatedRows[2].textContent).not.toContain('待处理')
+    state.records = []
+    dom.window.document.body.innerHTML = render()
+    expect(
+      dom.window.document.querySelector('ul[aria-label="当前页面岗位"]').textContent,
+    ).not.toContain('已入库')
+  })
+
   test('shows the current rotation keyword without a duplicate switch', () => {
     Object.assign(state, { connected: true, runtime: snapshot() })
     state.runtime.keywordRotation = {
@@ -209,7 +397,7 @@ describe('task panel responsibilities', () => {
       [...dom.window.document.querySelectorAll('[role="switch"]')].map(
         (input) => input.closest('label').textContent,
       ),
-    ).toEqual(['浏览时自动采集岗位', '跟随当前任务'])
+    ).toEqual(['浏览时自动采集岗位'])
   })
 
   test('keeps configuration quick choices beside task controls', () => {
@@ -217,5 +405,18 @@ describe('task panel responsibilities', () => {
     expect(html).not.toContain('收起当前配置')
     expect(html).toContain('当前简历')
     expect(html.indexOf('当前简历')).toBeLessThan(html.indexOf('轮换采集并分析'))
+  })
+
+  test('keeps the sidebar focused on page actions instead of duplicate history surfaces', () => {
+    state.connected = true
+    state.runtime = {
+      ...snapshot(),
+      logs: [{ state: 'success', state_name: '成功', title: '采集完成' }],
+    }
+    const html = render()
+    expect(html).not.toContain('AI 过程')
+    expect(html).not.toContain('最近运行')
+    expect(html).not.toContain('采集完成')
+    expect(html).toContain('批量任务')
   })
 })

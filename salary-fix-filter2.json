@@ -1,0 +1,1 @@
+{ "logic": "and", "conditions": [["薪资档位（按下限）", "disjoint", ["高于15K"]]] }

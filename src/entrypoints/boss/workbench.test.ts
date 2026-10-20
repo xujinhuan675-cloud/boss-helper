@@ -20,6 +20,7 @@ function context() {
   return {
     collectionRun: ref(null),
     detailRun: ref(null),
+    historyDetailRun: ref(null),
     gatheringKind: ref('collection'),
     gatheringBusy: ref(false),
     keywordRotation: ref(null),
@@ -30,9 +31,10 @@ function context() {
     keywordRotationSaving: ref(false),
     realtimeBusy: ref(false),
     autoCaptureEnabled: ref(false),
-    savedAnalyzer: { busy: ref(false), run: ref(null) },
+    savedAnalyzer: { busy: ref(false), run: ref(null), validateSetup() {} },
     workflow: null,
     currentJob: ref(null),
+    _jobDetail: ref(undefined),
     jobList: ref([]),
     jobResultMaps: new Map(),
     _logs: ref([]),
@@ -112,6 +114,104 @@ describe('executor message boundary', () => {
 })
 
 describe('headless executor bridge', () => {
+  it('exposes the manually viewed job separately from the workflow job and clears it', async () => {
+    const ctx = context()
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    ctx.currentJob.value = 'boss::workflow'
+    expect(await bridge.snapshot()).toMatchObject({
+      currentJob: 'boss::workflow',
+      viewedJobKey: null,
+    })
+    for (const id of ['one', 'two']) {
+      ctx._jobDetail.value = { jobInfo: { encryptId: id } }
+      expect(await bridge.snapshot()).toMatchObject({
+        currentJob: 'boss::workflow',
+        viewedJobKey: `boss::${id}`,
+      })
+    }
+    ctx._jobDetail.value = undefined
+    expect((await bridge.snapshot()).viewedJobKey).toBeNull()
+    ctx._jobDetail.value = { jobInfo: {} }
+    expect((await bridge.snapshot()).viewedJobKey).toBeNull()
+  })
+
+  it('returns per-job validation failures without capturing or opening a job', async () => {
+    const ctx = context()
+    ctx.savedAnalyzer.validateSetup = () => {
+      throw new Error('请先保存完整简历')
+    }
+    ctx.getJobLibrary = async () => {
+      throw new Error('must not read jobs')
+    }
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    await bridge.command({ type: 'analyzeOne', jobId: 'a' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await bridge.snapshot()).jobActions.a).toMatchObject({
+      type: 'analyzeOne',
+      status: 'failed',
+      error: '请先保存完整简历',
+    })
+  })
+
+  it('tracks greeting generation and rejects duplicate card actions while it runs', async () => {
+    const ctx = context()
+    let finish
+    ctx.getJobLibrary = async () => [
+      {
+        encryptJobId: 'a',
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: 'JD' } },
+      },
+    ]
+    ctx.savedAnalyzer.generateGreetingOne = () =>
+      new Promise((resolve) => {
+        finish = resolve
+      })
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    expect(isExecutorCommand({ type: 'generateGreeting', jobId: 'a' })).toBe(true)
+    expect(isExecutorCommand({ type: 'generateGreeting', jobId: 'a', send: true })).toBe(false)
+    await bridge.command({ type: 'generateGreeting', jobId: 'a' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await bridge.snapshot()).jobActions.a.status).toBe('running')
+    await expect(bridge.command({ type: 'generateGreeting', jobId: 'b' })).rejects.toThrow('正在')
+    finish()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await bridge.snapshot()).jobActions.a.status).toBe('completed')
+  })
+
+  it('reports a failed single-job run as a card failure even if the task resolves', async () => {
+    const ctx = context()
+    ctx.getJobLibrary = async () => [
+      {
+        encryptJobId: 'a',
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: 'JD' } },
+      },
+    ]
+    ctx.savedAnalyzer.analyzeOne = async () => ({ status: 'failed', error: '模型超时' })
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    await bridge.command({ type: 'analyzeOne', jobId: 'a' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await bridge.snapshot()).jobActions.a).toMatchObject({
+      status: 'failed',
+      error: '模型超时',
+    })
+  })
+  it('accepts only argument-free history commands and dispatches start/resume', async () => {
+    const ctx = context()
+    const calls = []
+    ctx.completeHistoricalDetails = async (resume) => {
+      calls.push(resume)
+    }
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    for (const type of ['completeHistory', 'resumeHistory']) {
+      expect(isExecutorCommand({ type })).toBe(true)
+      expect(isExecutorCommand({ type, token: 'untrusted' })).toBe(false)
+      expect(await bridge.command({ type })).toEqual({ accepted: true })
+    }
+    await Promise.resolve()
+    expect(calls).toEqual([false, true])
+  })
   it('rejects native filter navigation during active tasks or pending saves', async () => {
     for (const busy of [
       'gatheringBusy',
@@ -218,7 +318,10 @@ describe('headless executor bridge', () => {
     const ctx = context()
     ctx.extractKeywordRotationFromResume = async () => ['AI products']
     let opened = ''
-    ctx.onJobCardClick = async (key) => {
+    ctx.onJobCardClick = async () => {
+      throw new Error('explicit opening must not depend on detail completion')
+    }
+    ctx.openJob = (key) => {
       opened = key
     }
     ctx._logs.value = [{ title: 'old' }]

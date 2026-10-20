@@ -38,6 +38,15 @@ describe('workbench settings import boundaries', () => {
     expect(models[0].data.advanced.extra_body).toEqual({ retained: true })
   })
 
+  it.each([0, -1, 1.5, NaN, Infinity, 1441, '60'])(
+    'rejects an invalid collection runtime limit: %s',
+    (collectionMaxRuntimeMinutes) => {
+      expect(() =>
+        validateConfig({ ...jsonClone(defaultFormData), collectionMaxRuntimeMinutes }),
+      ).toThrow('运行上限')
+    },
+  )
+
   it.each([
     null,
     {},

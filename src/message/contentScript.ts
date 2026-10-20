@@ -1,6 +1,10 @@
 import type { StorageItemKey } from '#imports'
 import { storage } from '#imports'
+import { browser } from '#imports'
 
+import type { DetailAccessCommand } from '../entrypoints/boss/detailAccess'
+import { DETAIL_MESSAGE } from '../entrypoints/boss/jobDetails'
+import type { JobDetailPage } from '../entrypoints/boss/jobDetails'
 import type { BackgroundCounter } from './background'
 export { ProvideContentAdapter } from './contentScriptShare'
 
@@ -15,6 +19,16 @@ export class ContentCounter implements BackgroundCounter {
 
   constructor(background: BackgroundCounter) {
     this.background = background
+  }
+
+  async detailAccess(command: DetailAccessCommand): Promise<JobDetailPage | null> {
+    const result = await browser.runtime.sendMessage({
+      type: DETAIL_MESSAGE,
+      action: 'access',
+      command,
+    })
+    if (!result?.ok) throw new Error(result?.error || '详情标签页通道不可用')
+    return result.page ?? null
   }
 
   _addRouterHook(hook: (path: string) => void) {
@@ -37,6 +51,10 @@ export class ContentCounter implements BackgroundCounter {
 
   async updateJobLibrary(...args: Parameters<BackgroundCounter['updateJobLibrary']>) {
     return this.background.updateJobLibrary(...args)
+  }
+
+  async historyDetails(...args: Parameters<BackgroundCounter['historyDetails']>) {
+    return this.background.historyDetails(...args)
   }
 
   async claimJobAnalysis(...args: Parameters<BackgroundCounter['claimJobAnalysis']>) {
