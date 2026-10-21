@@ -942,18 +942,40 @@ test('puts page selection, reconnect, jump and status in the sidebar header', as
 })
 
 test('moves pinned current page jobs to the top of the sidebar task panel', async () => {
+  state.connected = true
+  state.runtime = {
+    jobs: ['one', 'two', 'three', 'four'].map((id) => ({
+      key: `boss::${id}`,
+      jobName: `岗位 ${id}`,
+      salary: '20-30K',
+      brand: { name: '示例公司' },
+    })),
+    results: [],
+    logs: [],
+  }
   await render('sidepanel')
   const section = container.querySelector('.page-jobs-section')
   const taskPanel = section.parentElement
+  const list = section.querySelector('[aria-label="当前页面岗位"]')
   const pin = section.querySelector('[aria-label="置顶当前页面岗位"]')
   const scrollCalls = []
   section.scrollIntoView = (options) => scrollCalls.push(options)
 
   expect(section.classList.contains('page-jobs-section-pinned')).toBe(false)
+  expect(list.classList.contains('page-jobs-list-pinned')).toBe(false)
+  expect(list.classList.contains('max-h-80')).toBe(true)
+  expect(list.querySelectorAll(':scope > li')).toHaveLength(4)
   expect(taskPanel.firstElementChild === section).toBe(false)
   expect(pin.getAttribute('aria-pressed')).toBe('false')
   await act(async () => pin.click())
   expect(section.classList.contains('page-jobs-section-pinned')).toBe(true)
+  expect(section.classList.contains('flex')).toBe(true)
+  expect(section.classList.contains('flex-col')).toBe(true)
+  expect(list.classList.contains('page-jobs-list-pinned')).toBe(true)
+  expect(list.classList.contains('min-h-0')).toBe(true)
+  expect(list.classList.contains('flex-1')).toBe(true)
+  expect(list.classList.contains('max-h-80')).toBe(false)
+  expect(list.querySelectorAll(':scope > li')).toHaveLength(4)
   expect(taskPanel.firstElementChild === section).toBe(true)
   expect(taskPanel.classList.contains('page-jobs-only')).toBe(true)
   expect(container.querySelector('[aria-label="取消置顶当前页面岗位"]')).toBeTruthy()
@@ -1126,7 +1148,7 @@ test('marks saved jobs and disables duplicate saves even when their details are 
   expect(list.querySelector('[aria-label="保存岗位"]').disabled).toBe(true)
 })
 
-test('expands saved analysis and greetings under the current job without opening BOSS or sending', async () => {
+test('keeps greeting actions and sends only after confirmation', async () => {
   state.connected = true
   state.runtime = {
     jobs: [{ key: 'boss::one', jobName: '产品经理', brand: { name: '示例公司' } }],
@@ -1146,6 +1168,10 @@ test('expands saved analysis and greetings under the current job without opening
       sendStatus: 'pending',
     },
   ]
+  state.resumes = {
+    currentResumeId: 'resume',
+    resumes: [{ id: 'resume', name: '测试简历', content: '完整简历' }],
+  }
   const copied = []
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
@@ -1159,17 +1185,23 @@ test('expands saved analysis and greetings under the current job without opening
   expect(commands).toEqual([])
   await act(async () => list.querySelector('[aria-label="查看招呼语"]').click())
   expect(list.textContent).toContain('您好，我有相关产品经历。')
+  const greetingActions = list.querySelector('[aria-label="复制招呼语"]').parentElement
+  expect(greetingActions.classList.contains('justify-end')).toBe(true)
+  expect(list.querySelector('[aria-label="重新生成招呼语"] svg.lucide-refresh-cw')).not.toBeNull()
   await act(async () => list.querySelector('[aria-label="复制招呼语"]').click())
   expect(copied).toEqual(['您好，我有相关产品经历。'])
   expect(commands).toEqual([])
+  await act(async () => list.querySelector('[aria-label="重新生成招呼语"]').click())
+  expect(commands).toEqual([{ type: 'generateGreeting', jobId: 'one' }])
   await act(async () => list.querySelector('[aria-label="发送招呼语"]').click())
-  expect(commands).toEqual([])
+  expect(commands).toEqual([{ type: 'generateGreeting', jobId: 'one' }])
   await act(async () =>
     [...document.querySelectorAll('[role="dialog"] button')]
       .find((button) => button.textContent === '发送')
       .click(),
   )
   expect(commands).toEqual([
+    { type: 'generateGreeting', jobId: 'one' },
     { type: 'sendGreeting', jobId: 'one', greeting: '您好，我有相关产品经历。' },
   ])
 })

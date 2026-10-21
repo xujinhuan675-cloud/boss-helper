@@ -304,20 +304,9 @@ export function Models() {
           </Alert.Content>
         </Alert>
       )}
-      <Tabs defaultSelectedKey="model-configuration" className="models-sections">
-        <Tabs.ListContainer>
-          <Tabs.List aria-label="模型与提示词设置">
-            <Tabs.Tab id="model-configuration">
-              模型配置
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="prompt-configuration">
-              提示词
-              <Tabs.Indicator />
-            </Tabs.Tab>
-          </Tabs.List>
-        </Tabs.ListContainer>
-        <Tabs.Panel id="model-configuration" className="flex flex-col gap-5 pt-5">
+      <div className="flex flex-col gap-6">
+        <section className="flex flex-col gap-5" aria-label="模型配置">
+          <h2 className="text-lg font-semibold">模型配置</h2>
           <div className="flex justify-end">
             <Button isDisabled={busy || testing} onPress={() => edit()}>
               <Plus size={16} />
@@ -510,8 +499,9 @@ export function Models() {
               </section>
             </>
           )}
-        </Tabs.Panel>
-        <Tabs.Panel id="prompt-configuration" className="pt-4">
+        </section>
+        <section className="flex flex-col gap-5" aria-label="提示词">
+          <h2 className="text-lg font-semibold">提示词</h2>
           <Tabs defaultSelectedKey="aiFiltering" className="prompt-purposes">
             <Tabs.ListContainer>
               <Tabs.List aria-label="提示词用途">
@@ -733,8 +723,8 @@ export function Models() {
               )
             })}
           </Tabs>
-        </Tabs.Panel>
-      </Tabs>
+        </section>
+      </div>
       <ConfirmDialog
         open={!!deleting}
         title="删除模型"

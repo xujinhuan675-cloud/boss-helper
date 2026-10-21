@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileText,
   MessageSquareText,
+  RefreshCw,
   Save,
   Send,
   WandSparkles,
@@ -122,6 +123,15 @@ export function PageJob({
       <div className="flex flex-wrap items-center justify-end gap-2">
         {status && <span className="mr-auto text-xs text-muted">{status}</span>}
         <div className="flex flex-wrap items-center gap-1">
+          <IconButton
+            label="在 BOSS 打开岗位"
+            disabled={locked || detail}
+            onPress={() => {
+              void act(() => command({ type: 'openJob', key: job.key }))
+            }}
+          >
+            <ExternalLink size={16} />
+          </IconButton>
           <Tooltip>
             <Link
               aria-label="打开岗位详情页"
@@ -134,15 +144,6 @@ export function PageJob({
             </Link>
             <Tooltip.Content>打开岗位详情页</Tooltip.Content>
           </Tooltip>
-          <IconButton
-            label="在 BOSS 打开岗位"
-            disabled={locked || detail}
-            onPress={() => {
-              void act(() => command({ type: 'openJob', key: job.key }))
-            }}
-          >
-            <ExternalLink size={16} />
-          </IconButton>
           <IconButton
             label="保存岗位"
             disabled={locked || !!record}
@@ -203,7 +204,7 @@ export function PageJob({
               <p className="whitespace-pre-wrap break-words text-sm">
                 {record?.finalGreeting || '尚未生成招呼语'}
               </p>
-              <div className="flex flex-wrap gap-1">
+              <div className="flex flex-wrap justify-end gap-1">
                 <IconButton
                   label="复制招呼语"
                   disabled={!record?.finalGreeting}
@@ -224,7 +225,7 @@ export function PageJob({
                     void execute('generateGreeting')
                   }}
                 >
-                  <WandSparkles size={16} />
+                  <RefreshCw size={16} />
                 </IconButton>
                 <Button
                   size="sm"

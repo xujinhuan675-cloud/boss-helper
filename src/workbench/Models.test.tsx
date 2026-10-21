@@ -135,9 +135,7 @@ async function selectModel(id) {
 }
 
 async function openPrompts() {
-  await click(
-    [...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '提示词'),
-  )
+  expect(container.querySelector('[aria-label="提示词用途"]')).toBeTruthy()
 }
 
 async function changeText(element, value) {
@@ -319,19 +317,23 @@ test('right-aligns model and resume administration', async () => {
   )
 })
 
-test('switches between model management and a single message editor without losing drafts', async () => {
+test('shows model configuration and prompts as stacked sections', async () => {
+  expect(!!container.querySelector('[aria-label="模型与提示词设置"]')).toBe(false)
+  expect(!!container.querySelector('[aria-label="模型配置"]')).toBe(true)
+  expect(!!container.querySelector('[aria-label="提示词"]')).toBe(true)
+  expect(!!container.querySelector('[aria-label="AI 模型"]')).toBe(true)
+  expect(!!container.querySelector('[aria-label="提示词用途"]')).toBe(true)
+})
+
+test('keeps model management visible while editing prompt drafts', async () => {
   await openPrompts()
-  expect(container.querySelector('[aria-label="AI 模型"]')).toBeNull()
+  expect(container.querySelector('[aria-label="AI 模型"]')).toBeTruthy()
   expect(container.querySelectorAll('textarea')).toHaveLength(1)
   await changeText(container.querySelector('textarea'), 'draft system rules')
   await click(button('2. 输入模板user'))
   expect(container.querySelector('textarea').value).toContain('jobData')
   await changeText(container.querySelector('textarea'), 'draft input template')
-  await click(
-    [...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '模型配置'),
-  )
   expect(container.querySelector('[aria-label="AI 模型"]')).toBeTruthy()
-  await openPrompts()
   expect(container.querySelector('textarea').value).toBe('draft input template')
   await click(button('1. 匹配规则system'))
   expect(container.querySelector('textarea').value).toBe('draft system rules')

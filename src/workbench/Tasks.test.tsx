@@ -287,7 +287,7 @@ describe('task panel responsibilities', () => {
       expect(row?.querySelector(`button[aria-label="${label}"]`)?.disabled).toBe(false)
   })
 
-  test('adds an independent detail URL alongside the existing BOSS summary action', () => {
+  test('keeps the BOSS share action before the independent detail URL', () => {
     Object.assign(state, { connected: true, runtime: snapshot() })
     state.runtime.jobs = [
       {
@@ -300,6 +300,13 @@ describe('task panel responsibilities', () => {
     ]
     dom.window.document.body.innerHTML = render()
     const row = dom.window.document.querySelector('ul[aria-label="当前页面岗位"] li')
+    const openActions = [
+      ...row.querySelectorAll('[aria-label="在 BOSS 打开岗位"], [aria-label="打开岗位详情页"]'),
+    ]
+    expect(openActions.map((action) => action.getAttribute('aria-label'))).toEqual([
+      '在 BOSS 打开岗位',
+      '打开岗位详情页',
+    ])
     const link = row.querySelector('a[aria-label="打开岗位详情页"]')
     expect(link.getAttribute('href')).toBe('https://www.zhipin.com/job_detail/one.html')
     expect(link.getAttribute('target')).toBe('_blank')

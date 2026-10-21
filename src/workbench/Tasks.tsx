@@ -121,7 +121,7 @@ export function Tasks() {
     <div
       key="page-jobs-section"
       ref={pageJobsRef}
-      className={`page-jobs-section space-y-3${pageJobsPinned ? ' page-jobs-section-pinned' : ' pt-5'}`}
+      className={`page-jobs-section space-y-3${pageJobsPinned ? ' page-jobs-section-pinned flex flex-col' : ' pt-5'}`}
     >
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold">
@@ -151,7 +151,10 @@ export function Tasks() {
               : '连接 BOSS 标签页后查看'}
         </output>
       ) : (
-        <ul aria-label="当前页面岗位" className="max-h-80 divide-y divide-border overflow-y-auto">
+        <ul
+          aria-label="当前页面岗位"
+          className={`${pageJobsPinned ? 'page-jobs-list-pinned min-h-0 flex-1' : 'max-h-80'} divide-y divide-border overflow-y-auto`}
+        >
           {pageJobs.map((job) => {
             const isDetail = job.key === detailJob?.key
             return (
