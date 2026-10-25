@@ -212,6 +212,11 @@ describe('headless executor bridge', () => {
     await Promise.resolve()
     expect(calls).toEqual([false, true])
   })
+
+  it('does not expose current-page collection as a separate command', () => {
+    expect(isExecutorCommand({ type: 'captureCurrentPage' })).toBe(false)
+  })
+
   it('rejects native filter navigation during active tasks or pending saves', async () => {
     for (const busy of [
       'gatheringBusy',

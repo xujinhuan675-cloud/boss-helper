@@ -18,6 +18,11 @@ import type { JobData } from '@/composables/useHelper/type'
 import { hasCompleteJobDetail } from '../entrypoints/boss/jobDetails'
 import { ConfirmDialog, IconButton, act } from './components'
 import { JobAnalysisResult } from './JobAnalysisResult'
+import {
+  getResumeTailoringInputError,
+  openResumeMatcher,
+  RESUME_MATCHER_BASE_URL,
+} from './resumeMatcher'
 import { command } from './store'
 import { useWorkbench } from './useWorkbench'
 
@@ -50,7 +55,7 @@ export function PageJob({
     else if (bounds.bottom > viewport.bottom)
       list.scrollTop += Math.min(bounds.bottom - viewport.bottom, bounds.top - viewport.top)
   }, [viewed])
-  const [expanded, setExpanded] = useState<'analysis' | 'greeting' | null>(null)
+  const [expanded, setExpanded] = useState<'analysis' | 'greeting' | 'tailor' | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -91,6 +96,22 @@ export function PageJob({
     if (section === 'analysis' ? record?.analysisStatus === 'ready' : !!record?.finalGreeting)
       return
     void execute(section === 'analysis' ? 'analyzeOne' : 'generateGreeting')
+  }
+
+  function tailorResume() {
+    setError('')
+    setNotice('')
+    setExpanded('tailor')
+    const inputError = getResumeTailoringInputError(job)
+    if (inputError) {
+      setError(inputError)
+      return
+    }
+    if (!openResumeMatcher(job)) {
+      setError('浏览器阻止了新标签页，请允许弹出窗口后重试')
+      return
+    }
+    setNotice('已打开 Resume Matcher')
   }
 
   return (
@@ -160,6 +181,21 @@ export function PageJob({
           >
             <WandSparkles size={16} />
           </IconButton>
+          <Tooltip>
+            <Link
+              aria-label="在 Resume Matcher 中定制简历"
+              href={`${RESUME_MATCHER_BASE_URL}/tailor`}
+              target="_blank"
+              className="button button--sm button--ghost button--icon-only"
+              onClick={(event) => {
+                event.preventDefault()
+                if (!locked) tailorResume()
+              }}
+            >
+              <ExternalLink size={16} />
+            </Link>
+            <Tooltip.Content>在 Resume Matcher 中定制简历</Tooltip.Content>
+          </Tooltip>
           <IconButton
             label={record?.finalGreeting ? '查看招呼语' : '生成招呼语'}
             disabled={locked && !record?.finalGreeting}
@@ -171,12 +207,12 @@ export function PageJob({
       </div>
       {expanded && (
         <section
-          aria-label={`${job.jobName}的${expanded === 'analysis' ? 'AI 分析' : '招呼语'}`}
+          aria-label={`${job.jobName}的${expanded === 'analysis' ? 'AI 分析' : expanded === 'tailor' ? '定制简历' : '招呼语'}`}
           className="min-w-0 space-y-3 pt-2"
         >
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-medium">
-              {expanded === 'analysis' ? 'AI 分析' : '招呼语'}
+              {expanded === 'analysis' ? 'AI 分析' : expanded === 'tailor' ? '定制简历' : '招呼语'}
             </h3>
             <IconButton label="收起结果" onPress={() => setExpanded(null)}>
               <ChevronUp size={16} />
@@ -199,6 +235,8 @@ export function PageJob({
           )}
           {expanded === 'analysis' ? (
             <JobAnalysisResult record={record} />
+          ) : expanded === 'tailor' ? (
+            <p className="text-sm text-muted">{notice || '未打开 Resume Matcher'}</p>
           ) : (
             <>
               <p className="whitespace-pre-wrap break-words text-sm">

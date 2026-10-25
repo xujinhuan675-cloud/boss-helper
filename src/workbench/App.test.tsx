@@ -7,10 +7,11 @@ import { defaultFormData } from '../composables/conf/info'
 import * as scoring from '../composables/useApplying/scoring'
 import * as jobs from '../entrypoints/boss/jobStore'
 import { clearDiagnostics, diagnostic } from '../utils/diagnostics'
+import * as resumeMatcher from './resumeMatcher'
 
 let mirrorStatus
 const mirrorCalls = []
-mock.module('#imports', () => ({
+void mock.module('#imports', () => ({
   browser: {
     runtime: {
       sendMessage: async (message) => {
@@ -81,6 +82,7 @@ let commandError = ''
 const chatSelections = []
 const deletions = []
 const batchDeletions = []
+const greetingGenerations = []
 let batchDeleteError = ''
 const resumeSelections = []
 const imports = []
@@ -108,23 +110,23 @@ const state = {
   analysisBusy: false,
   historyDetailRun: null,
 }
-mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
-mock.module('@/entrypoints/boss/jobStore', () => jobs)
-mock.module('@/composables/useApplying/scoring', () => scoring)
-mock.module('@/composables/useModel', () => ({ isCompleteModel: () => false }))
-mock.module('@/utils/jsonImportExport', () => ({ exportJson: async () => {} }))
-mock.module('@/utils/csvExport', () => ({ exportCsv: (...args) => csvExports.push(args) }))
-mock.module('./Models', () => ({ Models: () => null }))
-mock.module('./Settings', () => ({ Settings: () => null }))
-mock.module('./Resumes', () => ({ Resumes: () => null }))
-mock.module('@/message', () => ({
+void mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
+void mock.module('@/entrypoints/boss/jobStore', () => jobs)
+void mock.module('@/composables/useApplying/scoring', () => scoring)
+void mock.module('@/composables/useModel', () => ({ isCompleteModel: () => false }))
+void mock.module('@/utils/jsonImportExport', () => ({ exportJson: async () => {} }))
+void mock.module('@/utils/csvExport', () => ({ exportCsv: (...args) => csvExports.push(args) }))
+void mock.module('./Models', () => ({ Models: () => null }))
+void mock.module('./Settings', () => ({ Settings: () => null }))
+void mock.module('./Resumes', () => ({ Resumes: () => null }))
+void mock.module('@/message', () => ({
   counter: {
     fetchText: async () => {
       throw new Error('offline')
     },
   },
 }))
-mock.module('./store', () => ({
+void mock.module('./store', () => ({
   saveConfig: async () => {},
   perform: async (work) => work(),
   command: async (value) => {
@@ -158,6 +160,9 @@ mock.module('./store', () => ({
   startSavedAnalysis: async (options) => {
     calls.push(options)
   },
+  generateSavedGreeting: async (jobId) => {
+    greetingGenerations.push(jobId)
+  },
   stopSavedAnalysis: async () => {},
 }))
 const { act, createElement } = await import('react')
@@ -176,12 +181,14 @@ beforeEach(() => {
   chatSelections.length = 0
   deletions.length = 0
   batchDeletions.length = 0
+  greetingGenerations.length = 0
   batchDeleteError = ''
   resumeSelections.length = 0
   imports.length = 0
   csvExports.length = 0
   state.resumes = { resumes: [], currentResumeId: null }
   state.connected = false
+  state.activeDetail = null
   state.connectionError = ''
   state.today = null
   state.records = []
@@ -192,11 +199,13 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
 })
+const originalWindowOpen = window.open
 afterEach(async () => {
   await act(async () => {
     await new Promise((resolve) => requestAnimationFrame(resolve))
     root.unmount()
   })
+  Object.defineProperty(window, 'open', { configurable: true, value: originalWindowOpen })
   container.remove()
 })
 afterAll(() => dom.window.close())
@@ -644,11 +653,7 @@ test('opens saved jobs by row click and deletes after confirmation', async () =>
   expect(row).toBeTruthy()
   await act(async () => row.click())
   expect(document.body.querySelector('[aria-label="岗位详情内容"]')).toBeTruthy()
-  await act(async () =>
-    [...document.body.querySelectorAll('button')]
-      .find((button) => button.textContent === '关闭')
-      .click(),
-  )
+  await act(async () => document.body.querySelector('[role="dialog"] button').click())
 
   const deleteButton = container.querySelector('[aria-label="删除岗位 待删除岗位"]')
   expect(deleteButton).toBeTruthy()
@@ -662,6 +667,159 @@ test('opens saved jobs by row click and deletes after confirmation', async () =>
   )
   await act(async () => confirm.click())
   expect(deletions).toEqual(['saved-job'])
+})
+
+test('shows only the active tab actions in the saved-job detail modal footer', async () => {
+  const [record] = jobs.mergeJobRecords(
+    [],
+    [{ encryptJobId: 'saved-job', jobName: '可分析岗位' }],
+    'AI',
+    'batch',
+  ).records
+  Object.assign(record, {
+    detailStatus: 'complete',
+    detail: {
+      jobInfo: { encryptId: 'saved-job', postDescription: '已保存的岗位职责详情' },
+    },
+    finalGreeting: '你好，我对这个岗位很感兴趣。',
+  })
+  state.records = [record]
+  state.connected = true
+  await render()
+  await act(async () => container.querySelector('[data-slot="table-row"]').click())
+
+  const dialog = document.body.querySelector('[role="dialog"]')
+  const actionLabels = () =>
+    [...dialog.querySelectorAll('button')]
+      .map((button) => button.textContent.trim())
+      .filter((label) => ['分析此岗位', '复制', '生成招呼语', '发送招呼语'].includes(label))
+  const tab = (label) =>
+    [...dialog.querySelectorAll('[role="tab"]')].find((button) =>
+      button.textContent.includes(label),
+    )
+
+  expect(actionLabels()).toEqual([])
+  await act(async () => tab('AI 分析').click())
+  expect(actionLabels()).toEqual(['分析此岗位'])
+  await act(async () => tab('招呼语').click())
+  expect(actionLabels()).toEqual(['复制', '生成招呼语', '发送招呼语'])
+  const footer = dialog.lastElementChild
+  expect(footer.textContent).not.toContain('分析此岗位')
+  for (const label of ['复制', '生成招呼语', '发送招呼语']) {
+    const button = [...footer.querySelectorAll('button')].find((item) => item.textContent === label)
+    expect(button).toBeTruthy()
+    expect(button.closest('[role="tabpanel"]')).toBeNull()
+  }
+  expect(footer.textContent).not.toContain('关闭')
+  await act(async () =>
+    [...footer.querySelectorAll('button')]
+      .find((button) => button.textContent === '生成招呼语')
+      .click(),
+  )
+  expect(greetingGenerations).toEqual(['saved-job'])
+})
+
+test('opens Resume Matcher with the selected job and sends no resume content', async () => {
+  const [record] = jobs.mergeJobRecords(
+    [],
+    [{ encryptJobId: 'tailor-job', jobName: '前端工程师', brandName: '示例公司' }],
+    'AI',
+    'batch',
+  ).records
+  Object.assign(record, {
+    detailStatus: 'complete',
+    detail: {
+      jobInfo: {
+        encryptId: 'tailor-job',
+        jobName: '前端工程师',
+        postDescription: '负责前端架构与组件建设',
+      },
+    },
+  })
+  state.records = [record]
+  const sentMessages = []
+  const matcherTab = { postMessage: (...args) => sentMessages.push(args) }
+  const openedUrls = []
+  Object.defineProperty(window, 'open', {
+    configurable: true,
+    value: (url) => {
+      openedUrls.push(url)
+      return matcherTab
+    },
+  })
+  await render()
+  await act(async () => container.querySelector('[data-slot="table-row"]').click())
+  const dialog = document.body.querySelector('[role="dialog"]')
+  const tailorTab = [...dialog.querySelectorAll('[role="tab"]')].find((tab) =>
+    tab.textContent.includes('定制简历'),
+  )
+  await act(async () => tailorTab.click())
+  expect(openedUrls).toHaveLength(0)
+  expect(dialog.textContent).toContain('前端工程师')
+  expect(dialog.textContent).not.toContain('负责前端架构与组件建设')
+  expect([...dialog.querySelectorAll('dt')].some((item) => item.textContent.trim() === 'JD')).toBe(
+    false,
+  )
+  const matcherLink = [...dialog.querySelectorAll('a')].find((link) =>
+    link.textContent.includes('在 Resume Matcher 中定制'),
+  )
+  expect(matcherLink).toBeTruthy()
+  if (!matcherLink) return
+  await act(async () => matcherLink.click())
+  const handoffId = new URL(openedUrls[0]).hash.split('=')[1]
+  expect(openedUrls).toEqual([resumeMatcher.buildResumeMatcherUrl(handoffId)])
+  const ready = new dom.window.Event('message')
+  Object.defineProperties(ready, {
+    origin: { value: 'http://localhost:3000' },
+    source: { value: matcherTab },
+    data: { value: { type: 'boss-helper-resume-matcher-ready', id: handoffId } },
+  })
+  window.dispatchEvent(ready)
+  expect(sentMessages).toHaveLength(1)
+  expect(sentMessages[0][1]).toBe('http://localhost:3000')
+  expect(sentMessages[0][0]).toMatchObject({
+    type: 'boss-helper-resume-matcher-handoff',
+    id: handoffId,
+    job: {
+      title: '前端工程师',
+      company: '示例公司',
+      description: '负责前端架构与组件建设',
+    },
+  })
+  expect(sentMessages[0][0]).not.toHaveProperty('resume')
+})
+
+test('does not require an OfferHunt master resume to open Resume Matcher', async () => {
+  const [record] = jobs.mergeJobRecords(
+    [],
+    [{ encryptJobId: 'missing-resume-job', jobName: '待定制岗位' }],
+    'AI',
+    'batch',
+  ).records
+  Object.assign(record, {
+    detailStatus: 'complete',
+    detail: {
+      jobInfo: {
+        encryptId: 'missing-resume-job',
+        postDescription: '岗位 JD',
+      },
+    },
+  })
+  state.records = [record]
+  await render()
+  await act(async () => container.querySelector('[data-slot="table-row"]').click())
+  const dialog = document.body.querySelector('[role="dialog"]')
+  await act(async () =>
+    [...dialog.querySelectorAll('[role="tab"]')]
+      .find((tab) => tab.textContent.includes('定制简历'))
+      .click(),
+  )
+  expect(dialog.querySelector('[role="alert"]')).toBeNull()
+  expect(
+    [...dialog.querySelectorAll('a')].some((link) =>
+      link.textContent.includes('在 Resume Matcher 中定制'),
+    ),
+  ).toBe(true)
 })
 
 test('shows the approved job columns and sorts by first collection time by default', async () => {
@@ -855,6 +1013,10 @@ test('selects jobs across pages and batch deletes only the chosen jobs after con
     })
   const button = (text) =>
     [...document.body.querySelectorAll('button')].find((item) => item.textContent === text)
+  const waitForSelectionClear = async () => {
+    for (let attempt = 0; attempt < 20 && container.textContent.includes('已选 '); attempt++)
+      await act(() => new Promise((resolve) => requestAnimationFrame(resolve)))
+  }
 
   await act(async () => checkbox('选择岗位 岗位0').click())
   expect(document.body.querySelector('[data-slot="modal-dialog"]')).toBeNull()
@@ -879,6 +1041,7 @@ test('selects jobs across pages and batch deletes only the chosen jobs after con
   expect(container.textContent).toContain('已选 2')
   await act(async () => button('删除已选 (2)').click())
   await act(async () => button('删除').click())
+  await waitForSelectionClear()
 
   expect(batchDeletions).toEqual([['0', '20']])
   expect(state.records).toHaveLength(19)
@@ -939,6 +1102,66 @@ test('puts page selection, reconnect, jump and status in the sidebar header', as
   expect(container.querySelector('[aria-label="打开已连接的 BOSS 岗位页"]')).toBeTruthy()
   expect(container.querySelector('.connection-status-dot')).toBeNull()
   expect(header.textContent).toContain('已连接')
+})
+
+test('shows an active readable detail page separately from an executor connection', async () => {
+  state.activeDetail = {
+    jobInfo: { encryptId: 'one', postDescription: 'Complete job description' },
+  }
+  await render('sidepanel')
+  const header = container.querySelector('header')
+  expect(header.textContent).toContain('详情可读取')
+  expect(header.textContent).not.toContain('未连接')
+  expect(header.querySelector('[aria-label="打开 BOSS 岗位页以连接"]')).toBeTruthy()
+})
+
+test('opens Resume Matcher from the current-page job card with only its JD', async () => {
+  state.connected = true
+  state.runtime = {
+    jobs: [
+      {
+        key: 'boss::page-job',
+        jobName: '产品经理',
+        positionName: 'PM',
+        jobDescription: '负责产品规划与跨团队协作',
+        brand: { name: '示例公司', link: '', scale: '' },
+        salary: '20-30K',
+        city: '上海',
+      },
+    ],
+    results: [],
+    logs: [],
+  }
+  const messages = []
+  const matcherTab = { postMessage: (...args) => messages.push(args) }
+  const openedUrls = []
+  Object.defineProperty(window, 'open', {
+    configurable: true,
+    value: (url) => {
+      openedUrls.push(url)
+      return matcherTab
+    },
+  })
+  await render('sidepanel')
+  const link = container.querySelector('[aria-label="在 Resume Matcher 中定制简历"]')
+  expect(link).toBeTruthy()
+  await act(async () => link.click())
+  expect(openedUrls).toHaveLength(1)
+  const handoffId = new URL(openedUrls[0]).hash.split('=')[1]
+  const ready = new dom.window.Event('message')
+  Object.defineProperties(ready, {
+    origin: { value: 'http://localhost:3000' },
+    source: { value: matcherTab },
+    data: { value: { type: 'boss-helper-resume-matcher-ready', id: handoffId } },
+  })
+  window.dispatchEvent(ready)
+  expect(messages).toHaveLength(1)
+  expect(messages[0][0].job).toMatchObject({
+    title: '产品经理',
+    company: '示例公司',
+    description: '负责产品规划与跨团队协作',
+  })
+  expect(messages[0][0]).not.toHaveProperty('resume')
 })
 
 test('moves pinned current page jobs to the top of the sidebar task panel', async () => {
@@ -1180,7 +1403,7 @@ test('keeps greeting actions and sends only after confirmation', async () => {
   await render('sidepanel')
   const list = container.querySelector('[aria-label="当前页面岗位"]')
   await act(async () => list.querySelector('[aria-label="分析岗位"]').click())
-  expect(list.textContent).toContain('通过筛选')
+  expect(list.textContent).toContain('达到筛选线')
   expect(list.textContent).toContain('熟悉产品规划')
   expect(commands).toEqual([])
   await act(async () => list.querySelector('[aria-label="查看招呼语"]').click())
@@ -1240,9 +1463,20 @@ test('shows card validation and asynchronous errors next to the clicked job', as
   expect(list.querySelector('[role="alert"]').textContent).toContain('连接已失效')
 })
 
-test('collapses batch starts while keeping page actions available', async () => {
+test('collapses batch starts and removes the manual current-page action', async () => {
   state.connected = true
-  state.runtime = { jobs: [], results: [], logs: [] }
+  state.runtime = {
+    jobs: [
+      {
+        key: 'boss::loaded',
+        jobName: '已加载岗位',
+        brand: { name: '示例公司' },
+        salary: '20-30K',
+      },
+    ],
+    results: [],
+    logs: [],
+  }
   await render('sidepanel')
   expect(container.textContent).not.toContain('AI 过程')
   expect(container.textContent).not.toContain('最近运行')
@@ -1257,6 +1491,10 @@ test('collapses batch starts while keeping page actions available', async () => 
   )
   expect(collect.closest('[hidden]')).toBeNull()
   await act(async () => collect.click())
+  const capturePage = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === '采集当前页',
+  )
+  expect(capturePage).toBeUndefined()
   expect(commands).toEqual([{ type: 'collect' }])
 })
 

@@ -948,6 +948,41 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     return run
   }
 
+  async captureCurrentPage() {
+    if (
+      this.savedAnalyzer.busy.value ||
+      this.gatheringBusy.value ||
+      this.detailPromise ||
+      this.collectionStoragePending ||
+      this.realtimeBusy.value ||
+      this.keywordRotationBusy.value ||
+      this.keywordRotationSaving.value ||
+      this.workflow?.status.value === 'running'
+    )
+      throw new Error('已有任务正在运行或等待保存，请稍后再采集当前页')
+    const items = [
+      ...new Map(
+        this._jobList.value
+          .filter((item) => !!item.encryptJobId)
+          .map((item) => [item.encryptJobId, item]),
+      ).values(),
+    ]
+    if (!items.length) throw new Error('当前页面没有已加载的岗位')
+    const viewedId = this._jobDetail.value?.jobInfo?.encryptId
+    const viewedLid = this._jobDetail.value?.lid
+    const selected = items.find(
+      (item) =>
+        (!!viewedId && item.encryptJobId === viewedId) || (!!viewedLid && item.lid === viewedLid),
+    )
+    const orderedItems = selected ? [selected, ...items.filter((item) => item !== selected)] : items
+    const newCount = await this.captureNewJobs(orderedItems)
+    const detailRun = await this.completeCollectedDetails({
+      availableOnly: true,
+      jobIds: orderedItems.map((item) => item.encryptJobId),
+    })
+    return { newCount, detailRun }
+  }
+
   async captureJobSnapshot(jobKey: string, keyword = ''): Promise<BossJobLibraryRecord> {
     const job = this.jobMaps.get(jobKey)
     if (!job) throw new Error('未找到当前岗位数据')
@@ -990,7 +1025,24 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
   async setAutoCaptureEnabled(enabled: boolean) {
     await counter.storageSet(AUTO_CAPTURE_STORAGE_KEY, enabled)
     this.autoCaptureEnabled.value = enabled
-    if (enabled) this.captureViewedJobDetail(this._jobDetail.value)
+    if (enabled) {
+      this.captureViewedJobDetail(this._jobDetail.value)
+      this.startAutomaticCurrentPageCapture()
+    }
+  }
+
+  private startAutomaticCurrentPageCapture() {
+    if (
+      !this.autoCaptureEnabled.value ||
+      !this._jobList.value.length ||
+      this.gatheringBusy.value ||
+      this.detailPromise
+    )
+      return
+    void this.captureCurrentPage().catch((error) => {
+      this.jobLibraryError.value = error instanceof Error ? error.message : String(error)
+      diagnostic('browse.capture', { error })
+    })
   }
 
   private captureViewedJobDetail(detail: BossZpDetailData | undefined) {
@@ -1752,7 +1804,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
     return this.detailPromise
   }
 
-  async completeCollectedDetails(options: { availableOnly?: boolean } = {}) {
+  async completeCollectedDetails(options: { availableOnly?: boolean; jobIds?: string[] } = {}) {
     if (this.savedAnalyzer.busy.value) throw new Error('请先停止本地岗位分析')
     if (this.detailPromise) return this.detailPromise
     if (
@@ -1790,15 +1842,21 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           '读取本地岗位库',
           run,
         )
+        const priority = options.jobIds && new Map(options.jobIds.map((id, index) => [id, index]))
         const pending = records
           .filter(
             (record) =>
               !isJobExcluded(record) &&
               !hasCompleteJobDetail(record) &&
-              (!options.availableOnly || this.jobMaps.has(record.key)),
+              (!options.availableOnly || this.jobMaps.has(record.key)) &&
+              (!options.jobIds || options.jobIds.includes(record.encryptJobId)),
           )
-          .sort((a, b) => Number(this.jobMaps.has(b.key)) - Number(this.jobMaps.has(a.key)))
-          .slice(0, 5)
+          .sort((a, b) =>
+            priority
+              ? priority.get(a.encryptJobId)! - priority.get(b.encryptJobId)!
+              : Number(this.jobMaps.has(b.key)) - Number(this.jobMaps.has(a.key)),
+          )
+        if (!options.jobIds) pending.splice(5)
         run.total = pending.length
         for (const record of pending) {
           if (this.gatheringIssue(run) || !(await this.waitForGathering(0, run))) break
@@ -2186,6 +2244,7 @@ export class BossHelperCtx extends HelperContext<BossHelperCtx, BoosJobData, {}>
           })
         })
         this.captureViewedJobDetail(this._jobDetail.value)
+        this.startAutomaticCurrentPageCapture()
       },
     )()
   }

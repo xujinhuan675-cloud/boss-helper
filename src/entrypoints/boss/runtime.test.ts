@@ -2017,6 +2017,40 @@ it('captures only unseen job snapshots without fetching details', async () => {
   })
 })
 
+it('prioritizes the selected current-page job before other pending details', async () => {
+  const ctx = context()
+  const jobs = Array.from({ length: 6 }, (_, index) => item(String(index)))
+  data.set(JOB_LIBRARY_STORAGE_KEY, mergeJobRecords([], [...jobs].reverse(), 'AI', 'old').records)
+  await ctx._initJobList()
+  ctx._jobList.value = jobs
+  jobListHookCallback?.(jobs)
+  ctx._jobDetail.value = { jobInfo: { encryptId: '3' } } as BossZpDetailData
+  for (const job of jobs) {
+    ctx.jobMaps.get(`boss::${job.encryptJobId}`).rawData.detail = {
+      jobInfo: { encryptId: job.encryptJobId, postDescription: `JD ${job.encryptJobId}` },
+    }
+  }
+
+  const result = await ctx.captureCurrentPage()
+
+  expect(result).toMatchObject({
+    newCount: 0,
+    detailRun: { status: 'completed', completed: 6, failed: 0 },
+  })
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(6)
+  expect(
+    data.get(JOB_LIBRARY_STORAGE_KEY).every((record) => record.detailStatus === 'complete'),
+  ).toBe(true)
+  expect(
+    urlCommands.filter((command) => command.type === 'visit').map((command) => command.jobId),
+  ).toEqual(['3', '0', '1', '2', '4', '5'])
+  expect(historyRequests).toEqual([])
+  expect(ctx._jobList.value.map((job) => job.encryptJobId)).toEqual(
+    jobs.map((job) => job.encryptJobId),
+  )
+  expect(root.scrollTop).toBe(0)
+})
+
 it('keeps saved details untouched on passive job-list updates when auto capture is disabled', async () => {
   const ctx = context()
   ctx['mounted'] = true
@@ -2030,7 +2064,8 @@ it('keeps saved details untouched on passive job-list updates when auto capture 
 
   await ctx._initJobList()
   expect(jobListHookCallback).toBeDefined()
-  jobListHookCallback?.([item('visible')])
+  ctx._jobList.value = [item('visible')]
+  jobListHookCallback?.(ctx._jobList.value)
   await Promise.resolve()
   await ctx['detailPromise']
 
@@ -2038,19 +2073,29 @@ it('keeps saved details untouched on passive job-list updates when auto capture 
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(records)
 })
 
-it('leaves passive job-list updates unsaved even when browsing capture is enabled', async () => {
+it('automatically captures a loaded job page when browsing capture is enabled', async () => {
   const ctx = context()
   ctx['mounted'] = true
   ctx.autoCaptureEnabled.value = true
 
   await ctx._initJobList()
   expect(jobListHookCallback).toBeDefined()
-  jobListHookCallback?.([item('visible')])
+  ctx._jobList.value = [item('visible')]
+  jobListHookCallback?.(ctx._jobList.value)
+  ctx.jobMaps.get('boss::visible').rawData.detail = {
+    jobInfo: { encryptId: 'visible', postDescription: 'Visible JD' },
+  }
   await ctx['jobCapturePromise']
+  for (let i = 0; i < 10 && !ctx['detailPromise']; i++) await Promise.resolve()
+  await ctx['detailPromise']
 
-  expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+    { encryptJobId: 'visible', detailStatus: 'complete' },
+  ])
   expect(historyRequests).toEqual([])
-  expect(urlCommands).toEqual([])
+  expect(urlCommands.filter((command) => command.type === 'visit').map((c) => c.jobId)).toEqual([
+    'visible',
+  ])
 })
 
 it('does not interrupt an explicit detail task when browsing capture is disabled', async () => {
@@ -2080,13 +2125,24 @@ describe('capture while browsing details', () => {
     jobInfo: { encryptId: 'viewed', postDescription: 'Full viewed JD' },
   })
 
-  it('enables capture without collecting the current list or requesting details', async () => {
+  it('captures the currently viewed job first, then fills the rest of the loaded page', async () => {
     const ctx = await browsingContext()
+    ctx._jobDetail.value = viewedDetail() as BossZpDetailData
+    ctx.jobMaps.get('boss::other').rawData.detail = {
+      jobInfo: { encryptId: 'other', postDescription: 'Other JD' },
+    }
     await ctx.setAutoCaptureEnabled(true)
     await ctx['jobCapturePromise']
-    expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+    for (let i = 0; i < 10 && !ctx['detailPromise']; i++) await Promise.resolve()
+    await ctx['detailPromise']
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+      { encryptJobId: 'viewed', detailStatus: 'complete', detail: viewedDetail() },
+      { encryptJobId: 'other', detailStatus: 'complete' },
+    ])
     expect(historyRequests).toEqual([])
-    expect(urlCommands).toEqual([])
+    expect(urlCommands.filter((command) => command.type === 'visit').map((c) => c.jobId)).toEqual([
+      'other',
+    ])
   })
 
   it('saves the viewed JD once and leaves the other visible job untouched', async () => {
@@ -2177,9 +2233,17 @@ it('persists auto capture and restores it before the first mounted job list', as
   await ctx['mountRoute']('/web/geek/jobs')
   expect(restored).toBe(true)
 
-  jobListHookCallback?.([item('restored')])
+  ctx._jobList.value = [item('restored')]
+  jobListHookCallback?.(ctx._jobList.value)
+  ctx.jobMaps.get('boss::restored').rawData.detail = {
+    jobInfo: { encryptId: 'restored', postDescription: 'Restored JD' },
+  }
   await ctx['jobCapturePromise']
-  expect(data.get(JOB_LIBRARY_STORAGE_KEY) ?? []).toEqual([])
+  for (let i = 0; i < 10 && !ctx['detailPromise']; i++) await Promise.resolve()
+  await ctx['detailPromise']
+  expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toMatchObject([
+    { encryptJobId: 'restored', detailStatus: 'complete' },
+  ])
 })
 
 it('sends a saved greeting through the existing BOSS chat sender', async () => {
@@ -2767,8 +2831,8 @@ describe('collection pacing, controls and persistence', () => {
   it('merges new interval defaults into old presets and preserves saved custom settings', () => {
     const old = deepmerge(defaultFormData, { delayDeliveryInterval: 20 })
     expect(old.delayCollectionScrollMin).toBe(1)
-    expect(old.delayCollectionDetailMax).toBe(5)
-    expect(old.delayCollectionDetailMin).toBe(3)
+    expect(old.delayCollectionDetailMax).toBe(10)
+    expect(old.delayCollectionDetailMin).toBe(6)
     expect(old.collectionMaxRuntimeMinutes).toBe(60)
     expect(old.delayDeliveryInterval).toBe(20)
     expect(old.delayKeywordRotationMin).toBe(300)
@@ -3155,8 +3219,8 @@ describe('historical detail completion', () => {
     })
     expect(historyRequests).toHaveLength(0)
     expect(waits).toHaveLength(1)
-    expect(waits[0]).toBeGreaterThanOrEqual(3000)
-    expect(waits[0]).toBeLessThanOrEqual(5000)
+    expect(waits[0]).toBeGreaterThanOrEqual(6000)
+    expect(waits[0]).toBeLessThanOrEqual(10000)
     expect(urlCommands.filter((c) => c.type === 'visit')).toHaveLength(1)
   })
 
@@ -3857,7 +3921,7 @@ describe('slow collected detail batches', () => {
     expect(desktopNotifications).toHaveLength(1)
     expect(desktopNotifications[0]).toContain('详情补全')
     expect(clicks).toHaveLength(5)
-    expect(waits.every((ms) => ms >= 3000 && ms <= 5000)).toBe(true)
+    expect(waits.every((ms) => ms >= 6000 && ms <= 10000)).toBe(true)
     expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
       reviewStatus: 'approved',
       sendStatus: 'sent',

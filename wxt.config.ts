@@ -32,6 +32,8 @@ export default defineConfig({
       'import.meta': '{}',
     },
     build: {
+      // The largest current extension chunk is 1.45 MB.
+      chunkSizeWarningLimit: 1500,
       rollupOptions: {
         onwarn(warning, warn) {
           if (warning.code === 'INVALID_ANNOTATION') return
@@ -63,6 +65,7 @@ export default defineConfig({
     permissions: [
       'storage',
       'notifications',
+      'scripting',
       ...(browser === 'chrome' ? ['nativeMessaging'] : []),
       ...(browser === 'firefox' ? [] : ['sidePanel']),
     ],

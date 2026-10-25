@@ -195,12 +195,14 @@ export class DetailTabAccess {
     if (jobIdFromUrl(tab.url ?? '') !== page.jobId) throw new Error('手动详情岗位 ID 不匹配')
     const session = await this.storage.getItem<DetailAccessSession>(DETAIL_ACCESS_KEY)
     if (session?.tabId === sender.id) return { status: 'managed' }
-    if ((await this.storage.getItem(AUTO_CAPTURE_STORAGE_KEY)) !== true)
-      return { status: 'disabled' }
     assertCompleteJobDetail(page.detail, page.jobId)
     const records = (await this.storage.getItem<unknown>(JOB_LIBRARY_STORAGE_KEY)) ?? []
     assertJobLibrary(records)
     const record = records.find((r) => r.encryptJobId === page.jobId)
+    if (record && (isJobExcluded(record) || hasCompleteJobDetail(record)))
+      return { status: 'skipped' }
+    if (!record && (await this.storage.getItem(AUTO_CAPTURE_STORAGE_KEY)) !== true)
+      return { status: 'disabled' }
     if (!record) {
       await this.library.update({
         type: 'capture',
@@ -209,8 +211,6 @@ export class DetailTabAccess {
         batch: 'manual-detail',
         newOnly: true,
       })
-    } else if (isJobExcluded(record) || hasCompleteJobDetail(record)) {
-      return { status: 'skipped' }
     }
     const result = await this.library.update({
       type: 'detail',

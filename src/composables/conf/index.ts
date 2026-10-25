@@ -156,6 +156,20 @@ const FROM_VERSION: [string, (from: Partial<FormData>) => Partial<FormData>][] =
       return from
     },
   ],
+  [
+    '20261021',
+    (from) => {
+      if (
+        (from.delayCollectionDetailMin === 3 && from.delayCollectionDetailMax === 5) ||
+        (from.delayCollectionDetailMin === defaultFormData.delayCollectionDetailMin &&
+          from.delayCollectionDetailMax === 5)
+      ) {
+        from.delayCollectionDetailMin = defaultFormData.delayCollectionDetailMin
+        from.delayCollectionDetailMax = defaultFormData.delayCollectionDetailMax
+      }
+      return from
+    },
+  ],
 ]
 
 export const useConf = () => {

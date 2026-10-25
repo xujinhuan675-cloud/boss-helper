@@ -359,8 +359,8 @@ describe('percentage scoring configuration', () => {
       version: defaults.version,
       delayCollectionScrollMin: 1,
       delayCollectionScrollMax: 2,
-      delayCollectionDetailMin: 3,
-      delayCollectionDetailMax: 5,
+      delayCollectionDetailMin: 6,
+      delayCollectionDetailMax: 10,
       collectionMaxRuntimeMinutes: 60,
       resumeText: 'retained resume',
     })
@@ -376,6 +376,29 @@ describe('percentage scoring configuration', () => {
     await conf.confInit()
     expect(conf.formData.delayCollectionDetailMin).toBe(7)
     expect(conf.formData.delayCollectionDetailMax).toBe(12)
+  })
+
+  it('updates only previous default detail pacing and retains custom timing', async () => {
+    const conf = useConf()
+    const updated = await conf.prepareConfig({
+      version: '20261018',
+      delayCollectionDetailMin: 3,
+      delayCollectionDetailMax: 5,
+    })
+    expect(updated).toMatchObject({
+      delayCollectionDetailMin: 6,
+      delayCollectionDetailMax: 10,
+    })
+
+    const custom = await conf.prepareConfig({
+      version: '20261018',
+      delayCollectionDetailMin: 7,
+      delayCollectionDetailMax: 12,
+    })
+    expect(custom).toMatchObject({
+      delayCollectionDetailMin: 7,
+      delayCollectionDetailMax: 12,
+    })
   })
 
   it('runs older migrations in order before updating the timing defaults', async () => {

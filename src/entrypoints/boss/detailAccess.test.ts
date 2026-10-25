@@ -6,6 +6,14 @@ import { JobLibraryStorage } from './jobLibraryStorage'
 import { AUTO_CAPTURE_STORAGE_KEY, JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
 
 let access, tabs, data, navigations, removed, created, now, reply, library
+// Bun's reject matcher is async at runtime but typed as a synchronous matcher.
+const rejectsWith = (promise, message) =>
+  Promise.resolve(
+    message === undefined
+      ? expect(promise).rejects.toThrow()
+      : expect(promise).rejects.toThrow(message),
+  )
+
 beforeEach(() => {
   data = new Map()
   tabs = new Map([
@@ -86,18 +94,18 @@ test('reuses one owned tab serially and never touches existing user tabs', async
 
 test('rejects another workflow, wrong owner, mismatched URL and expired session before navigation', async () => {
   await claim()
-  await expect(claim('b')).rejects.toThrow()
-  await expect(
+  await rejectsWith(claim('b'))
+  await rejectsWith(
     access.command(
       { type: 'visit', token: 'a', jobId: 'one', url: 'https://evil.test/job_detail/one.html' },
       1,
     ),
-  ).rejects.toThrow()
-  await expect(access.command({ type: 'renew', token: 'a' }, 2)).rejects.toThrow()
+  )
+  await rejectsWith(access.command({ type: 'renew', token: 'a' }, 2))
   const realNow = Date.now
   Date.now = () => now + 60_001
   try {
-    await expect(visit('one')).rejects.toThrow('时限')
+    await rejectsWith(visit('one'), '时限')
   } finally {
     Date.now = realNow
   }
@@ -108,7 +116,7 @@ test('closed tab interrupts without creating a replacement and a new worker reta
   await claim()
   await visit('one')
   tabs.delete(100)
-  await expect(visit('two')).rejects.toThrow('关闭')
+  await rejectsWith(visit('two'), '关闭')
   expect(created).toBe(1)
 })
 
@@ -119,7 +127,7 @@ test('redirect identity and a restriction stop further navigation', async () => 
   expect(await access.command({ type: 'read', token: 'a', jobId: 'one' }, 1)).toMatchObject({
     status: 'restricted',
   })
-  await expect(visit('two')).rejects.toThrow('环境')
+  await rejectsWith(visit('two'), '环境')
   expect(navigations).toEqual([])
 })
 
@@ -131,7 +139,7 @@ test('rejects a detail reporting a different job ID', async () => {
     jobId: 'two',
     detail: { jobInfo: { encryptId: 'two', postDescription: 'Wrong job' } },
   })
-  await expect(access.command({ type: 'read', token: 'a', jobId: 'one' }, 1)).rejects.toThrow('ID')
+  await rejectsWith(access.command({ type: 'read', token: 'a', jobId: 'one' }, 1), 'ID')
 })
 
 test('rejects a ready response when the browser has redirected to another job', async () => {
@@ -143,7 +151,7 @@ test('rejects a ready response when the browser has redirected to another job', 
     jobId: 'one',
     detail: { jobInfo: { encryptId: 'one', postDescription: 'Stale JD' } },
   })
-  await expect(access.command({ type: 'read', token: 'a', jobId: 'one' }, 1)).rejects.toThrow('ID')
+  await rejectsWith(access.command({ type: 'read', token: 'a', jobId: 'one' }, 1), 'ID')
 })
 
 test('closing the owner releases only the dedicated tab', async () => {
@@ -152,7 +160,7 @@ test('closing the owner releases only the dedicated tab', async () => {
   await access.tabRemoved(1)
   expect(removed).toEqual([100])
   expect(tabs.has(2)).toBe(true)
-  await expect(visit('two')).rejects.toThrow('所有权')
+  await rejectsWith(visit('two'), '所有权')
 })
 
 test('manual detail completion preserves current review/send and cannot bypass history ownership', async () => {
@@ -165,12 +173,10 @@ test('manual detail completion preserves current review/send and cannot bypass h
     reviewStatus: 'approved',
     sendStatus: 'sent',
   })
-  await expect(access.passive(reply('one'), { id: 2, url: tabs.get(2).url })).rejects.toThrow('ID')
+  await rejectsWith(access.passive(reply('one'), { id: 2, url: tabs.get(2).url }), 'ID')
   await library.historyDetails({ type: 'start', token: 'history' })
   tabs.get(2).url = 'https://www.zhipin.com/job_detail/one.html'
-  await expect(access.passive(reply('one'), { id: 2, url: tabs.get(2).url })).rejects.toThrow(
-    '另一页面',
-  )
+  await rejectsWith(access.passive(reply('one'), { id: 2, url: tabs.get(2).url }), '另一页面')
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
 })
 
@@ -215,18 +221,26 @@ test('captures a newly opened detail page so the workbench can analyze it', asyn
   )
 })
 
-test('passive detail browsing never saves new or existing jobs when auto capture is off or unset', async () => {
+test('fills saved jobs on visited detail pages with auto capture off without capturing new jobs', async () => {
   const before = structuredClone(data.get(JOB_LIBRARY_STORAGE_KEY))
   for (const enabled of [undefined, false]) {
+    data.set(JOB_LIBRARY_STORAGE_KEY, structuredClone(before))
     if (enabled === undefined) data.delete(AUTO_CAPTURE_STORAGE_KEY)
     else data.set(AUTO_CAPTURE_STORAGE_KEY, enabled)
-    for (const jobId of ['fresh', 'user']) {
-      tabs.get(2).url = `https://www.zhipin.com/job_detail/${jobId}.html`
-      expect(await access.passive(reply(jobId), { id: 2, url: tabs.get(2).url })).toEqual({
-        status: 'disabled',
-      })
-      expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(before)
-    }
+    tabs.get(2).url = 'https://www.zhipin.com/job_detail/fresh.html'
+    expect(await access.passive(reply('fresh'), { id: 2, url: tabs.get(2).url })).toEqual({
+      status: 'disabled',
+    })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toEqual(before)
+
+    tabs.get(2).url = 'https://www.zhipin.com/job_detail/user.html'
+    expect(await access.passive(reply('user'), { id: 2, url: tabs.get(2).url })).toEqual({
+      status: 'saved',
+    })
+    expect(
+      data.get(JOB_LIBRARY_STORAGE_KEY).find((record) => record.encryptJobId === 'user'),
+    ).toMatchObject({ detailStatus: 'complete', detail: reply('user').detail })
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(before.length)
   }
 })
 

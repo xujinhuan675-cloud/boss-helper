@@ -178,8 +178,13 @@ const library = new JobLibraryStorage({
 const modelCalls = []
 mock.module('@/composables/useModel/chatModel', () => ({
   ChatModel: class {
-    createAgent() {
+    createAgent(config) {
+      this.prompt = config.prompt
       return true
+    }
+    async generate(role) {
+      modelCalls.push({ role, prompt: this.prompt })
+      return '# 定制后的简历'
     }
     async chat(role, data) {
       modelCalls.push({ role, jd: data.jobData.jobDescription })
@@ -531,6 +536,51 @@ describe('workbench synchronization and mutation boundary', () => {
       stored.set('conf-model', savedModels ?? [])
       stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
       resumes.currentResume.value = null
+      await store.refreshTabs()
+    }
+  })
+
+  test('generates a saved-job greeting without a BOSS tab or executor message', async () => {
+    const original = [...tabs]
+    const savedModels = stored.get('conf-model')
+    const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const savedResume = resumes.currentResume.value
+    try {
+      tabs.length = 0
+      await store.refreshTabs()
+      stored.set('conf-model', [
+        {
+          key: 'model',
+          name: '妯″瀷',
+          data: { api_key: 'test', base_url: 'https://model.invalid/v1', model: 'saved-model' },
+        },
+      ])
+      resumes.currentResume.value = { id: 'resume', name: 'resume', content: 'resume content' }
+      const records = mergeJobRecords(
+        [],
+        [{ encryptJobId: 'greeting-only', jobName: 'greeting job' }],
+        'AI',
+        'batch',
+      ).records
+      Object.assign(records[0], {
+        detailStatus: 'complete',
+        detail: { jobInfo: { postDescription: 'saved JD' } },
+      })
+      stored.set(JOB_LIBRARY_STORAGE_KEY, records)
+      calls.length = 0
+      modelCalls.length = 0
+
+      await store.generateSavedGreeting('greeting-only')
+
+      expect(calls).toEqual([])
+      expect(modelCalls.map((call) => call.role)).toEqual(['greetings'])
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBeTruthy()
+      expect(store.getWorkbenchState().analysisBusy).toBe(false)
+    } finally {
+      tabs.splice(0, tabs.length, ...original)
+      stored.set('conf-model', savedModels ?? [])
+      stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      resumes.currentResume.value = savedResume
       await store.refreshTabs()
     }
   })

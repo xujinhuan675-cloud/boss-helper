@@ -52,6 +52,17 @@ describe('shared job detail validation', () => {
     })
   })
 
+  test('reads a JD stored in the generic text container inside its labelled section', () => {
+    const doc = page(
+      `<main class="job-detail"><section class="job-sec"><h3>职位描述</h3><div class="text">${jd}</div></section></main>`,
+    )
+
+    expect(readJobDetailPage(doc)).toMatchObject({
+      status: 'ready',
+      detail: { jobInfo: { encryptId: 'one', postDescription: jd } },
+    })
+  })
+
   test('captures the job heading and company alongside its complete description', () => {
     const doc = page(
       `<main class="job-detail"><header><h1>产品经理</h1><span class="salary">20-30K</span><a class="company-name">示例公司</a></header><section class="job-sec"><h3>职位描述</h3><div class="job-sec-text">${jd}</div></section></main>`,

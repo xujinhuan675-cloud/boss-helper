@@ -1,3 +1,6 @@
 [submodule "packages/devlog-ui"]
 	path = packages/devlog-ui
 	url = https://github.com/Ocyss/devlog-ui
+[submodule "resume-matcher"]
+	path = resume-matcher
+	url = https://github.com/srbhr/Resume-Matcher.git

@@ -5,6 +5,7 @@ import {
   Checkbox,
   Chip,
   Dropdown,
+  Link,
   Modal,
   Pagination,
   Popover,
@@ -20,6 +21,7 @@ import {
   Filter,
   FilterX,
   ListRestart,
+  MessageSquareText,
   Pause,
   Play,
   RefreshCw,
@@ -30,6 +32,7 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { Key } from 'react'
 import type { SortDescriptor } from 'react-aria-components'
 
 import {
@@ -47,15 +50,22 @@ import type {
 } from '@/entrypoints/boss/jobStore'
 import { exportCsv } from '@/utils/csvExport'
 
+import { getSavedJobData } from '../entrypoints/boss/jobData'
 import { parseHistoricalJobLibrary } from '../entrypoints/boss/jobImport'
 import { ConfirmDialog, IconButton, SelectField, act } from './components'
 import { DeliveryStatistics } from './DeliveryStatistics'
 import { JobAnalysisResult } from './JobAnalysisResult'
 import {
+  getResumeTailoringInputError,
+  openResumeMatcher,
+  RESUME_MATCHER_BASE_URL,
+} from './resumeMatcher'
+import {
   command,
   selectTab,
   deleteSavedJob,
   deleteSavedJobs,
+  generateSavedGreeting,
   importSavedJobs,
   refreshLibrary,
   startSavedAnalysis,
@@ -140,6 +150,8 @@ export function Jobs() {
   const [processing, setProcessing] = useState('active')
   const [page, setPage] = useState(1)
   const [selectedId, setSelectedId] = useState('')
+  const [detailTab, setDetailTab] = useState('jd')
+  const [tailorError, setTailorError] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [sortDescriptor, setSortDescriptor] = useState<SortDescriptor>({
     column: 'collectedAt',
@@ -192,6 +204,11 @@ export function Jobs() {
   const selectedOnPage = pageIds.filter((id) => selectedIds.has(id)).length
   const allPageSelected = pageIds.length > 0 && selectedOnPage === pageIds.length
   const selected = state.records.find((record) => record.encryptJobId === selectedId)
+  const selectedJob = selected ? getSavedJobData(selected).jobData : null
+  useEffect(() => {
+    setDetailTab('jd')
+    setTailorError('')
+  }, [selectedId])
   const busy = state.analysisBusy
   const disabled = state.loading || state.saving || busy
   const liveHistory = state.runtime?.historyDetailRun
@@ -223,6 +240,23 @@ export function Jobs() {
     const success = await act(work)
     if (success) await refreshLibrary()
     return success
+  }
+
+  function tailorSelectedJob() {
+    setTailorError('')
+    if (!selectedJob) return
+    const inputError = getResumeTailoringInputError(selectedJob)
+    if (inputError) {
+      setTailorError(inputError)
+      return
+    }
+    if (!openResumeMatcher(selectedJob)) {
+      setTailorError('浏览器阻止了新标签页，请允许弹出窗口后重试')
+    }
+  }
+
+  function selectDetailTab(key: Key) {
+    setDetailTab(String(key))
   }
 
   return (
@@ -671,7 +705,10 @@ export function Jobs() {
                       key={record.encryptJobId}
                       id={record.encryptJobId}
                       className="cursor-pointer"
-                      onAction={() => setSelectedId(record.encryptJobId)}
+                      onAction={() => {
+                        setSelectedId(record.encryptJobId)
+                        setDetailTab('jd')
+                      }}
                     >
                       <Table.Cell>
                         <Checkbox
@@ -779,7 +816,10 @@ export function Jobs() {
       <Modal.Backdrop
         isOpen={!!selected}
         onOpenChange={(open) => {
-          if (!open) setSelectedId('')
+          if (!open) {
+            setSelectedId('')
+            setDetailTab('jd')
+          }
         }}
       >
         <Modal.Container size="lg">
@@ -857,7 +897,7 @@ export function Jobs() {
                       }}
                     />
                   </div>
-                  <Tabs defaultSelectedKey="jd">
+                  <Tabs selectedKey={detailTab} onSelectionChange={selectDetailTab}>
                     <Tabs.ListContainer>
                       <Tabs.List aria-label="岗位详情内容">
                         <Tabs.Tab id="jd">
@@ -870,6 +910,10 @@ export function Jobs() {
                         </Tabs.Tab>
                         <Tabs.Tab id="greeting">
                           招呼语
+                          <Tabs.Indicator />
+                        </Tabs.Tab>
+                        <Tabs.Tab id="tailor">
+                          定制简历
                           <Tabs.Indicator />
                         </Tabs.Tab>
                       </Tabs.List>
@@ -890,6 +934,64 @@ export function Jobs() {
                     </Tabs.Panel>
                     <Tabs.Panel id="analysis" className="space-y-4 pt-4">
                       <JobAnalysisResult record={selected} />
+                    </Tabs.Panel>
+                    <Tabs.Panel id="greeting" className="space-y-4 pt-4">
+                      <p className="whitespace-pre-wrap text-sm">
+                        {selected.finalGreeting || '尚未生成招呼语'}
+                      </p>
+                      <p className="text-sm text-muted">
+                        发送状态：
+                        {
+                          {
+                            pending: '未发送',
+                            queued: '待发送',
+                            sent: '已发送',
+                            unknown: '发送结果未知',
+                            failed: '发送失败',
+                          }[selected.sendStatus]
+                        }
+                      </p>
+                    </Tabs.Panel>
+                    <Tabs.Panel id="tailor" className="space-y-4 pt-4">
+                      <dl className="grid gap-2 text-sm sm:grid-cols-2">
+                        <div>
+                          <dt className="text-xs text-muted">岗位</dt>
+                          <dd className="break-words">
+                            {selected.snapshot.jobName || '未命名岗位'}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-muted">公司</dt>
+                          <dd className="break-words">
+                            {selected.detail?.brandComInfo?.brandName ||
+                              selected.snapshot.brandName ||
+                              '未记录'}
+                          </dd>
+                        </div>
+                      </dl>
+                      {tailorError && (
+                        <p role="alert" className="text-sm break-words text-danger">
+                          {tailorError}
+                        </p>
+                      )}
+                      <Link
+                        href={`${RESUME_MATCHER_BASE_URL}/tailor`}
+                        target="_blank"
+                        className="button button--sm button--primary inline-flex items-center gap-2"
+                        onClick={(event) => {
+                          event.preventDefault()
+                          tailorSelectedJob()
+                        }}
+                      >
+                        <ExternalLink size={16} />
+                        在 Resume Matcher 中定制
+                      </Link>
+                    </Tabs.Panel>
+                  </Tabs>
+                </Modal.Body>
+                {(detailTab === 'analysis' || detailTab === 'greeting') && (
+                  <Modal.Footer className="flex flex-wrap justify-end gap-2">
+                    {detailTab === 'analysis' ? (
                       <Button
                         variant="secondary"
                         isDisabled={
@@ -908,24 +1010,8 @@ export function Jobs() {
                         <WandSparkles size={16} />
                         分析此岗位
                       </Button>
-                    </Tabs.Panel>
-                    <Tabs.Panel id="greeting" className="space-y-4 pt-4">
-                      <p className="whitespace-pre-wrap text-sm">
-                        {selected.finalGreeting || '尚未生成招呼语'}
-                      </p>
-                      <p className="text-sm text-muted">
-                        发送状态：
-                        {
-                          {
-                            pending: '未发送',
-                            queued: '待发送',
-                            sent: '已发送',
-                            unknown: '发送结果未知',
-                            failed: '发送失败',
-                          }[selected.sendStatus]
-                        }
-                      </p>
-                      <div className="flex flex-wrap gap-2">
+                    ) : (
+                      <>
                         <Button
                           variant="secondary"
                           isDisabled={!selected.finalGreeting}
@@ -938,6 +1024,23 @@ export function Jobs() {
                         >
                           <Copy size={16} />
                           复制
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          isDisabled={
+                            disabled ||
+                            selected.detailStatus !== 'complete' ||
+                            !selected.detail?.jobInfo?.postDescription?.trim() ||
+                            selected.processingStatus === 'excluded' ||
+                            selected.reviewStatus !== 'pending' ||
+                            selected.sendStatus !== 'pending'
+                          }
+                          onPress={() => {
+                            void act(() => generateSavedGreeting(selected.encryptJobId))
+                          }}
+                        >
+                          <MessageSquareText size={16} />
+                          生成招呼语
                         </Button>
                         <Button
                           isDisabled={
@@ -955,15 +1058,10 @@ export function Jobs() {
                           <Send size={16} />
                           发送招呼语
                         </Button>
-                      </div>
-                    </Tabs.Panel>
-                  </Tabs>
-                </Modal.Body>
-                <Modal.Footer>
-                  <Button variant="secondary" onPress={() => setSelectedId('')}>
-                    关闭
-                  </Button>
-                </Modal.Footer>
+                      </>
+                    )}
+                  </Modal.Footer>
+                )}
               </>
             )}
           </Modal.Dialog>

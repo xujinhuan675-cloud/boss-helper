@@ -117,8 +117,8 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
                   )}
                 </span>
               </IconButton>
-              <Chip size="sm" color={state.connected ? 'success' : 'default'}>
-                {state.connected ? '已连接' : '未连接'}
+              <Chip size="sm" color={state.connected || state.activeDetail ? 'success' : 'default'}>
+                {state.connected ? '已连接' : state.activeDetail ? '详情可读取' : '未连接'}
               </Chip>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-1">

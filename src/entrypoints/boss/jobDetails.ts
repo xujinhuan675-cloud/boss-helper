@@ -130,7 +130,7 @@ export function readJobDetailPage(doc: Document): JobDetailPage {
       el.querySelector('h3, h2, .job-sec-title')?.textContent?.trim() ?? '',
     ),
   )
-  const body = section?.querySelector<HTMLElement>('.job-sec-text, .job-description')
+  const body = section?.querySelector<HTMLElement>('.job-sec-text, .job-description, .text')
   if (!body) return { status: 'pending', error: '等待职位描述正文加载' }
   const style = doc.defaultView?.getComputedStyle(body)
   const description = (body.innerText ?? body.textContent ?? '').trim()

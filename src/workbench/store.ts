@@ -174,6 +174,25 @@ export async function startSavedAnalysis({
     })
 }
 
+export async function generateSavedGreeting(jobId: string) {
+  if (state.analysisBusy) throw new Error('本地岗位分析正在进行，请等待当前请求结束')
+  await services.conf.confInit()
+  const models = await counter.storageGet<unknown>(confModelKey, [])
+  validateModels(models)
+  services.models.modelData.value = jsonClone(models)
+  await services.resumes.init(services.conf.formData.resumeText)
+  update({ analysisBusy: true, error: '' })
+  try {
+    await savedAnalyzer.generateGreetingOne(jobId)
+  } catch (error) {
+    update({ error: message(error) })
+    throw error
+  } finally {
+    update({ analysisBusy: false })
+    await refreshLibrary()
+  }
+}
+
 export async function stopSavedAnalysis() {
   savedAnalyzer.stop()
 }
