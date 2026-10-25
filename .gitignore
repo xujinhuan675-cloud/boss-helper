@@ -36,3 +36,7 @@ logapi.zhipin.*.pem
 .wxt
 
 /temp
+
+# Local Feishu job export data (contains personal application records)
+/feishu-job-list.manifest.json
+/feishu-job-list.ndjson
