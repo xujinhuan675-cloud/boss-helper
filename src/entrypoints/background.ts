@@ -13,9 +13,11 @@ import {
   mirrorSavedDiagnostics,
   startExtensionDiagnostics,
 } from '../message/diagnostics'
+import { installExtensionReload } from '../message/extensionReload'
 
 export default defineBackground({
   main() {
+    installExtensionReload()
     installDetailAccess()
     installDiagnosticReceiver()
     startExtensionDiagnostics('background')

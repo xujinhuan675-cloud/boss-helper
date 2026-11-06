@@ -1,3 +1,5 @@
+import { watchEffect } from 'vue'
+
 import type { LogData } from '@/composables/useHelper/type'
 import type { ExecutorLog, ExecutorSnapshot, RuntimeBridge } from '@/workbench/protocol'
 
@@ -14,7 +16,76 @@ export function createExecutorBridge(
   initialize?: () => Promise<void>,
 ): RuntimeBridge {
   let selectedJob: string | null = null
+  let selectedChat: string | undefined
   const jobActions: NonNullable<ExecutorSnapshot['jobActions']> = Object.create(null)
+  const listeners = new Set<(snapshot: ExecutorSnapshot) => void>()
+  function readSnapshot(chatJobKey?: string): ExecutorSnapshot {
+    const key =
+      chatJobKey ??
+      selectedChat ??
+      selectedJob ??
+      ctx.currentJob.value ??
+      ctx.chatModel.jobs.value[0] ??
+      null
+    const viewedJobId = ctx._jobDetail.value?.jobInfo?.encryptId
+    const logs: ExecutorLog[] = ctx._logs.value.map(({ data, ...log }) => {
+      if (!data) return log
+      const safe: ExecutorLog['data'] = {}
+      for (const name of [
+        'message',
+        'state',
+        'err',
+        'aiFilteringQ',
+        'aiFilteringR',
+        'aiFilteringAjson',
+        'aiFilteringAtext',
+        'aiGreetingQ',
+        'aiGreetingR',
+        'aiGreetingA',
+      ] as const) {
+        if (data[name] !== undefined) (safe as Partial<LogData>)[name] = data[name] as never
+      }
+      return { ...log, data: safe }
+    })
+    const snapshot: ExecutorSnapshot = {
+      ...state,
+      jobActions,
+      url: typeof location === 'undefined' ? '' : location.href,
+      collectionRun: ctx.collectionRun.value,
+      detailRun: ctx.detailRun.value,
+      historyDetailRun: ctx.historyDetailRun.value,
+      gatheringKind: ctx.gatheringKind.value,
+      gatheringBusy: ctx.gatheringBusy.value,
+      keywordRotation: ctx.keywordRotation.value,
+      keywords: ctx.keywordRotationKeywords.value,
+      keywordExtractionBusy: ctx.keywordExtractionBusy.value,
+      keywordRotationBusy: ctx.keywordRotationBusy.value,
+      keywordRotationWaitSeconds: ctx.keywordRotationWaitSeconds.value,
+      keywordRotationSaving: ctx.keywordRotationSaving.value,
+      realtimeBusy: ctx.realtimeBusy.value,
+      autoCaptureEnabled: ctx.autoCaptureEnabled.value,
+      analysisRun: ctx.savedAnalyzer.run.value,
+      analysisBusy: ctx.savedAnalyzer.busy.value,
+      workflow: ctx.workflow
+        ? {
+            status: ctx.workflow.status.value,
+            current: ctx.workflow.current.value,
+            total: ctx.workflow.total.value,
+          }
+        : null,
+      currentJob: ctx.currentJob.value,
+      viewedJobKey: viewedJobId ? `boss::${viewedJobId}` : null,
+      jobs: ctx.jobList.value,
+      results: [...ctx.jobResultMaps],
+      logs,
+      chatJobs: ctx.chatModel.jobs.value,
+      chatJobKey: key,
+      messages: key ? (ctx.chatModel.states.get(key)?.messages ?? []) : [],
+      pendingMessage: ctx.pendingMessages.value ?? '',
+    }
+    return JSON.parse(JSON.stringify(snapshot))
+  }
+  let stopWatching: (() => void) | undefined
   function start(operation: string, task: () => Promise<unknown>, jobId?: string) {
     const action = jobId
       ? {
@@ -45,65 +116,19 @@ export function createExecutorBridge(
   }
   return {
     async snapshot(chatJobKey) {
-      const key =
-        chatJobKey ?? selectedJob ?? ctx.currentJob.value ?? ctx.chatModel.jobs.value[0] ?? null
-      const viewedJobId = ctx._jobDetail.value?.jobInfo?.encryptId
-      const logs: ExecutorLog[] = ctx._logs.value.map(({ data, ...log }) => {
-        if (!data) return log
-        const safe: ExecutorLog['data'] = {}
-        for (const name of [
-          'message',
-          'state',
-          'err',
-          'aiFilteringQ',
-          'aiFilteringR',
-          'aiFilteringAjson',
-          'aiFilteringAtext',
-          'aiGreetingQ',
-          'aiGreetingR',
-          'aiGreetingA',
-        ] as const) {
-          if (data[name] !== undefined) (safe as Partial<LogData>)[name] = data[name] as never
-        }
-        return { ...log, data: safe }
-      })
-      const snapshot: ExecutorSnapshot = {
-        ...state,
-        jobActions,
-        url: typeof location === 'undefined' ? '' : location.href,
-        collectionRun: ctx.collectionRun.value,
-        detailRun: ctx.detailRun.value,
-        historyDetailRun: ctx.historyDetailRun.value,
-        gatheringKind: ctx.gatheringKind.value,
-        gatheringBusy: ctx.gatheringBusy.value,
-        keywordRotation: ctx.keywordRotation.value,
-        keywords: ctx.keywordRotationKeywords.value,
-        keywordExtractionBusy: ctx.keywordExtractionBusy.value,
-        keywordRotationBusy: ctx.keywordRotationBusy.value,
-        keywordRotationWaitSeconds: ctx.keywordRotationWaitSeconds.value,
-        keywordRotationSaving: ctx.keywordRotationSaving.value,
-        realtimeBusy: ctx.realtimeBusy.value,
-        autoCaptureEnabled: ctx.autoCaptureEnabled.value,
-        analysisRun: ctx.savedAnalyzer.run.value,
-        analysisBusy: ctx.savedAnalyzer.busy.value,
-        workflow: ctx.workflow
-          ? {
-              status: ctx.workflow.status.value,
-              current: ctx.workflow.current.value,
-              total: ctx.workflow.total.value,
-            }
-          : null,
-        currentJob: ctx.currentJob.value,
-        viewedJobKey: viewedJobId ? `boss::${viewedJobId}` : null,
-        jobs: ctx.jobList.value,
-        results: [...ctx.jobResultMaps],
-        logs,
-        chatJobs: ctx.chatModel.jobs.value,
-        chatJobKey: key,
-        messages: key ? (ctx.chatModel.states.get(key)?.messages ?? []) : [],
-        pendingMessage: ctx.pendingMessages.value ?? '',
-      }
-      return JSON.parse(JSON.stringify(snapshot))
+      selectedChat = chatJobKey
+      return readSnapshot(chatJobKey)
+    },
+    async subscribe(listener) {
+      listeners.add(listener)
+      listener(readSnapshot())
+      stopWatching ??= watchEffect(
+        () => {
+          const snapshot = readSnapshot()
+          for (const subscriber of listeners) subscriber(snapshot)
+        },
+        { flush: 'post' },
+      )
     },
     async command(command) {
       if (!isExecutorCommand(command)) throw new Error('Invalid executor command')
@@ -138,7 +163,9 @@ export function createExecutorBridge(
             return start(
               command.type,
               async () => {
-                ctx.savedAnalyzer.validateSetup()
+                ctx.savedAnalyzer.validateSetup(
+                  command.type === 'generateGreeting' ? 'greetings' : 'filtering',
+                )
                 let record = (await ctx.getJobLibrary()).find(
                   (item) => item.encryptJobId === command.jobId,
                 )
@@ -180,6 +207,12 @@ export function createExecutorBridge(
             return ctx.openJob(command.key)
           case 'clearLogs':
             return ctx.logs.clear()
+          case 'clearChat': {
+            const chat = ctx.chatModel.states.get(command.key)
+            if (!chat) throw new Error('岗位对话不存在')
+            chat.messages = []
+            return
+          }
           case 'sendGreeting':
             return start(
               'sendGreeting',
@@ -190,10 +223,12 @@ export function createExecutorBridge(
             return await ctx.updateJobFunnelStage(command.jobId, command.stage)
           case 'setProcessing':
             return await ctx.updateJobProcessingStatus(command.jobId, command.status)
+          case 'setReview':
+            return await ctx.updateJobReviewStatus(command.jobId, command.status)
           case 'setAutoCapture':
             return await ctx.setAutoCaptureEnabled(command.enabled)
           case 'extractKeywords':
-            return await ctx.extractKeywordRotationFromResume(command.input)
+            return await ctx.extractKeywordRotationFromProfile(command.input)
           case 'saveKeywords':
             return await ctx.saveKeywordRotationKeywords(command.input)
           case 'setPendingMessage':

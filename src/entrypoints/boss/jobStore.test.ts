@@ -26,6 +26,16 @@ const item = (id: string): BossZpJobItemData =>
   }) as unknown as BossZpJobItemData
 
 describe('job library', () => {
+  it('preserves weighted analysis and greetings when enabling quick matching', () => {
+    const records = mergeJobRecords([], [item('weighted'), item('quick')], 'AI', 'batch').records
+    records[0].analysis = { scoringVersion: 'weighted-v1', rating: 76 }
+    records[1].analysis = { scoringVersion: 'quick-v1', res: { decision: 'match' } }
+    for (const record of records) {
+      record.analysisStatus = 'ready'
+      record.finalGreeting = '已有草稿'
+    }
+    expect(normalizeJobLibraryAnalysis(records, 'quick-v1')).toBe(records)
+  })
   it('hides obsolete analysis from a detached view while retaining details, current results and delivery history', () => {
     const records = mergeJobRecords(
       [],
@@ -173,6 +183,24 @@ describe('job library', () => {
     expect(filterJobLibrary(records, { detailStatus: 'pending' })).toEqual([records[2]])
   })
 
+  it('filters jobs by match decision and combines it with other filters', () => {
+    const records = filterRecords()
+    records[0].analysis = { passed: true }
+    records[1].analysis = { passed: false }
+    records[2].analysisStatus = 'failed'
+
+    expect(filterJobLibrary(records, { matchStatus: 'approved' })).toEqual([records[0]])
+    expect(filterJobLibrary(records, { matchStatus: 'rejected' })).toEqual([records[1]])
+    expect(filterJobLibrary(records, { matchStatus: 'pending' })).toEqual([records[2]])
+    expect(filterJobLibrary(records, { matchStatus: 'approved', company: 'Acme' })).toEqual([
+      records[0],
+    ])
+    records[0].reviewStatus = 'rejected'
+    expect(filterJobLibrary(records, { matchStatus: 'rejected' })).toEqual([records[0], records[1]])
+    expect(filterJobLibrary(records, { matchStatus: 'approved', company: 'Acme' })).toEqual([])
+    expect(filterJobLibrary(records, { matchStatus: 'all' })).toEqual(records)
+  })
+
   it('keeps input data and ordering intact when filtering or clearing filters', () => {
     const records = filterRecords()
     const before = JSON.stringify(records)
@@ -201,6 +229,29 @@ describe('job library', () => {
     expect(
       filterJobLibrary(records, { processingStatus: 'all' }).map((record) => record.encryptJobId),
     ).toEqual(['a', 'b', 'c'])
+  })
+
+  it('sorts quick decisions in both directions without assigning scores', () => {
+    const records = mergeJobRecords(
+      [],
+      ['no', 'pending', 'yes', 'unknown'].map(item),
+      'AI',
+      'batch',
+    ).records
+    records[0].analysis = { scoringVersion: 'quick-v1', passed: false }
+    records[2].analysis = { scoringVersion: 'quick-v1', passed: true }
+    records[3].analysis = { scoringVersion: 'quick-v1', passed: null }
+    const before = JSON.stringify(records)
+    expect(sortJobLibraryByMatch(records).map((record) => record.encryptJobId)).toEqual([
+      'yes',
+      'unknown',
+      'no',
+      'pending',
+    ])
+    expect(
+      sortJobLibraryByMatch(records, 'ascending').map((record) => record.encryptJobId),
+    ).toEqual(['no', 'unknown', 'yes', 'pending'])
+    expect(JSON.stringify(records)).toBe(before)
   })
 
   it('sorts saved jobs by match rating descending and keeps unrated jobs last', () => {

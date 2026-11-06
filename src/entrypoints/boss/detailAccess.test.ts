@@ -1,11 +1,11 @@
 // @ts-nocheck
-import { beforeEach, expect, test } from 'bun:test'
+import { beforeEach, expect, spyOn, test } from 'bun:test'
 
 import { DetailTabAccess } from './detailAccess'
 import { JobLibraryStorage } from './jobLibraryStorage'
 import { AUTO_CAPTURE_STORAGE_KEY, JOB_LIBRARY_STORAGE_KEY, mergeJobRecords } from './jobStore'
 
-let access, tabs, data, navigations, removed, created, now, reply, library
+let access, tabs, data, navigations, removed, captures, created, now, reply, library, scrollReply
 // Bun's reject matcher is async at runtime but typed as a synchronous matcher.
 const rejectsWith = (promise, message) =>
   Promise.resolve(
@@ -17,11 +17,19 @@ const rejectsWith = (promise, message) =>
 beforeEach(() => {
   data = new Map()
   tabs = new Map([
-    [1, { id: 1, url: 'https://www.zhipin.com/web/geek/jobs' }],
-    [2, { id: 2, url: 'https://www.zhipin.com/job_detail/user.html' }],
+    [1, { id: 1, url: 'https://www.zhipin.com/web/geek/jobs', windowId: 7 }],
+    [2, { id: 2, url: 'https://www.zhipin.com/job_detail/user.html', windowId: 7 }],
   ])
   navigations = []
   removed = []
+  captures = []
+  scrollReply = () => ({
+    status: 'scrolled',
+    jobId: 'one',
+    scrollY: 0,
+    viewportHeight: 800,
+    viewportWidth: 1200,
+  })
   created = 0
   now = Date.now()
   reply = (id) => ({
@@ -41,7 +49,7 @@ beforeEach(() => {
       return tabs.get(id)
     },
     create: async (options) => {
-      const tab = { id: 100 + created++, ...options }
+      const tab = { id: 100 + created++, windowId: 7, ...options }
       tabs.set(tab.id, tab)
       return tab
     },
@@ -54,8 +62,14 @@ beforeEach(() => {
       removed.push(id)
       tabs.delete(id)
     },
-    sendMessage: async (id) =>
-      reply(new URL(tabs.get(id).url).pathname.split('/').at(-1).replace('.html', '')),
+    sendMessage: async (id, message) =>
+      message.action === 'captureScroll'
+        ? scrollReply(message.position)
+        : reply(new URL(tabs.get(id).url).pathname.split('/').at(-1).replace('.html', '')),
+    captureVisibleTab: async (windowId, options) => {
+      captures.push({ windowId, options })
+      return 'data:image/png;base64,capture'
+    },
   }
   library = new JobLibraryStorage(storage)
   access = new DetailTabAccess(api, storage, library)
@@ -256,4 +270,150 @@ test('explicit managed detail tasks can still read with auto capture disabled', 
     status: 'managed',
   })
   expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe('pending')
+})
+
+test('captures the managed detail tab and restores the owner tab', async () => {
+  await claim()
+  await visit('one')
+
+  expect(await access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1)).toEqual({
+    status: 'capture',
+    dataUrl: 'data:image/png;base64,capture',
+  })
+  expect(captures).toEqual([{ windowId: 7, options: { format: 'png' } }])
+  expect(navigations.slice(-2)).toEqual([100, 1])
+})
+
+test('waits for the activated tab to paint before capturing', async () => {
+  await claim()
+  await visit('one')
+  let painted
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation((resolve) => {
+    painted = resolve
+    return 1
+  })
+  try {
+    const capturing = access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1)
+    await Bun.sleep(0)
+    expect(navigations).toEqual([100])
+    expect(captures).toHaveLength(0)
+    expect(painted).toBeFunction()
+    painted()
+    await capturing
+    expect(captures).toHaveLength(1)
+    expect(navigations).toEqual([100, 1])
+  } finally {
+    timer.mockRestore()
+  }
+})
+
+test('waits for a new navigation before validating the job URL', async () => {
+  await claim()
+  await visit('one')
+  Object.assign(tabs.get(100), { url: '', status: 'loading' })
+  const loaded = setTimeout(
+    () =>
+      Object.assign(tabs.get(100), {
+        url: 'https://www.zhipin.com/job_detail/one.html',
+        status: 'complete',
+      }),
+    20,
+  )
+  try {
+    expect(await access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1)).toMatchObject({
+      status: 'capture',
+    })
+    expect(captures).toHaveLength(1)
+  } finally {
+    clearTimeout(loaded)
+  }
+})
+
+test('never screenshots an access restriction and restores the owner', async () => {
+  await claim()
+  await visit('one')
+  reply = () => ({ status: 'captcha', error: '请完成安全验证' })
+  await rejectsWith(access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1), '安全验证')
+  expect(captures).toHaveLength(0)
+  expect(navigations).toEqual([100, 1])
+})
+
+test('rejects failed scrolling rather than quietly saving an incomplete screenshot', async () => {
+  await claim()
+  await visit('one')
+  scrollReply = () => ({ status: 'failed', error: 'scroll unavailable' })
+  await rejectsWith(
+    access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1),
+    'scroll unavailable',
+  )
+  expect(captures).toHaveLength(0)
+  expect(navigations.at(-1)).toBe(1)
+})
+
+test('rejects changed viewport before stitching and restores the owner', async () => {
+  await claim()
+  await visit('one')
+  scrollReply = (position) => ({
+    status: 'scrolled',
+    jobId: 'one',
+    scrollY: position === 'top' ? 0 : 600,
+    viewportHeight: position === 'top' ? 800 : 700,
+    viewportWidth: 1200,
+  })
+  await rejectsWith(access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1), '尺寸')
+  expect(captures).toHaveLength(1)
+  expect(navigations.at(-1)).toBe(1)
+})
+
+test('stitches only the new lower pixels, including a clamped final scroll', async () => {
+  const bitmap = globalThis.createImageBitmap
+  const canvas = globalThis.OffscreenCanvas
+  const drawn = []
+  const sizes = []
+  let closed = 0
+  globalThis.createImageBitmap = async () => ({ width: 2400, height: 1600, close: () => closed++ })
+  globalThis.OffscreenCanvas = class {
+    constructor(width, height) {
+      sizes.push([width, height])
+    }
+    getContext() {
+      return { drawImage: (...args) => drawn.push(args.slice(1)) }
+    }
+    async convertToBlob() {
+      return new Blob([new Uint8Array([1, 2, 3])])
+    }
+  }
+  try {
+    await claim()
+    await visit('one')
+    for (const delta of [600, 100]) {
+      scrollReply = (position) => ({
+        status: 'scrolled',
+        jobId: 'one',
+        scrollY: position === 'top' ? 0 : delta,
+        viewportHeight: 800,
+        viewportWidth: 1200,
+      })
+      expect(await access.command({ type: 'capture', token: 'a', jobId: 'one' }, 1)).toEqual({
+        status: 'capture',
+        dataUrl: 'data:image/png;base64,AQID',
+      })
+    }
+    expect(sizes).toEqual([
+      [2400, 2800],
+      [2400, 1800],
+    ])
+    expect(drawn).toEqual([
+      [0, 0],
+      [0, 400, 2400, 1200, 0, 1600, 2400, 1200],
+      [0, 0],
+      [0, 1400, 2400, 200, 0, 1600, 2400, 200],
+    ])
+    expect(captures).toHaveLength(4)
+    expect(closed).toBe(4)
+    expect(navigations.at(-1)).toBe(1)
+  } finally {
+    globalThis.createImageBitmap = bitmap
+    globalThis.OffscreenCanvas = canvas
+  }
 })

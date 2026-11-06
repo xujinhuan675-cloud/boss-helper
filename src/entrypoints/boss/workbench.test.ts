@@ -51,21 +51,21 @@ describe('executor message boundary', () => {
   it('keeps model error content redacted across the serialized executor reply', async () => {
     clearDiagnostics()
     const ctx = context()
-    const failure = new Error('private resume from provider')
+    const failure = new Error('private profile from provider')
     diagnostic('model.generate.keywords', { error: failure })
-    ctx.extractKeywordRotationFromResume = async () => {
+    ctx.extractKeywordRotationFromProfile = async () => {
       throw failure
     }
     const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
     const response = await handleExecutorMessage(
-      { type: 'boss-helper:executor', command: { type: 'extractKeywords', input: 'resume' } },
+      { type: 'boss-helper:executor', command: { type: 'extractKeywords', input: 'profile' } },
       { id: 'own' },
       'own',
       bridge,
     )
     expect(response).toMatchObject({ ok: false, error: expect.stringContaining('Error [') })
-    expect(JSON.stringify(response)).not.toContain('private resume')
-    expect(JSON.stringify(getDiagnostics())).not.toContain('private resume')
+    expect(JSON.stringify(response)).not.toContain('private profile')
+    expect(JSON.stringify(getDiagnostics())).not.toContain('private profile')
   })
   it.each([
     { type: 'constructor' },
@@ -321,7 +321,7 @@ describe('headless executor bridge', () => {
 
   it('returns extracted keyword results and exposes explicit job opening and log clearing', async () => {
     const ctx = context()
-    ctx.extractKeywordRotationFromResume = async () => ['AI products']
+    ctx.extractKeywordRotationFromProfile = async () => ['AI products']
     let opened = ''
     ctx.onJobCardClick = async () => {
       throw new Error('explicit opening must not depend on detail completion')
@@ -336,7 +336,7 @@ describe('headless executor bridge', () => {
       },
     }
     const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
-    expect(await bridge.command({ type: 'extractKeywords', input: 'resume' })).toEqual([
+    expect(await bridge.command({ type: 'extractKeywords', input: 'profile' })).toEqual([
       'AI products',
     ])
     await bridge.command({ type: 'openJob', key: 'boss::a' })
@@ -402,6 +402,16 @@ describe('headless executor bridge', () => {
       chatJobKey: 'boss::a',
       messages: [{ id: 'a' }],
     })
+  })
+
+  it('clears only the selected chat history', async () => {
+    const ctx = context()
+    ctx.chatModel.states.set('boss::a', { messages: [{ id: 'a' }] })
+    ctx.chatModel.states.set('boss::b', { messages: [{ id: 'b' }] })
+    const bridge = createExecutorBridge(ctx, { ready: true, error: '', lastError: '' })
+    await expect(bridge.command({ type: 'clearChat', key: 'boss::a' })).resolves.toBeUndefined()
+    expect(ctx.chatModel.states.get('boss::a').messages).toEqual([])
+    expect(ctx.chatModel.states.get('boss::b').messages).toEqual([{ id: 'b' }])
   })
 
   it('returns detached JSON data without model credentials, DOM or raw recruiter tokens', async () => {

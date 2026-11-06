@@ -1,3 +1,7 @@
+import {
+  LEGACY_MATCH_SCORING_VERSION,
+  MATCH_SCORING_VERSION,
+} from '../../composables/useApplying/scoring'
 import { jsonClone } from '../../utils/deepmerge'
 import type { BossZpDetailData, BossZpJobItemData } from './types'
 
@@ -19,6 +23,7 @@ export type ReviewStatus = 'pending' | 'approved' | 'rejected'
 export type SendStatus = 'pending' | 'queued' | 'sent' | 'unknown' | 'failed'
 export type ProcessingStatus = 'active' | 'excluded'
 export type ProcessingStatusFilter = ProcessingStatus | 'all'
+export type MatchStatusFilter = 'all' | ReviewStatus
 export const FUNNEL_STAGES = [
   'collected',
   'matched',
@@ -132,6 +137,10 @@ export function normalizeJobLibraryAnalysis(
       .filter(
         (record) =>
           record.analysis?.scoringVersion !== scoringVersion &&
+          !(
+            scoringVersion === MATCH_SCORING_VERSION &&
+            record.analysis?.scoringVersion === LEGACY_MATCH_SCORING_VERSION
+          ) &&
           (record.analysis !== undefined ||
             record.analysisStatus === 'ready' ||
             record.matchedAt !== undefined),
@@ -236,6 +245,13 @@ export function isJobExcluded(record: BossJobLibraryRecord): boolean {
 
 export function isProcessingStatus(value: unknown): value is ProcessingStatus {
   return value === 'active' || value === 'excluded'
+}
+
+export function getJobReviewStatus(record: BossJobLibraryRecord): ReviewStatus {
+  if (record.reviewStatus !== 'pending') return record.reviewStatus
+  if (record.analysis?.passed === true) return 'approved'
+  if (record.analysis?.passed === false) return 'rejected'
+  return 'pending'
 }
 
 export function getJobFunnelStage(record: BossJobLibraryRecord): FunnelStage {
@@ -355,6 +371,7 @@ export function filterJobLibrary(
     detailStatus?: DetailStatus | ''
     funnelStage?: FunnelStage | ''
     processingStatus?: ProcessingStatusFilter
+    matchStatus?: MatchStatusFilter
     matchedToday?: boolean
   } = {},
   now = new Date(),
@@ -362,6 +379,7 @@ export function filterJobLibrary(
   const search = filters.search?.toLowerCase() ?? ''
   const company = filters.company?.toLowerCase() ?? ''
   const processingStatus = filters.processingStatus ?? 'active'
+  const matchStatus = filters.matchStatus ?? 'all'
   return records.filter((record) => {
     const companies = [
       record.snapshot.brandName,
@@ -379,7 +397,9 @@ export function filterJobLibrary(
       record.detail?.bossInfo?.title,
       record.detail?.jobInfo?.postDescription,
     ]
+    const matchesStatus = matchStatus === 'all' || getJobReviewStatus(record) === matchStatus
     return (
+      matchesStatus &&
       (processingStatus === 'all' ||
         (processingStatus === 'excluded' ? isJobExcluded(record) : !isJobExcluded(record))) &&
       (!search || searchable.some((value) => value?.toLowerCase().includes(search))) &&
@@ -394,8 +414,24 @@ export function filterJobLibrary(
   })
 }
 
-export function sortJobLibraryByMatch(records: BossJobLibraryRecord[]): BossJobLibraryRecord[] {
+export function sortJobLibraryByMatch(
+  records: BossJobLibraryRecord[],
+  direction: 'ascending' | 'descending' = 'descending',
+): BossJobLibraryRecord[] {
+  const rank = (record: BossJobLibraryRecord) => {
+    const analysis = record.analysis
+    if (!analysis) return null
+    if (analysis.passed === true) return 2
+    if (analysis.passed === false) return 0
+    if (analysis.passed === null || typeof analysis.rating === 'number') return 1
+    return null
+  }
   return [...records].sort((a, b) => {
+    const aRank = rank(a)
+    const bRank = rank(b)
+    if (aRank === null && bRank === null) return 0
+    if (aRank === null) return 1
+    if (bRank === null) return -1
     const aRating =
       typeof a.analysis?.rating === 'number' && Number.isFinite(a.analysis.rating)
         ? a.analysis.rating
@@ -404,10 +440,12 @@ export function sortJobLibraryByMatch(records: BossJobLibraryRecord[]): BossJobL
       typeof b.analysis?.rating === 'number' && Number.isFinite(b.analysis.rating)
         ? b.analysis.rating
         : null
+    const order = direction === 'ascending' ? -1 : 1
+    if (aRank !== bRank) return (bRank - aRank) * order
     if (aRating === null && bRating === null) return 0
     if (aRating === null) return 1
     if (bRating === null) return -1
-    return bRating - aRating
+    return (bRating - aRating) * order
   })
 }
 

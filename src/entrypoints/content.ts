@@ -6,7 +6,11 @@ import { InjectBackgroundAdapter } from '@/message/background'
 import { ContentCounter } from '@/message/contentScript'
 import { ProvideContentScriptAdapter } from '@/message/contentScriptShare'
 import type { RuntimeBridge } from '@/workbench/protocol'
-import { EXECUTOR_NAMESPACE, handleExecutorMessage } from '@/workbench/protocol'
+import {
+  EXECUTOR_NAMESPACE,
+  EXECUTOR_UPDATE_MESSAGE_TYPE,
+  handleExecutorMessage,
+} from '@/workbench/protocol'
 
 import { connectBridge, observeProvider } from '../message/bridge'
 import { forwardPageDiagnostics, startExtensionDiagnostics } from '../message/diagnostics'
@@ -53,6 +57,11 @@ export default defineContentScript({
         forwardPageDiagnostics(script)
         provideContentCounter(observeProvider(adapter, 'content'))
         const executor = connectBridge(injectExecutor, adapter, 'content.executor')
+        void executor
+          .subscribe((snapshot) => {
+            void browser.runtime.sendMessage({ type: EXECUTOR_UPDATE_MESSAGE_TYPE, snapshot })
+          })
+          .catch((error) => diagnostic('executor.subscribe', { error }))
         browser.runtime.onMessage.addListener((message, sender) =>
           handleExecutorMessage(message, sender, browser.runtime.id, executor),
         )

@@ -69,6 +69,10 @@ export class ContentCounter implements BackgroundCounter {
     return this.background.fetchText(...args)
   }
 
+  async recognizeJobScreenshot(...args: Parameters<BackgroundCounter['recognizeJobScreenshot']>) {
+    return this.background.recognizeJobScreenshot(...args)
+  }
+
   async notify(...args: Parameters<BackgroundCounter['notify']>) {
     return this.background.notify(...args)
   }

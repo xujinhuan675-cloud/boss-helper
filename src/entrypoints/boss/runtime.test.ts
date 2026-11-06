@@ -24,6 +24,7 @@ import {
   createKeywordRotationPlan,
   keywordRotationDateKey,
 } from './keywordRotation'
+import { recognizeWithPaddleOcr } from './paddleOcr'
 import type { BossZpJobItemData } from './types'
 import { createExecutorBridge } from './workbench'
 
@@ -31,7 +32,7 @@ const require = createRequire(new URL('../../../packages/devlog-ui/package.json'
 const { JSDOM } = require('jsdom')
 
 const conf = {
-  formData: { notification: { value: true } },
+  formData: { notification: { value: true }, jobProfile: '测试画像' },
 }
 const wrapper = { insertBefore() {}, firstChild: null, querySelector: () => null }
 let jobListHookCallback: ((value: BossZpJobItemData[]) => void) | undefined
@@ -415,6 +416,8 @@ beforeEach(() => {
   desktopNotifications = []
   pageNotifications = []
   conf.formData.notification.value = true
+  conf.formData.customGreeting = jsonClone(defaultFormData.customGreeting)
+  delete conf.formData.paddleOcr
   notifyDesktop = async (message) => {
     desktopNotifications.push(message)
   }
@@ -521,6 +524,8 @@ beforeEach(() => {
       updateJobLibrary: (mutation) => library.update(mutation),
       historyDetails: (command) => historyCommand(library, command),
       detailAccess: (command) => urlCommand(command),
+      recognizeJobScreenshot: async (dataUrl, config) =>
+        recognizeWithPaddleOcr(await fetch(dataUrl).then((response) => response.blob()), config),
       claimJobAnalysis: (id, token, duration) => library.claimAnalysis(id, token, duration),
       releaseJobAnalysis: (id, token) => library.releaseAnalysis(id, token),
     }),
@@ -792,6 +797,7 @@ describe('read-only saved job library', () => {
     ctx.conf = {
       formData: jsonClone(defaultFormData),
     }
+    ctx.conf.formData.jobProfile = '测试画像'
     ctx.conf.formData.aiFiltering.enable = true
     Object.assign(ctx, {
       models: {
@@ -814,8 +820,8 @@ describe('read-only saved job library', () => {
       passed: true,
     })
     expect(saved.reviewStatus).toBe('pending')
-    expect(saved.finalGreeting).toBe('招呼语草稿')
-    expect(modelRequests).toEqual(['filtering:old', 'greetings:old'])
+    expect(saved.finalGreeting).toBeUndefined()
+    expect(modelRequests).toEqual(['filtering:old'])
   })
 
   it.each([
@@ -1181,8 +1187,8 @@ describe('collection with immediate analysis', () => {
       expect((await ctx.getJobLibrary())[0]).toMatchObject({
         analysisStatus: 'ready',
         analysis: { rating: 76, passed: true },
-        finalGreeting: '招呼语草稿',
       })
+      expect((await ctx.getJobLibrary())[0].finalGreeting).toBeUndefined()
     } finally {
       ctx['mounted'] = false
       await ctx['detailPromise']
@@ -1192,7 +1198,7 @@ describe('collection with immediate analysis', () => {
   it('fills editable keywords from a resume draft without persisting or starting collection', async () => {
     const ctx = pipelineContext()
     modelRespond = async () => '{"keywords":["产品经理"," AI产品经理 ","产品经理"]}'
-    await ctx.extractKeywordRotationFromResume('待保存的简历正文')
+    await ctx.extractKeywordRotationFromProfile('主投 AI 应用产品，金融产品为承接方向')
     expect(ctx.keywordRotationKeywords.value).toBe('产品经理\nAI产品经理')
     expect(ctx.keywordExtractionBusy.value).toBe(false)
     expect(ctx.keywordRotation.value).toBeNull()
@@ -1204,19 +1210,19 @@ describe('collection with immediate analysis', () => {
     const ctx = pipelineContext()
     ctx.keywordRotationKeywords.value = '金融产品经理'
     modelRespond = async () => '{"keywords":[]}'
-    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('岗位关键词')
+    await expect(ctx.extractKeywordRotationFromProfile()).rejects.toThrow('岗位关键词')
     expect(ctx.keywordRotationKeywords.value).toBe('金融产品经理')
     expect(ctx.keywordExtractionBusy.value).toBe(false)
     modelRespond = async () => '{"keywords":["数据产品经理"]}'
-    await ctx.extractKeywordRotationFromResume()
+    await ctx.extractKeywordRotationFromProfile()
     expect(ctx.keywordRotationKeywords.value).toBe('数据产品经理')
   })
 
   it('rejects empty resumes and incomplete models before requesting extraction', async () => {
     const ctx = pipelineContext()
-    await expect(ctx.extractKeywordRotationFromResume(' ')).rejects.toThrow('简历')
+    await expect(ctx.extractKeywordRotationFromProfile(' ')).rejects.toThrow('画像')
     ctx.models.modelData.value[0].data.api_key = ''
-    await expect(ctx.extractKeywordRotationFromResume('简历')).rejects.toThrow('模型')
+    await expect(ctx.extractKeywordRotationFromProfile('个人画像')).rejects.toThrow('模型')
     expect(modelRequests).toEqual([])
   })
 
@@ -1227,9 +1233,9 @@ describe('collection with immediate analysis', () => {
       new Promise((_, fail) => {
         reject = fail
       })
-    const pending = ctx.extractKeywordRotationFromResume()
+    const pending = ctx.extractKeywordRotationFromProfile()
     expect(ctx.keywordExtractionBusy.value).toBe(true)
-    await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('提取')
+    await expect(ctx.extractKeywordRotationFromProfile()).rejects.toThrow('提取')
     await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('提取')
     await expect(ctx.startKeywordRotation()).rejects.toThrow('提取')
     reject(new Error('模型请求失败'))
@@ -1258,7 +1264,7 @@ describe('collection with immediate analysis', () => {
     try {
       expect(ctx.keywordRotationSaving.value).toBe(true)
       await expect(ctx.startKeywordRotation()).rejects.toThrow('保存')
-      await expect(ctx.extractKeywordRotationFromResume()).rejects.toThrow('保存')
+      await expect(ctx.extractKeywordRotationFromProfile()).rejects.toThrow('保存')
       await expect(ctx.saveKeywordRotationKeywords('产品经理')).rejects.toThrow('保存')
     } finally {
       release()
@@ -1283,12 +1289,7 @@ describe('collection with immediate analysis', () => {
     })
     const run = await ctx.savedAnalyzer.start({ collectNew: true })
     expect(run).toMatchObject({ status: 'completed', completed: 2, failed: 0 })
-    expect(modelRequests).toEqual([
-      'filtering:new',
-      'greetings:new',
-      'filtering:pending',
-      'greetings:pending',
-    ])
+    expect(modelRequests).toEqual(['filtering:new', 'filtering:pending'])
     expect(
       (await ctx.getJobLibrary()).map((record) => ({
         rating: record.analysis.rating,
@@ -1300,15 +1301,15 @@ describe('collection with immediate analysis', () => {
     ).toEqual([
       {
         rating: 76,
-        resumeId: 'resume',
-        greeting: '招呼语草稿',
+        resumeId: undefined,
+        greeting: undefined,
         review: 'pending',
         send: 'pending',
       },
       {
         rating: 76,
-        resumeId: 'resume',
-        greeting: '招呼语草稿',
+        resumeId: undefined,
+        greeting: undefined,
         review: 'pending',
         send: 'pending',
       },
@@ -2281,6 +2282,123 @@ it('sends a saved greeting through the existing BOSS chat sender', async () => {
   expect(ctx.realtimeBusy.value).toBe(false)
 })
 
+describe('automatic AI greeting preparation and delivery', () => {
+  function setup(finalGreeting = '') {
+    const ctx = context()
+    Object.defineProperty(ctx, 'uid', { value: 'user' })
+    ctx.conf = { formData: jsonClone(defaultFormData) }
+    ctx.conf.formData.aiGreeting.enable = false
+    ctx.resumes = { currentResume: ref({ content: '真实简历' }) }
+    const record = mergeJobRecords([], [item('auto')], '', '').records[0]
+    record.finalGreeting = finalGreeting
+    data.set(JOB_LIBRARY_STORAGE_KEY, [record])
+    const job = {
+      jobData: { key: 'boss::auto' },
+      rawData: {
+        jobitem: { ...item('auto'), securityId: 'security' },
+        detail: { jobInfo: { encryptId: 'auto', postDescription: '完整 JD' } },
+      },
+      state: {},
+    }
+    ctx.jobMaps.set(job.jobData.key, job)
+    ctx.chatModel = {
+      createAgent: mock(() => true),
+      chat: mock(async () => ({ text: '第一段\n\n第二段\n\n第三段' })),
+    }
+    ctx.sendMessage = mock(async () => {})
+    return { ctx, job }
+  }
+
+  it('reuses an edited final greeting even without a configured model', async () => {
+    const { ctx, job } = setup('已修改的最终稿\n\n保留分段')
+    ctx.chatModel.createAgent.mockImplementation(() => false)
+    expect(await ctx.prepareDeliveryGreeting(job)).toBe('已修改的最终稿\n\n保留分段')
+    expect(ctx.chatModel.createAgent).not.toHaveBeenCalled()
+    expect(publishRequests).toEqual([])
+    expect(ctx.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('generates and saves once with the old switch off, then sends AI text and configured images', async () => {
+    const { ctx, job } = setup()
+    ctx.realtimeBusy.value = true
+    ctx.conf.formData.customGreeting = {
+      enable: true,
+      value: [
+        { type: 'image', image: 'resume-1' },
+        { type: 'text', content: '不要重复发送固定文案' },
+        { type: 'image', image: 'resume-2' },
+      ],
+    }
+    const greeting = await ctx.prepareDeliveryGreeting(job)
+    expect(await ctx.prepareDeliveryGreeting(job)).toBe(greeting)
+    expect(ctx.chatModel.chat).toHaveBeenCalledTimes(1)
+    expect(ctx.chatModel.createAgent.mock.calls[0]).toEqual([
+      { ...ctx.conf.formData.aiGreeting, enable: true },
+      'greetings',
+    ])
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
+      finalGreeting: greeting,
+      detailStatus: 'complete',
+      sendStatus: 'pending',
+    })
+    expect(publishRequests).toEqual([])
+    await ctx.sendPreparedGreeting(job, greeting)
+    expect(ctx.sendMessage.mock.calls[0][1]).toEqual([
+      { type: 'text', content: greeting },
+      { type: 'image', image: 'resume-1' },
+      { type: 'image', image: 'resume-2' },
+    ])
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus).toBe('sent')
+    await expect(ctx.sendPreparedGreeting(job, greeting)).rejects.toThrow()
+    expect(publishRequests).toHaveLength(1)
+  })
+
+  it.each(['model', 'empty', 'error', 'resume', 'excluded', 'sent'])(
+    'fails before delivery for %s',
+    async (failure) => {
+      const { ctx, job } = setup()
+      if (failure === 'model') ctx.chatModel.createAgent.mockImplementation(() => false)
+      if (failure === 'empty') ctx.chatModel.chat.mockResolvedValue({ text: ' \n ' })
+      if (failure === 'error') ctx.chatModel.chat.mockRejectedValue(new Error('模型请求失败'))
+      if (failure === 'resume') ctx.resumes.currentResume.value = null
+      if (failure === 'excluded') data.get(JOB_LIBRARY_STORAGE_KEY)[0].processingStatus = 'excluded'
+      if (failure === 'sent') data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus = 'sent'
+      await expect(ctx.prepareDeliveryGreeting(job)).rejects.toThrow()
+      expect(publishRequests).toEqual([])
+      expect(ctx.sendMessage).not.toHaveBeenCalled()
+      expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('')
+    },
+  )
+
+  it('blocks delivery when the final greeting changes after preparation', async () => {
+    const { ctx, job } = setup('原稿')
+    const greeting = await ctx.prepareDeliveryGreeting(job)
+    await ctx.saveJobGreeting('auto', '新稿')
+    await expect(ctx.sendPreparedGreeting(job, greeting)).rejects.toThrow('重新确认')
+    expect(publishRequests).toEqual([])
+  })
+
+  it('preserves a final greeting edited while the model is generating', async () => {
+    const { ctx, job } = setup()
+    ctx.chatModel.chat.mockImplementation(async () => {
+      await ctx.saveJobGreeting('auto', '刚保存的人工修改稿')
+      return { text: '稍后返回的 AI 草稿' }
+    })
+    expect(await ctx.prepareDeliveryGreeting(job)).toBe('刚保存的人工修改稿')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('刚保存的人工修改稿')
+  })
+
+  it('marks an interrupted automatic send uncertain and prevents retrying it', async () => {
+    const { ctx, job } = setup('最终稿')
+    const greeting = await ctx.prepareDeliveryGreeting(job)
+    ctx.sendMessage.mockRejectedValue(new Error('发送中断'))
+    await expect(ctx.sendPreparedGreeting(job, greeting)).rejects.toThrow('发送中断')
+    expect(data.get(JOB_LIBRARY_STORAGE_KEY)[0].sendStatus).toBe('unknown')
+    await expect(ctx.sendPreparedGreeting(job, greeting)).rejects.toThrow()
+    expect(publishRequests).toHaveLength(1)
+  })
+})
+
 it('keeps a failed first greeting uncertain and blocks duplicate submissions', async () => {
   const ctx = context()
   const record = mergeJobRecords([], [item('new')], '', '').records[0]
@@ -2994,6 +3112,68 @@ describe('collection pacing, controls and persistence', () => {
 })
 
 describe('historical detail completion', () => {
+  it.each(['ready', 'unreadable'])(
+    'uses screenshot OCR after a %s detail page when OCR is enabled, then saves and reads it back',
+    async (pageState) => {
+      const ctx = context()
+      const record = mergeJobRecords(
+        [],
+        [{ ...item('ocr-one'), securityId: 's', lid: 'l' }],
+        '',
+        '',
+      ).records[0]
+      data.set(JOB_LIBRARY_STORAGE_KEY, [record])
+      conf.formData.paddleOcr = {
+        enabled: true,
+        token: 'test-token',
+        model: 'PaddleOCR-VL-1.6',
+        baseUrl: 'https://ocr.test/api/v2/ocr',
+        pollIntervalMs: 0,
+      }
+      urlCommand = async (command) => {
+        urlCommands.push(command)
+        if (command.type === 'read' && pageState === 'unreadable')
+          throw new Error('等待职位描述正文加载')
+        if (command.type === 'read')
+          return {
+            status: 'ready',
+            jobId: command.jobId,
+            detail: { jobInfo: { encryptId: command.jobId, postDescription: 'DOM JD' } },
+          }
+        if (command.type === 'capture')
+          return { status: 'capture', dataUrl: 'data:image/png;base64,aW1hZ2U=' }
+        return null
+      }
+      const fetchMock = spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        if (String(url).startsWith('data:')) return new Response(new Blob(['image']))
+        if (String(url).endsWith('/jobs')) {
+          expect(urlCommands.at(-1)?.type).toBe('release')
+          return Response.json({ data: { jobId: 'ocr-job' } })
+        }
+        if (String(url).endsWith('/jobs/ocr-job'))
+          return Response.json({
+            data: { state: 'done', resultUrl: { jsonUrl: 'https://ocr.test/result' } },
+          })
+        return new Response(
+          JSON.stringify({ result: { layoutParsingResults: [{ markdown: { text: 'OCR JD' } }] } }),
+        )
+      })
+      try {
+        await ctx.ensureSavedJobDetails(record.encryptJobId)
+        expect(historyRequests).toHaveLength(0)
+        expect(urlCommands.map((command) => command.type)).toEqual([
+          'claim',
+          'visit',
+          'capture',
+          'release',
+        ])
+        expect((await ctx.getJobLibrary())[0].detail.jobInfo.postDescription).toBe('OCR JD')
+      } finally {
+        fetchMock.mockRestore()
+      }
+    },
+  )
+
   function historyContext(count = 7) {
     const records = mergeJobRecords(
       [],

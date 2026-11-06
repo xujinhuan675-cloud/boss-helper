@@ -40,6 +40,25 @@ test('waits for stable real content before manual backfill and ignores foreign s
       dom.window.document,
     )
     expect(handler({ type: DETAIL_MESSAGE, jobId: 'one' }, { id: 'foreign' })).toBeUndefined()
+    const scroller = dom.window.document.documentElement
+    Object.defineProperty(dom.window.document, 'scrollingElement', { value: scroller })
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1500 })
+    dom.window.scrollTo = ({ top }) => {
+      scroller.scrollTop = Math.min(top, 700)
+    }
+    const scroll = (jobId, position) =>
+      handler({ type: DETAIL_MESSAGE, action: 'captureScroll', jobId, position }, { id: 'own' })
+    expect(await scroll('other', 'next')).toMatchObject({ status: 'failed' })
+    expect(scroller.scrollTop).toBe(0)
+    expect(await scroll('one', 'top')).toMatchObject({
+      status: 'scrolled',
+      jobId: 'one',
+      scrollY: 0,
+      viewportHeight: 768,
+    })
+    expect(await scroll('one', 'next')).toMatchObject({ status: 'scrolled', scrollY: 672 })
+    expect(await scroll('one', 'next')).toMatchObject({ status: 'scrolled', scrollY: 700 })
+    expect(await scroll('one', 'top')).toMatchObject({ status: 'scrolled', scrollY: 0 })
     expect(await handler({ type: DETAIL_MESSAGE, jobId: 'one' }, { id: 'own' })).toMatchObject({
       status: 'pending',
     })

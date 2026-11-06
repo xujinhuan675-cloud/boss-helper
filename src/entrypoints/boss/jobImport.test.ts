@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import { hasCompleteJobDetail } from './jobDetails'
-import { parseHistoricalJobLibrary } from './jobImport'
+import { parseHistoricalJobLibrary, parseJobLibraryCsv } from './jobImport'
 
 const row = {
   name: '产品经理',
@@ -64,5 +64,45 @@ describe('parseHistoricalJobLibrary', () => {
     expect(() =>
       parseHistoricalJobLibrary([{ ...row, 'job-sec-text': '' }], 'merged.json'),
     ).toThrow('第 1 条')
+  })
+})
+
+describe('parseJobLibraryCsv', () => {
+  it('imports exported columns by header, including quoted commas and line breaks', () => {
+    const csv =
+      '\uFEFF岗位名称,公司,薪资,地点,匹配度,跟进阶段,采集时间,岗位链接,职位描述\r\n' +
+      '"产品经理","公司, 示例","20-30K","上海 路 浦东新区","82/100","面试","2026-10-19",' +
+      '"https://www.zhipin.com/job_detail/job-id_123.html","负责产品规划，\r\n推动方案落地"'
+
+    const records = parseJobLibraryCsv(csv, 'export.csv', '2026-10-19T00:00:00.000Z')
+
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      encryptJobId: 'job-id_123',
+      detailStatus: 'complete',
+      snapshot: {
+        jobName: '产品经理',
+        brandName: '公司, 示例',
+        salaryDesc: '20-30K',
+        cityName: '上海 路 浦东新区',
+      },
+      detail: { jobInfo: { postDescription: '负责产品规划，\r\n推动方案落地' } },
+    })
+  })
+
+  it('imports older exported rows without a JD as pending details', () => {
+    const records = parseJobLibraryCsv(
+      '岗位名称,公司,薪资,地点,岗位链接\n产品经理,示例公司,20-30K,上海,https://www.zhipin.com/job_detail/job-id_123.html',
+      'older.csv',
+      '2026-10-19T00:00:00.000Z',
+    )
+
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      encryptJobId: 'job-id_123',
+      detailStatus: 'pending',
+      snapshot: { jobName: '产品经理', brandName: '示例公司', salaryDesc: '20-30K' },
+    })
+    expect(records[0]?.detail).toBeUndefined()
   })
 })

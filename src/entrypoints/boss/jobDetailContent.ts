@@ -24,6 +24,29 @@ export function installJobDetailReader(
   }
   runtime.onMessage.addListener((message, sender) => {
     if (sender.id !== runtime.id || message?.type !== DETAIL_MESSAGE) return
+    if (message.action === 'captureScroll') {
+      const page = readJobDetailPage(doc)
+      if (['captcha', 'login_required', 'restricted', 'failed'].includes(page.status))
+        return Promise.resolve(page)
+      if (jobIdFromUrl(doc.location.href) !== message.jobId)
+        return Promise.resolve({ status: 'failed', error: '详情页面岗位 ID 不匹配' })
+      const view = doc.defaultView
+      const scroller = doc.scrollingElement
+      if (!view || !scroller || !['top', 'next'].includes(message.position))
+        return Promise.resolve({ status: 'failed', error: '无法滚动详情页面' })
+      view.scrollTo({
+        top:
+          message.position === 'top' ? 0 : scroller.scrollTop + Math.max(1, view.innerHeight - 96),
+        behavior: 'instant',
+      })
+      return Promise.resolve({
+        status: 'scrolled',
+        jobId: message.jobId,
+        scrollY: scroller.scrollTop,
+        viewportHeight: view.innerHeight,
+        viewportWidth: view.innerWidth,
+      })
+    }
     const page = read()
     if (page.status === 'ready' && page.jobId !== message.jobId)
       return Promise.resolve({ status: 'failed', error: '详情页面岗位 ID 不匹配' })

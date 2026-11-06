@@ -17,7 +17,7 @@ import {
   mergeJobRecords,
   normalizeJobLibraryAnalysis,
 } from './jobStore'
-import type { BossJobLibraryRecord, FunnelStage, ProcessingStatus } from './jobStore'
+import type { BossJobLibraryRecord, FunnelStage, ProcessingStatus, ReviewStatus } from './jobStore'
 import type { BossZpJobItemData } from './types'
 
 export type JobAnalysisPatch = Pick<BossJobLibraryRecord, 'analysisStatus'> &
@@ -40,11 +40,12 @@ export type JobLibraryMutation =
         Partial<Pick<BossJobLibraryRecord, 'detail' | 'detailRetryCount' | 'failureReason'>>
     }
   | { type: 'analysis'; jobId: string; patch: JobAnalysisPatch }
-  | { type: 'greeting'; jobId: string; greeting: string }
+  | { type: 'greeting'; jobId: string; greeting: string; onlyIfMissing?: true }
   | { type: 'send'; jobId: string; status: 'queued'; greeting: string }
   | { type: 'send'; jobId: string; status: 'sent' | 'unknown' }
   | { type: 'funnel'; jobId: string; stage: FunnelStage | null }
   | { type: 'processing'; jobId: string; status: ProcessingStatus }
+  | { type: 'review'; jobId: string; status: ReviewStatus }
   | { type: 'delete'; jobId: string }
   | { type: 'deleteMany'; jobIds: string[] }
 
@@ -150,8 +151,8 @@ export class JobLibraryStorage {
             throw new Error('招呼语不能为空')
           if (
             isJobExcluded(record) ||
-            record.reviewStatus !== 'pending' ||
-            record.sendStatus !== 'pending'
+            record.sendStatus !== 'pending' ||
+            (mutation.onlyIfMissing && !!record.finalGreeting?.trim())
           )
             return { records, updated: false, newCount, duplicateCount }
           record.finalGreeting = mutation.greeting.trim()
@@ -172,11 +173,11 @@ export class JobLibraryStorage {
           if (
             record.reviewStatus !== 'pending' ||
             record.sendStatus !== 'pending' ||
-            record.analysisStatus === 'ready' ||
             isJobExcluded(record)
           )
             return { records, updated: false, newCount, duplicateCount }
           record.analysisStatus = patch.analysisStatus
+          if (patch.analysisStatus === 'ready') record.reviewStatus = 'pending'
           if (patch.analysis !== undefined) record.analysis = jsonClone(patch.analysis)
           if (patch.analysis?.passed === true && !record.matchedAt)
             record.matchedAt = new Date().toISOString()
@@ -210,6 +211,8 @@ export class JobLibraryStorage {
           if (!isProcessingStatus(mutation.status)) throw new Error('Invalid job processing status')
           if (mutation.status === 'active') delete record.processingStatus
           else record.processingStatus = mutation.status
+        } else if (mutation.type === 'review') {
+          record.reviewStatus = mutation.status
         } else throw new Error('未知岗位操作')
         updated = true
       }

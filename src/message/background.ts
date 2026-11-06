@@ -10,6 +10,8 @@ import type { HistoryDetailCommand } from '../entrypoints/boss/historyDetails'
 import { DETAIL_MESSAGE } from '../entrypoints/boss/jobDetails'
 import { JobLibraryStorage } from '../entrypoints/boss/jobLibraryStorage'
 import type { JobLibraryMutation } from '../entrypoints/boss/jobLibraryStorage'
+import { recognizeWithPaddleOcr } from '../entrypoints/boss/paddleOcr'
+import type { PaddleOcrConfig } from '../entrypoints/boss/paddleOcr'
 import { diagnostic, traceDiagnostic } from '../utils/diagnostics'
 
 const jobLibrary = new JobLibraryStorage(storage)
@@ -59,6 +61,37 @@ async function initDB() {
 }
 
 export class BackgroundCounter {
+  async recognizeJobScreenshot(dataUrl: string, config: PaddleOcrConfig) {
+    if (!dataUrl.startsWith('data:image/png;base64,')) throw new Error('Invalid job screenshot')
+    if (
+      config.baseUrl.trim().replace(/\/+$/, '') ===
+        'https://paddleocr.aistudio-app.com/api/v2/ocr' &&
+      browser.declarativeNetRequest
+    ) {
+      // PaddleOCR rejects extension Origin headers before checking the API token.
+      await browser.declarativeNetRequest.updateSessionRules({
+        removeRuleIds: [1],
+        addRules: [
+          {
+            id: 1,
+            action: {
+              type: 'modifyHeaders',
+              requestHeaders: [{ header: 'origin', operation: 'remove' }],
+            },
+            condition: {
+              urlFilter: '|https://paddleocr.aistudio-app.com/api/v2/ocr/jobs|',
+              initiatorDomains: [browser.runtime.id],
+              requestMethods: ['post'],
+              resourceTypes: ['xmlhttprequest'],
+            },
+          },
+        ],
+      })
+    }
+    const image = await fetch(dataUrl).then((response) => response.blob())
+    return recognizeWithPaddleOcr(image, config)
+  }
+
   async historyDetails(command: HistoryDetailCommand) {
     return jobLibrary.historyDetails(command)
   }

@@ -5,6 +5,7 @@ export const DETAIL_ACCESS_KEY = 'session:boss-helper:detail-access'
 export type DetailStopReason = 'captcha' | 'login_required' | 'restricted'
 export type JobDetailPage =
   | { status: 'ready'; jobId: string; detail: BossZpDetailData }
+  | { status: 'capture'; dataUrl: string }
   | { status: 'pending' | 'failed' | DetailStopReason; error: string }
 
 export function jobIdFromUrl(href: string): string | null {

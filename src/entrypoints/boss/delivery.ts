@@ -1,7 +1,6 @@
 import { TaskRegistry, taskResult } from '@/composables/useApplying/handles'
 import { defineTaskHandler, defineTaskWorkflow } from '@/composables/useApplying/type'
 
-import { getBossData, sendPublishReq } from './requests'
 import type { BossHelperCtx } from './runtime'
 import type { BossZpJobItemData, BossZpDetailData, BossZpBossData } from './types'
 
@@ -9,6 +8,7 @@ export type BoosJobData = {
   jobitem: BossZpJobItemData
   detail: BossZpDetailData
   boss: BossZpBossData
+  greeting?: string
 }
 
 const tasks = new TaskRegistry<BossHelperCtx, BoosJobData>()
@@ -69,33 +69,21 @@ export const bossWorkflow = defineTaskWorkflow<BossHelperCtx, BoosJobData>(
   tasks.amap({ deps: ['岗位详情获取'] }), // 高德地图
   tasks.aiFiltering({ deps: ['岗位详情获取'] }), // AI过滤
 
-  defineTaskHandler('岗位投递', () => async (_, { rawData }) => {
-    await sendPublishReq({
-      securityId: rawData.jobitem.securityId,
-      encryptJobId: rawData.jobitem.encryptJobId,
-    })
-    return {
-      status: 'success',
-      msg: '投递成功',
-    }
-  }), // 投递
-
-  defineTaskHandler('Boss信息获取', () => async (ctx, { rawData }) => {
-    // await sendPublishReq({
-    //   securityId: rawData.jobitem.securityId,
-    //   encryptJobId: rawData.jobitem.encryptJobId,
-    // })
-    ctx.log.info('获取Boss信息', {
-      securityId: rawData.jobitem.securityId,
-      encryptJobId: rawData.jobitem.encryptJobId,
-    })
-    const bossData = await getBossData({
-      securityId: rawData.jobitem.securityId,
-      encryptUserId: ctx.helper.uid,
-    })
-    rawData.boss = bossData
-  }), // Boss信息获取
-
-  tasks.customGreeting({ deps: ['岗位详情获取', '岗位投递', 'Boss信息获取'] }), // 自定义招呼语
-  tasks.aiGreeting({ deps: ['岗位详情获取', '岗位投递', 'Boss信息获取'] }), // AI招呼语
+  defineTaskHandler(
+    '招呼语准备',
+    () => async (ctx, data) => {
+      data.rawData.greeting = await ctx.helper.prepareDeliveryGreeting(data)
+    },
+    { deps: ['岗位详情获取'], state: 'ai', stateMsg: '准备招呼语' },
+  ),
+  defineTaskHandler(
+    '岗位投递',
+    () => async (ctx, data) => {
+      const greeting = data.rawData.greeting?.trim()
+      if (!greeting) throw new Error('招呼语未准备完成，已停止投递')
+      await ctx.helper.sendPreparedGreeting(data, greeting)
+      return { status: 'success', msg: '投递成功' }
+    },
+    { deps: ['招呼语准备'] },
+  ),
 )

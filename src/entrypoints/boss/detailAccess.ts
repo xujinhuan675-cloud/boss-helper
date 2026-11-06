@@ -10,6 +10,7 @@ import {
 } from './jobDetails'
 import type { JobDetailPage } from './jobDetails'
 import type { JobLibraryStorage } from './jobLibraryStorage'
+import { stitchJobScreenshots } from './jobScreenshot'
 import {
   AUTO_CAPTURE_STORAGE_KEY,
   JOB_LIBRARY_STORAGE_KEY,
@@ -21,6 +22,7 @@ export type DetailAccessCommand =
   | { type: 'claim'; token: string; deadline: number; historyToken?: string }
   | { type: 'renew' | 'release'; token: string }
   | { type: 'visit'; token: string; jobId: string; url: string }
+  | { type: 'capture'; token: string; jobId: string }
   | { type: 'read'; token: string; jobId: string }
 export type DetailAccessSession = {
   token: string
@@ -42,7 +44,12 @@ export class DetailTabAccess {
   private pending: Promise<unknown> = Promise.resolve()
 
   constructor(
-    private tabs: Pick<typeof browser.tabs, 'get' | 'create' | 'update' | 'remove' | 'sendMessage'>,
+    private tabs: Pick<
+      typeof browser.tabs,
+      'get' | 'create' | 'update' | 'remove' | 'sendMessage'
+    > & {
+      captureVisibleTab?: typeof browser.tabs.captureVisibleTab
+    },
     private storage: DetailStorage,
     private library: JobLibraryStorage,
   ) {}
@@ -154,6 +161,86 @@ export class DetailTabAccess {
         await this.tabs.update(session.tabId, { url: command.url })
       }
       session.jobId = command.jobId
+    }
+    if (command.type === 'capture') {
+      if (!command.jobId || session.jobId !== command.jobId || session.tabId === undefined)
+        throw new Error('详情任务岗位 ID 不匹配')
+      if (!this.tabs.captureVisibleTab) throw new Error('当前浏览器不支持详情截图')
+      const owner = await this.tabs.get(ownerTabId)
+      let tab = await this.tabs.get(session.tabId)
+      await this.storage.setItem(DETAIL_ACCESS_KEY, session)
+      await this.tabs.update(session.tabId, { active: true })
+      try {
+        const deadline = Math.min(session.deadline, Date.now() + 15_000)
+        while (tab.status === 'loading' && Date.now() < deadline) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 100))
+          tab = await this.tabs.get(session.tabId)
+        }
+        if (tab.status === 'loading') throw new Error('详情页面加载超时')
+        if (jobIdFromUrl(tab.url ?? '') !== command.jobId) throw new Error('详情页面岗位 ID 不匹配')
+        const page = await this.tabs.sendMessage(
+          session.tabId,
+          {
+            type: DETAIL_MESSAGE,
+            jobId: command.jobId,
+          },
+          { frameId: 0 },
+        )
+        if (['captcha', 'login_required', 'restricted', 'failed'].includes(page?.status))
+          throw new Error(page.error || '详情页面不可截图')
+        if (page?.status === 'ready' && page.jobId !== command.jobId)
+          throw new Error('详情页面岗位 ID 不匹配')
+        const scroll = async (position: 'top' | 'next') => {
+          const result = await this.tabs.sendMessage(
+            session.tabId!,
+            {
+              type: DETAIL_MESSAGE,
+              action: 'captureScroll',
+              jobId: command.jobId,
+              position,
+            },
+            { frameId: 0 },
+          )
+          if (
+            result?.status !== 'scrolled' ||
+            result.jobId !== command.jobId ||
+            !Number.isFinite(result.scrollY) ||
+            result.scrollY < 0 ||
+            !Number.isFinite(result.viewportHeight) ||
+            result.viewportHeight <= 0 ||
+            !Number.isFinite(result.viewportWidth) ||
+            result.viewportWidth <= 0
+          )
+            throw new Error(result?.error || '无法确认详情页面滚动位置')
+          return result as { scrollY: number; viewportHeight: number; viewportWidth: number }
+        }
+        const capture = async () => {
+          // Allow painting and keep captures below Chrome's two-per-second limit.
+          await new Promise<void>((resolve) => setTimeout(resolve, 600))
+          const current = await this.tabs.get(session.tabId!)
+          if (!current.active || jobIdFromUrl(current.url ?? '') !== command.jobId)
+            throw new Error('详情页面已切换，已停止截图')
+          return this.tabs.captureVisibleTab!(tab.windowId, { format: 'png' })
+        }
+        const top = await scroll('top')
+        if (top.scrollY !== 0) throw new Error('详情页面未回到顶部，已停止截图')
+        let dataUrl = await capture()
+        // shortcut: Capture at most two viewports; extend only if real JDs exceed this range.
+        const next = await scroll('next')
+        if (top.viewportHeight !== next.viewportHeight || top.viewportWidth !== next.viewportWidth)
+          throw new Error('详情页面尺寸已改变，请重试')
+        if (next.scrollY > 0)
+          dataUrl = await stitchJobScreenshots(
+            dataUrl,
+            await capture(),
+            next.scrollY,
+            top.viewportHeight,
+          )
+        return { status: 'capture', dataUrl }
+      } finally {
+        if (owner.id !== undefined)
+          await this.tabs.update(owner.id, { active: true }).catch(() => {})
+      }
     }
     await this.storage.setItem(DETAIL_ACCESS_KEY, session)
     if (command.type !== 'read') return null
