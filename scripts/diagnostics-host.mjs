@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { normalizeDiagnostic } from '../src/utils/diagnostics.ts'
+import { reloadPipe, requestReload, serveReload } from './extension-reload.mjs'
 
 const hostName = 'cc.offerhunt.diagnostics'
 const origin = 'chrome-extension://ogkmgjbagackkdlcibcailacnncgonbn/'
@@ -53,6 +54,14 @@ if (command === '--install') {
     { windowsHide: true, stdio: 'pipe' },
   )
   console.log(JSON.stringify({ ok: true, host: hostName, path: target, node: process.execPath }))
+} else if (command === '--reload') {
+  try {
+    const result = await requestReload(reloadPipe(root))
+    console.log(JSON.stringify({ ok: true, extensionId: origin.split('/')[2], ...result }))
+  } catch (error) {
+    console.error(error.message)
+    process.exitCode = 1
+  }
 } else if (command === '--read') {
   try {
     process.stdout.write(await readFile(target, 'utf8'))
@@ -88,6 +97,19 @@ if (command === '--install') {
     void (async () => {
       try {
         const message = JSON.parse(input.subarray(4, expected + 4).toString('utf8'))
+        if (message?.type === 'reload:watch') {
+          if (!/^[\da-f-]{36}$/.test(message.bootId) || typeof message.version !== 'string')
+            throw new Error('Invalid reload registration')
+          const server = await serveReload(
+            reloadPipe(root),
+            { bootId: message.bootId, version: message.version.slice(0, 80) },
+            () => respond({ type: 'reload' }),
+          )
+          if (process.stdin.readableEnded) server.close()
+          else process.stdin.on('end', () => server.close())
+          respond({ type: 'reload:ready' })
+          return
+        }
         if (message?.type !== 'snapshot' || !Array.isArray(message.events))
           throw new Error('Invalid snapshot')
         const events = message.events.slice(-200).map(normalizeDiagnostic)

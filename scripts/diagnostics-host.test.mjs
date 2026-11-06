@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+
+import { reloadPipe, requestReload } from './extension-reload.mjs'
 
 const host = fileURLToPath(new URL('./diagnostics-host.mjs', import.meta.url))
 const origin = 'chrome-extension://ogkmgjbagackkdlcibcailacnncgonbn/'
@@ -64,6 +67,63 @@ test('native host validates the sender and snapshot, redacts records and replace
     await run(dir, { type: 'snapshot', version: 'test', events: [] })
     assert.deepEqual(JSON.parse(await readFile(target, 'utf8')).events, [])
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('real native framing delivers reload and confirms a newly connected extension boot', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'offerhunt-reload-'))
+  const children = []
+  const start = (onReload) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [host, origin], {
+        env: { ...process.env, LOCALAPPDATA: dir },
+        windowsHide: true,
+      })
+      children.push(child)
+      let input = Buffer.alloc(0)
+      child.on('error', reject)
+      child.stdout.on('data', (chunk) => {
+        input = Buffer.concat([input, chunk])
+        while (input.length >= 4 && input.length >= 4 + input.readUInt32LE(0)) {
+          const length = input.readUInt32LE(0)
+          const message = JSON.parse(input.subarray(4, 4 + length))
+          input = input.subarray(4 + length)
+          if (message.type === 'reload:ready') resolve(child)
+          else if (message.type === 'reload') onReload(child)
+          else reject(new Error(JSON.stringify(message)))
+        }
+      })
+      const body = Buffer.from(
+        JSON.stringify({ type: 'reload:watch', bootId: randomUUID(), version: 'test' }),
+      )
+      const header = Buffer.alloc(4)
+      header.writeUInt32LE(body.length)
+      child.stdin.write(Buffer.concat([header, body]))
+    })
+  try {
+    let restart
+    await start((child) => {
+      restart = new Promise((resolve, reject) => {
+        child.once('close', () => start(() => {}).then(resolve, reject))
+        child.stdin.end()
+      })
+    })
+    const result = await requestReload(reloadPipe(path.join(dir, 'OfferHunt', 'diagnostics')), 3000)
+    assert.equal(result.version, 'test')
+    await restart
+  } finally {
+    await Promise.all(
+      children
+        .filter((child) => child.exitCode === null)
+        .map(
+          (child) =>
+            new Promise((resolve) => {
+              child.once('close', resolve)
+              child.kill()
+            }),
+        ),
+    )
     await rm(dir, { recursive: true, force: true })
   }
 })

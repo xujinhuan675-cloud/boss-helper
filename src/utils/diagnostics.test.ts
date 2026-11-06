@@ -51,6 +51,13 @@ test('does not copy model parsing errors or serialized HTTP response bodies', ()
   expect(getDiagnostics()[1].error).toContain('401')
 })
 
+test('suppresses repeated errors for the same operation even when other events intervene', () => {
+  diagnostic('sync.failure', { error: new Error('unavailable') })
+  diagnostic('sync.started')
+  diagnostic('sync.failure', { error: new Error('unavailable') })
+  expect(getDiagnostics().filter((event) => event.operation === 'sync.failure')).toHaveLength(1)
+})
+
 test('keeps model-origin and parsing error payloads out of outer workflow diagnostics', () => {
   const failure = new Error('echoed private resume text')
   diagnostic('model.chat.filtering', { error: failure })

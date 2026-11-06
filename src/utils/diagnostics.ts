@@ -181,16 +181,20 @@ export function diagnostic(
       ...(error?.statusCode !== undefined ? { statusCode: error.statusCode } : {}),
     },
   })!
-  const previous = events.at(-1)
-  if (
+  const previous =
     event.level === 'error' &&
-    previous?.source === event.source &&
-    previous.operation === event.operation &&
-    previous.error === event.error &&
-    JSON.stringify(previous.context) === JSON.stringify(event.context) &&
-    Date.parse(event.time) - Date.parse(previous.time) < 10000
-  )
-    return previous
+    [...events]
+      .reverse()
+      .find(
+        (previous) =>
+          previous.level === 'error' &&
+          previous.source === event.source &&
+          previous.operation === event.operation &&
+          previous.error === event.error &&
+          JSON.stringify(previous.context) === JSON.stringify(event.context) &&
+          Date.parse(event.time) - Date.parse(previous.time) < 10000,
+      )
+  if (previous) return previous
   events = [...events, event].slice(-200)
   changed()
   const failed = () => {
