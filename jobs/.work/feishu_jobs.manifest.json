@@ -1,0 +1,219 @@
+{
+  "manifest_version": "v1",
+  "format": "ndjson",
+  "base_token": "D45SbapUDauMTAsOAo9ch6qbnnd",
+  "table_id": "tblumxwmUgzwYEqg",
+  "rev": 131,
+  "timezone": "Asia/Shanghai",
+  "query_context": {
+    "field_scope": "view_visible_fields",
+    "record_scope": "view_filtered_records"
+  },
+  "requested_limit": 2000,
+  "records_count": 2000,
+  "page_count": 4,
+  "has_more": true,
+  "next_offset": 2000,
+  "record_file": "F:\\AnchorOS\\6-项目仓库\\boss-helper\\jobs\\.work\\feishu_jobs.ndjson",
+  "record_file_size_bytes": 5362133,
+  "manifest_file": "F:\\AnchorOS\\6-项目仓库\\boss-helper\\jobs\\.work\\feishu_jobs.manifest.json",
+  "columns": {
+    "JD": {
+      "field_id": "fldLfOurwn",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 2,
+        "max_length": 4599
+      },
+      "example": "源表缺失"
+    },
+    "JD依据": {
+      "field_id": "fldABc1UU0",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 550,
+        "max_length": 120
+      },
+      "example": "985"
+    },
+    "record_id": {
+      "physical_type": "string",
+      "stats": {
+        "max_length": 16
+      },
+      "example": "reczz28QWF8YfQQ7"
+    },
+    "下一步": {
+      "field_id": "fldW6rDabM",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 550,
+        "max_length": 78
+      },
+      "example": "先确认内容运营能否由AI产品背景替代。"
+    },
+    "主要差距": {
+      "field_id": "fldesK2GDn",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 550,
+        "max_length": 120
+      },
+      "example": "985"
+    },
+    "分类": {
+      "field_id": "fldl7xkXEG",
+      "field_type": "select",
+      "physical_type": "array<string>",
+      "stats": {
+        "empty_count": 0,
+        "max_length": 1,
+        "avg_length": 1
+      },
+      "example": ["优先投"]
+    },
+    "匹配判断": {
+      "field_id": "fldizmVPQu",
+      "field_type": "select",
+      "physical_type": "array<string>",
+      "stats": {
+        "empty_count": 0,
+        "max_length": 1,
+        "avg_length": 1
+      },
+      "example": ["强匹配"]
+    },
+    "岗位": {
+      "field_id": "fld4rSboq8",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 4,
+        "max_length": 34
+      },
+      "example": "ba"
+    },
+    "岗位方向": {
+      "field_id": "fldHXEeD9o",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 145,
+        "max_length": 127
+      },
+      "example": "Java"
+    },
+    "岗位链接": {
+      "field_id": "fld0lm95wb",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 138
+      },
+      "example": "[https://www.zhipin.com/job_detail/af33f2614c3915aa0nR82Nu4GVdV.html](https://www.zhipin.com/job_detail/af33f2614c3915aa0nR82Nu4",
+      "example_truncated": true
+    },
+    "当前状态": {
+      "field_id": "fldQz6WT4O",
+      "field_type": "select",
+      "physical_type": "array<string>",
+      "stats": {
+        "empty_count": 0,
+        "max_length": 1,
+        "avg_length": 1
+      },
+      "example": ["暂缓"]
+    },
+    "招呼语草稿": {
+      "field_id": "fld0EFaWey",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 1957,
+        "max_length": 146
+      },
+      "example": "你好，我在Agent平台与交易任务链场景上做过产品设计。曾通过PRD、原型、API联调和MVP/PoC验证，将流程推进到可验收功能。与贵司岗位的平台功能定义和研发协作职责比较匹配，期待有机会进一步沟通。详细简历已附上，辛苦您查看。"
+    },
+    "推荐理由": {
+      "field_id": "fld5C0kX8E",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 142
+      },
+      "example": "App需求、产品交付与通用PM能力相关。"
+    },
+    "旧投递记录": {
+      "field_id": "fldxQGVhNQ",
+      "field_type": "link",
+      "physical_type": "array<struct<id string>>",
+      "stats": {
+        "empty_count": 1840,
+        "max_length": 1,
+        "avg_length": 0.08
+      },
+      "example": [
+        {
+          "id": "reczz28P9rpQyU4P"
+        }
+      ]
+    },
+    "旧表进度": {
+      "field_id": "fldU1uAlSY",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 550,
+        "max_length": 8
+      },
+      "example": "待投递"
+    },
+    "核查备注": {
+      "field_id": "fldeVxcGwX",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 550,
+        "max_length": 1080
+      },
+      "example": "源表公司名缺失，打开原岗位页核实后再联系"
+    },
+    "核查方式": {
+      "field_id": "fld8Fn96dx",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 0,
+        "max_length": 13
+      },
+      "example": "规则初筛"
+    },
+    "薪资": {
+      "field_id": "fldveRBpK0",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 1,
+        "max_length": 10
+      },
+      "example": "7-9K"
+    },
+    "薪资分组": {
+      "field_id": "fld38RR5fF",
+      "field_type": "select",
+      "physical_type": "array<string>",
+      "stats": {
+        "empty_count": 550,
+        "max_length": 1,
+        "avg_length": 0.725
+      },
+      "example": ["15K起薪边界"]
+    }
+  }
+}

@@ -15,6 +15,8 @@
     "check": "vue-tsc --noEmit",
     "test:prepare": "node --test scripts/prepare.test.mjs",
     "test:diagnostics": "node --test scripts/diagnostics-host.test.mjs",
+    "test:reload": "node --test scripts/extension-reload.test.mjs",
+    "reload:extension": "node scripts/diagnostics-host.mjs --reload",
     "diagnostics:install": "node scripts/diagnostics-host.mjs --install",
     "diagnostics:read": "node scripts/diagnostics-host.mjs --read",
     "build": "wxt build -b chrome && wxt build -b firefox --mv3 && wxt build -b edge",

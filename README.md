@@ -33,13 +33,38 @@ F:\AnchorOS\6-项目仓库\boss-helper\.output\chrome-mv3
 git submodule update --init --recursive
 bun install --frozen-lockfile
 bun run build:chrome
+npm run reload:extension
 ```
 
-`build:chrome` 直接更新 `.output/chrome-mv3`，无需额外复制或同步。以后修改源码后执行同一构建命令，Chrome 继续使用同一加载目录；构建成功后重载扩展，再刷新已打开的 BOSS 页面。源码不放进构建输出目录。
+`build:chrome` 直接更新 `.output/chrome-mv3`，无需额外复制或同步。以后修改源码后先构建，再在本仓库执行 `npm run reload:extension`，成功后刷新已打开的 BOSS 页面。重载通过已有 Native Messaging Host 与 Windows 命名管道通知插件自身完成，不使用 Chrome 调试端口；命令等新启动标识回连才返回成功，15 秒未确认则报错。重载会中断正在执行的插件任务。源码不放进构建输出目录。
+
+首次使用或迁移仓库、Node 后执行 `npm run diagnostics:install`。如果当前运行的是尚未包含重载桥的旧包，通过 FlowGuide 打开 `chrome-extension://ogkmgjbagackkdlcibcailacnncgonbn/workbench.html#reload-extension` 激活一次，再运行命令。此入口仅适用于包含 `nativeMessaging` 的本机 Windows Chrome 包，商店发布包不启用。
+
+`bun run dev` 使用 WXT 默认的 `.output/chrome-mv3-dev`，与日常加载的正式包隔离。开发包依赖本地开发服务器，服务器停止后侧边栏无法启动；不要将开发产物覆盖到 `.output/chrome-mv3`。
 
 原来的可加载扩展包完整保留在 `local/original-chrome`，仅用于回退。若本机 Bun 的依赖安装停在安装脚本，可用 `bun install --frozen-lockfile --ignore-scripts` 完成安装，再运行 `bun run postinstall` 准备 WXT。
 
 工程入口见 [项目目录结构索引](docs/项目目录结构索引.md)。当前目录整理和构建入口不代表滚动采集、事前投或定时发送已经实现。
+
+### 浏览器验收通道
+
+本项目的 BOSS 页面、OfferHunt 工作台和 Chrome 标签页操作统一通过 FlowGuide Chrome 控制桥完成。每次操作先枚举窗口和标签页，再使用返回的 `browserDeviceId`、`tabId`；CUA、Chrome DevTools/CDP 和调试端口直连不作为执行方式。FlowGuide 不可用时停止浏览器实测并报告桥接状态；Native Messaging 只用于扩展诊断镜像，不用于控制 Chrome 或读取页面 DOM。
+
+## 快速岗位匹配与 Jev
+
+“分析岗位”现在每岗只发一次匹配请求，保存“匹配 / 不匹配 / 待确认”，可附同一次请求返回的一句依据。不会自动展开五维分析或生成招呼语；已完成分析的岗位跳过，历史评分与已有草稿保留。信息不足时标记待确认，不把简历未提及直接视为不具备。
+
+在工作台“模型与提示词”编辑模型，打开“Jev Decisions API（岗位匹配专用）”，填写 OpenRouter API Key、基础地址 `https://openrouter.ai/api/v1` 和账号实际可用的 Jev 模型 ID，再保存。插件通过 `/api/alpha/decisions` 在同一次请求中获取结论和简短原因标签，不额外请求长解释；普通生成模型仍可用于招呼语和关键词提取。岗位匹配优先选择完整的 Jev 配置，没有时使用普通模型的简短 JSON 输出。Jev 模型 ID 手动配置，不假定普通模型列表中的路由模型等同于 Decisions 模型。
+
+匹配规则统一放在“模型与提示词 → 岗位匹配”的提示词编辑区：判断标准、简短原因、普通模型 JSON 格式及 Jev 原因标签说明均可查看和修改。请求不再追加隐藏的匹配或输出规则；普通模型直接使用已保存提示词，Jev 选择题引用相同规则。代码保留接口结构和结果校验。默认要求普通模型在同次请求中给出 60 字以内的具体原因，Jev 返回一个简短原因类别；类别本身不增加筛选门槛。仅完全未修改的旧默认提示词自动更新，自定义内容和追加要求保留。
+
+默认采用宽松投递初筛：经验要求仅排除“5～10年”（含等义写法）和明确限定应届生的岗位，其余不因简历年限不足而淘汰或待确认。“5年以上”“10年以上”不自动归入“5～10年”。方向相关或有可迁移能力即可尝试，学历、单项技能、行业、工具和资质等一般条件不逐项卡死；只在上述经验排除、方向明显无关或明确不可接受条件冲突时判不匹配。全部规则均可在编辑区修改，未新增代码层年限过滤。
+
+AI 匹配以独立保存的个人求职画像、岗位资料与完整 JD、保存的匹配提示词为依据，比较画像方向和岗位职责的语义关系；当前简历不再作为岗位匹配门槛。个人画像支持直接编辑或导入 Markdown，岗位搜索关键词也从画像提取。已存岗位批量分析固定使用启动时的画像快照。简历仍用于招呼语和后续岗位定制，独立的本地排除词筛选也不等于 AI 匹配规则。
+
+模型编辑器内可点击“连接测试”。Jev 会按当前填写的配置发送一次最小 Decisions 测试请求，不发送简历、不保存编辑内容；该请求可能按服务商规则计费。普通模型仍通过读取模型列表测试连接，不能据此保证推理可用。
+
+接口格式与离线回归已核对；真实账号可用性、中文匹配质量、耗时和费用仍需用实际样本验收。构建后须重载 OfferHunt 并刷新 BOSS 才能使用新代码。
 
 ## Chrome 商店打包与升级
 
@@ -59,7 +84,7 @@ bun run release:patch
 
 需要指定版本时，先执行 `npm version 1.1.0 --no-git-tag-version`，再执行 `bun run release:chrome`。版本使用三段数字，并高于上次上传的版本。如果升版后的检查或构建失败，版本号会保留；修复后执行 `release:chrome` 重试，避免再次升版。
 
-商店产物临时写入 `.output/chrome-mv3-store`，打包及校验成功后自动删除该中间目录，保留 ZIP；不覆盖 Chrome 当前加载的 `.output/chrome-mv3`。发布脚本 `scripts/release-chrome.mjs` 使用 WXT 的生产构建 API，并自动断言版本、商店清单和许可证。ZIP 根目录包含 `manifest.json`、页面、脚本、图标、多语言资源和原 MIT 许可证，不包含源码仓库、本机配置或用户数据。商店清单不带开发公钥和 `nativeMessaging` 权限；普通用户无需安装本机诊断 Host，运行诊断仍保存在扩展本地并可在日志页导出，本机镜像会显示不可用。原 `build:chrome` 保留开发公钥和本机诊断，日常开发入口及加载目录保持原约定。
+商店产物临时写入 `.output/chrome-mv3-store`，打包及校验成功后自动删除该中间目录，保留 ZIP；不覆盖 Chrome 当前加载的 `.output/chrome-mv3`。发布脚本 `scripts/release-chrome.mjs` 使用 WXT 的生产构建 API，并自动断言版本、商店清单和许可证。ZIP 根目录包含 `manifest.json`、页面、脚本、图标、多语言资源和原 MIT 许可证，不包含源码仓库、本机配置或用户数据。商店清单不带开发公钥和 `nativeMessaging` 权限；普通用户无需安装本机诊断 Host，运行诊断保存在扩展本地并显示于日志页，本机镜像会显示不可用。原 `build:chrome` 保留开发公钥和本机诊断，日常开发入口及加载目录保持原约定。
 
 现有 README 顶部的商店链接属于上游项目，不代表此二开版本已发布。首次从本地开发扩展切换到自己的商店扩展会使用新的 ID，旧扩展的数据不会自动迁移，切换前按需导出岗位和配置。首次商店上架的介绍、截图、隐私政策和权限用途说明由发布者在后台填写；自定义模型及高德接口使用的网络权限仍保留。ZIP 生成和本地检查不代表通过商店审核。
 

@@ -16,7 +16,6 @@ const icons = {
 
 export default defineConfig({
   srcDir: 'src',
-  outDirTemplate: '{{browser}}-mv{{manifestVersion}}',
   modules: ['@wxt-dev/module-vue'],
   // imports: false,
 
@@ -66,6 +65,8 @@ export default defineConfig({
       'storage',
       'notifications',
       'scripting',
+      ...(browser === 'firefox' ? [] : ['declarativeNetRequestWithHostAccess']),
+      ...(browser === 'firefox' ? [] : ['unlimitedStorage']),
       ...(browser === 'chrome' ? ['nativeMessaging'] : []),
       ...(browser === 'firefox' ? [] : ['sidePanel']),
     ],
@@ -76,7 +77,7 @@ export default defineConfig({
         matches,
       },
     ],
-    host_permissions: ['http://*/*', 'https://*/*'],
+    host_permissions: ['<all_urls>'],
     key:
       browser === 'edge'
         ? undefined // 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq+hJAUmfZSTB6c7QOXiU6r1JUMLM3C/CDTVolB5pU/DAkO3Y3uVh/YWWaV8m2wIrLSjN7n1CZ+zmRlO+YpUq2vZRILq8WXFePCfHe8EqVY9mjj04BqqRuttHpJqMeXl1aVbKmICKj3cNEprGzJJvaAorz0NJxD82oLXf8CMIW0MHUjvwgmNc9HTD41glvX6CzW1r4qvwl4MSdZRPVf5dmhp+CWoaAcjqEpHbu+EZV5WpfQz9XCsmBXmMAFLyBtn62Xvy86c9PntIRw8xMikqmi8lVyOgT8oSM2U8EFyMsESoT2qCQXgUf0FMtKipoNs7xM7FtdOppNylHa6jJyYdRwIDAQAB'
