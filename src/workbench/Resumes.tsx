@@ -1,12 +1,20 @@
 /** @jsxImportSource react */
 import { Button, Chip, Input, Label, Separator, Table, TextArea, TextField } from '@heroui/react'
-import { Copy, FilePlus2, Pencil, Save, Sparkles, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { Copy, FilePlus2, FileUp, Pencil, Save, Sparkles, Trash2 } from 'lucide-react'
+import { useRef, useState } from 'react'
 
 import type { ResumeRecord } from '@/composables/useResume'
 
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
-import { command, copyResume, deleteResume, saveKeywords, saveResume, selectResume } from './store'
+import {
+  command,
+  copyResume,
+  deleteResume,
+  saveConfig,
+  saveKeywords,
+  saveResume,
+  selectResume,
+} from './store'
 import { useWorkbench } from './useWorkbench'
 
 export function Resumes() {
@@ -20,6 +28,8 @@ export function Resumes() {
   const [deleting, setDeleting] = useState<ResumeRecord | null>(null)
   const [replacement, setReplacement] = useState('__none__')
   const [keywordDraft, setKeywordDraft] = useState<string | null>(null)
+  const [profileDraft, setProfileDraft] = useState<string | null>(null)
+  const profileFile = useRef<HTMLInputElement>(null)
   const busy =
     state.loading ||
     state.saving ||
@@ -34,6 +44,7 @@ export function Resumes() {
     )
   const current = library.resumes.find((resume) => resume.id === library.currentResumeId)
   const keywords = keywordDraft ?? state.keywords
+  const profile = profileDraft ?? state.config.jobProfile
 
   async function save() {
     if (busy || !editing) return
@@ -69,8 +80,49 @@ export function Resumes() {
           新建简历
         </Button>
       </div>
+      <Separator />
+      <section className="flex flex-col gap-4" aria-label="个人求职画像">
+        <h2 className="text-lg font-semibold">个人求职画像</h2>
+        <TextField value={profile} onChange={setProfileDraft} isDisabled={busy}>
+          <Label>画像内容（支持 Markdown）</Label>
+          <TextArea rows={14} />
+        </TextField>
+        <input
+          ref={profileFile}
+          type="file"
+          accept=".md,.markdown,.txt,text/markdown,text/plain"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0]
+            event.currentTarget.value = ''
+            if (file) void act(async () => setProfileDraft(await file.text()), '画像已导入')
+          }}
+        />
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button
+            variant="secondary"
+            isDisabled={busy}
+            onPress={() => profileFile.current?.click()}
+          >
+            <FileUp size={16} />
+            导入画像
+          </Button>
+          <Button
+            isDisabled={busy || profile === state.config.jobProfile}
+            onPress={() => {
+              void act(() => saveConfig({ jobProfile: profile }), '个人画像已保存').then((ok) => {
+                if (ok) setProfileDraft(null)
+              })
+            }}
+          >
+            <Save size={16} />
+            保存画像
+          </Button>
+        </div>
+      </section>
+      <Separator />
       <SelectField
-        label="AI 使用的简历"
+        label="生成招呼语使用的简历"
         value={library.currentResumeId ?? '__none__'}
         disabled={busy}
         options={[
@@ -188,13 +240,13 @@ export function Resumes() {
           <h2 className="text-lg font-semibold">岗位关键词</h2>
           <Button
             variant="secondary"
-            isDisabled={busy || !(editing ? editing.content : current?.content)?.trim()}
+            isDisabled={busy || !profile.trim()}
             isPending={!!runtime?.keywordExtractionBusy}
             onPress={() => {
               void act(() =>
                 command({
                   type: 'extractKeywords',
-                  input: editing ? editing.content : (current?.content ?? ''),
+                  input: profile,
                 }),
               ).then((ok) => {
                 if (ok) setKeywordDraft(null)
@@ -202,7 +254,7 @@ export function Resumes() {
             }}
           >
             <Sparkles size={16} />
-            从简历提取
+            从画像提取
           </Button>
         </div>
         <TextField

@@ -1,7 +1,12 @@
 import type { TaskResult } from '@/composables/useApplying/type'
 import type { JobData, Log, LogData } from '@/composables/useHelper/type'
 import type { Message } from '@/composables/useModel/chatModel'
-import type { CollectionRun, DetailRun, FunnelStage } from '@/entrypoints/boss/jobStore'
+import type {
+  CollectionRun,
+  DetailRun,
+  FunnelStage,
+  ReviewStatus,
+} from '@/entrypoints/boss/jobStore'
 import type { KeywordRotationPlan } from '@/entrypoints/boss/keywordRotation'
 import type { SavedAnalysisRun } from '@/entrypoints/boss/savedAnalysis'
 
@@ -12,6 +17,7 @@ import { isNativeSearchFilters } from '../entrypoints/boss/nativeSearch'
 
 export const EXECUTOR_NAMESPACE = '__boss-helper-executor__'
 export const EXECUTOR_MESSAGE_TYPE = 'boss-helper:executor'
+export const EXECUTOR_UPDATE_MESSAGE_TYPE = 'boss-helper:executor-update'
 
 export type ExecutorCommand =
   | {
@@ -36,8 +42,10 @@ export type ExecutorCommand =
   | { type: 'analyzeOne' | 'generateGreeting'; jobId: string }
   | { type: 'sendGreeting'; jobId: string; greeting: string }
   | { type: 'selectJob' | 'captureJob' | 'openJob'; key: string }
+  | { type: 'clearChat'; key: string }
   | { type: 'setFunnel'; jobId: string; stage: FunnelStage | null }
   | { type: 'setProcessing'; jobId: string; status: 'active' | 'excluded' }
+  | { type: 'setReview'; jobId: string; status: ReviewStatus }
   | { type: 'setAutoCapture'; enabled: boolean }
   | { type: 'extractKeywords' | 'saveKeywords'; input: string }
   | { type: 'setPendingMessage'; value: string }
@@ -108,6 +116,7 @@ export type ExecutorRequest = {
 export type ExecutorResponse<T = unknown> = { ok: true; data?: T } | { ok: false; error: string }
 export type RuntimeBridge = {
   snapshot(chatJobKey?: string): Promise<ExecutorSnapshot>
+  subscribe(listener: (snapshot: ExecutorSnapshot) => void): Promise<void>
   command(command: ExecutorCommand): Promise<unknown>
 }
 
@@ -142,6 +151,7 @@ export function isExecutorCommand(value: unknown): value is ExecutorCommand {
     case 'selectJob':
     case 'captureJob':
     case 'openJob':
+    case 'clearChat':
       return keys(value, ['type', 'key']) && text(value.key)
     case 'setFunnel':
       return (
@@ -154,6 +164,12 @@ export function isExecutorCommand(value: unknown): value is ExecutorCommand {
         keys(value, ['type', 'jobId', 'status']) &&
         text(value.jobId) &&
         (value.status === 'active' || value.status === 'excluded')
+      )
+    case 'setReview':
+      return (
+        keys(value, ['type', 'jobId', 'status']) &&
+        text(value.jobId) &&
+        (value.status === 'pending' || value.status === 'approved' || value.status === 'rejected')
       )
     case 'setAutoCapture':
       return keys(value, ['type', 'enabled']) && typeof value.enabled === 'boolean'

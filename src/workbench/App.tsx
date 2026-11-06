@@ -7,7 +7,6 @@ import {
   FileUser,
   LayoutDashboard,
   Moon,
-  RefreshCw,
   Sun,
   Target,
 } from 'lucide-react'
@@ -19,7 +18,7 @@ import { Logs } from './Logs'
 import { Models } from './Models'
 import { Resumes } from './Resumes'
 import { Settings } from './Settings'
-import { openBoss, openWorkbench, reconnectExecutor, selectTab } from './store'
+import { openBoss, openWorkbench, selectTab } from './store'
 import { Tasks } from './Tasks'
 import { useWorkbench } from './useWorkbench'
 
@@ -96,19 +95,11 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
             </div>
             <div className="sidepanel-connection-controls flex shrink-0 items-center gap-1">
               <IconButton
-                label="重新连接"
+                label={state.connected ? '打开已连接的 BOSS 岗位页' : '打开并连接 BOSS 岗位页'}
                 onPress={() => {
-                  void act(reconnectExecutor)
+                  void act(openBoss)
                 }}
                 disabled={state.saving}
-              >
-                <RefreshCw size={17} />
-              </IconButton>
-              <IconButton
-                label={state.connected ? '打开已连接的 BOSS 岗位页' : '打开 BOSS 岗位页以连接'}
-                onPress={() => {
-                  void openBoss()
-                }}
               >
                 <span className="relative inline-flex">
                   <BriefcaseBusiness size={17} />

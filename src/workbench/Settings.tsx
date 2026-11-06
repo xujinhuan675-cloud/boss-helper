@@ -957,6 +957,62 @@ export function Settings({ page = 'settings' }: { page?: 'settings' | 'filters' 
             </Accordion.Panel>
           </Accordion.Item>
         )}
+        {!filters && (
+          <Accordion.Item id="ocr">
+            <Accordion.Heading>
+              <Accordion.Trigger>
+                PaddleOCR
+                <Accordion.Indicator />
+              </Accordion.Trigger>
+            </Accordion.Heading>
+            <Accordion.Panel>
+              <Accordion.Body className="flex flex-col gap-4">
+                <Switch
+                  className="switch-row"
+                  isSelected={config.paddleOcr.enabled}
+                  onChange={(enabled) => change('paddleOcr', { ...config.paddleOcr, enabled })}
+                  isDisabled={busy}
+                >
+                  <Switch.Content>
+                    <Switch.Control>
+                      <Switch.Thumb />
+                    </Switch.Control>
+                    <Label>启用截图 OCR 采集</Label>
+                  </Switch.Content>
+                </Switch>
+                <div className="field-grid">
+                  <TextField
+                    value={config.paddleOcr.baseUrl}
+                    onChange={(baseUrl) => change('paddleOcr', { ...config.paddleOcr, baseUrl })}
+                    isDisabled={busy}
+                  >
+                    <Label>OCR Jobs API 地址</Label>
+                    <Input type="url" autoComplete="url" />
+                  </TextField>
+                  <TextField
+                    value={config.paddleOcr.model}
+                    onChange={(model) => change('paddleOcr', { ...config.paddleOcr, model })}
+                    isDisabled={busy}
+                  >
+                    <Label>OCR 模型</Label>
+                    <Input autoComplete="off" />
+                  </TextField>
+                  <TextField
+                    value={config.paddleOcr.token}
+                    onChange={(token) => change('paddleOcr', { ...config.paddleOcr, token })}
+                    isDisabled={busy}
+                  >
+                    <Label>OCR 授权 Token</Label>
+                    <Input type="password" autoComplete="off" />
+                  </TextField>
+                </div>
+                <p className="text-sm text-muted">
+                  Token 只保存在当前浏览器的方案配置中，请自行填写或刷新专用 Token。
+                </p>
+              </Accordion.Body>
+            </Accordion.Panel>
+          </Accordion.Item>
+        )}
       </Accordion>
       <ConfirmDialog
         open={!!deletingPreset}

@@ -351,6 +351,8 @@ test('converts a single minute interval input back to seconds and syncs its slid
 })
 
 test('updates theoretical detail capacity immediately when runtime or detail timing changes', async () => {
+  state.config.delayCollectionDetailMin = 3
+  state.config.delayCollectionDetailMax = 5
   await render()
   const estimate = () => container.querySelector('output[aria-label="理论详情数量"]')?.textContent
   expect(estimate()).toContain('900')

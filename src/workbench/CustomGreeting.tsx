@@ -147,11 +147,9 @@ export function CustomGreeting({
           <Label>渲染招呼语变量</Label>
         </Switch.Content>
       </Switch>
-      {config.aiGreeting.enable && (
-        <p className="text-sm text-muted">
-          当前 AI 招呼语已启用，自定义文字招呼语将由 AI 生成内容替代。
-        </p>
-      )}
+      <p className="text-sm text-muted">
+        发送时使用最终招呼语正文，并附上此处启用的图片；自定义固定文字不再发送。
+      </p>
       {typeof config.customGreeting.value === 'string' ? (
         <TextField
           value={config.customGreeting.value}

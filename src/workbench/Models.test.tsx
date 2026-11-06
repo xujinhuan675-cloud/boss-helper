@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { defaultFormData } from '../composables/conf/info'
 import * as scoring from '../composables/useApplying/scoring'
 import * as connection from '../composables/useModel/connection'
+import { selectModel as resolveModel } from '../composables/useModel/selection'
 import * as deepmerge from '../utils/deepmerge'
 
 // Reuse the DOM implementation already installed by the workspace's UI package.
@@ -75,6 +76,8 @@ const configWrites = []
 const services = { conf: { formDataPreset: { value: 'default' } } }
 let modelListStatus = 200
 let modelListIds = ['model-a', 'model-b']
+let decisionResponse
+let modelRequests = []
 let readModelOptions
 let optionsWriteError = ''
 await mock.module('./useWorkbench', () => ({ useWorkbench: () => state }))
@@ -98,6 +101,7 @@ await mock.module('./store', () => ({
 }))
 await mock.module('@/composables/useModel', () => ({
   isCompleteModel: (model) => !!model?.data?.model,
+  selectModel: resolveModel,
 }))
 await mock.module('@/message', () => ({
   counter: {
@@ -106,10 +110,13 @@ await mock.module('@/message', () => ({
       if (optionsWriteError) throw new Error(optionsWriteError)
       modelOptions.set(key, structuredClone(value))
     },
-    fetchText: async () => ({
-      status: modelListStatus,
-      text: JSON.stringify({ data: modelListIds.map((id) => ({ id })) }),
-    }),
+    fetchText: async (request) => {
+      modelRequests.push(request)
+      return {
+        status: modelListStatus,
+        text: JSON.stringify(decisionResponse ?? { data: modelListIds.map((id) => ({ id })) }),
+      }
+    },
   },
 }))
 
@@ -158,6 +165,8 @@ beforeEach(async () => {
   modelOptions.clear()
   modelListStatus = 200
   modelListIds = ['model-a', 'model-b']
+  decisionResponse = undefined
+  modelRequests = []
   readModelOptions = async (key, fallback) => structuredClone(modelOptions.get(key) ?? fallback)
   optionsWriteError = ''
   state.models = [
@@ -194,6 +203,30 @@ test('shows the saved model in the sole selector before fetching', async () => {
   expect([...document.querySelectorAll('label')].map((el) => el.textContent)).not.toContain(
     '模型 ID',
   )
+})
+
+test('allows a Decisions model ID to be configured without a chat model-list lookup', async () => {
+  await click(document.querySelector('[aria-label="编辑 测试服务"]'))
+  const toggle = [...document.querySelectorAll('[data-slot="switch"]')].find((el) =>
+    el.textContent.includes('Jev Decisions API（岗位匹配专用）'),
+  )
+  await click(toggle.querySelector('[role="switch"]'))
+  const label = [...document.querySelectorAll('label')].find(
+    (el) => el.textContent === 'Jev 模型 ID',
+  )
+  expect(label).toBeTruthy()
+  await changeText(document.getElementById(label.htmlFor), 'typesafe/jev-test')
+  expect(selector()).toBeNull()
+  expect(button('获取模型')).toBeUndefined()
+  decisionResponse = { answers: { connection: { type: 'choice', choice: 'connection_ok' } } }
+  await click(button('连接测试'))
+  expect(container.textContent).toContain('Jev 连接成功')
+  expect(modelRequests).toHaveLength(1)
+  expect(JSON.parse(modelRequests[0].data.body).model).toBe('typesafe/jev-test')
+  expect(modelRequests[0].url).toBe('https://model-provider.example/alpha/decisions')
+  expect(state.models[0].data.decisions).toBeUndefined()
+  await click(button('保存模型'))
+  expect(state.models[0].data).toMatchObject({ decisions: true, model: 'typesafe/jev-test' })
 })
 
 test('keeps fetched choices after repeated selection and saves the selected model', async () => {
@@ -323,6 +356,9 @@ test('shows model configuration and prompts as stacked sections', async () => {
   expect(!!container.querySelector('[aria-label="提示词"]')).toBe(true)
   expect(!!container.querySelector('[aria-label="AI 模型"]')).toBe(true)
   expect(!!container.querySelector('[aria-label="提示词用途"]')).toBe(true)
+  expect(container.querySelector('textarea').value).toBe(scoring.MATCH_SCORING_PROMPT)
+  expect(container.querySelector('textarea').value).toContain('一句')
+  expect(container.querySelector('textarea').value).toContain('60字以内')
 })
 
 test('keeps model management visible while editing prompt drafts', async () => {
@@ -384,6 +420,18 @@ test('keeps purpose drafts separate and restores defaults only as an unsaved edi
     [...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === 'AI 招呼语'),
   )
   expect(container.querySelector('[aria-label="消息 1 正文"]').value).toBe('greeting draft')
+})
+
+test('edits and saves AI greeting prompts without an enable switch', async () => {
+  await openPrompts()
+  expect(container.textContent).toContain('启用岗位匹配')
+  await click(
+    [...container.querySelectorAll('[role="tab"]')].find((el) => el.textContent === 'AI 招呼语'),
+  )
+  expect(!!container.querySelector('.prompt-enable')).toBe(false)
+  await changeText(container.querySelector('[aria-label="消息 1 正文"]'), '按配置生成\n\n分段正文')
+  await click(button('保存招呼语'))
+  expect(configWrites[0].aiGreeting.prompt[0].content).toBe('按配置生成\n\n分段正文')
 })
 
 test('blocks saving a prompt draft after its preset changes and discards it into the current preset', async () => {

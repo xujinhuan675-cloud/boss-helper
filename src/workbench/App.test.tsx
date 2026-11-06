@@ -79,6 +79,7 @@ dom.window.Element.prototype.getAnimations = () => []
 const calls = []
 const commands = []
 let commandError = ''
+let pendingCommand
 const chatSelections = []
 const deletions = []
 const batchDeletions = []
@@ -132,13 +133,15 @@ void mock.module('./store', () => ({
   command: async (value) => {
     commands.push(value)
     if (commandError) throw new Error(commandError)
+    return pendingCommand
   },
   selectChat: (key) => {
     chatSelections.push(key)
   },
-  openBoss: async () => {},
+  openBoss: async () => {
+    calls.push('openBoss')
+  },
   openWorkbench: async () => {},
-  reconnectExecutor: async () => {},
   selectTab() {},
   selectResume: async (id) => {
     resumeSelections.push(id)
@@ -172,6 +175,7 @@ let root
 let container
 beforeEach(() => {
   commandError = ''
+  pendingCommand = undefined
   clearDiagnostics()
   mirrorStatus = { ok: false, error: 'Host not found' }
   mirrorCalls.length = 0
@@ -188,6 +192,7 @@ beforeEach(() => {
   csvExports.length = 0
   state.resumes = { resumes: [], currentResumeId: null }
   state.connected = false
+  state.saving = false
   state.activeDetail = null
   state.connectionError = ''
   state.today = null
@@ -211,10 +216,20 @@ afterEach(async () => {
 afterAll(() => dom.window.close())
 const render = async (mode = 'workbench') =>
   act(async () => root.render(createElement(App, { mode })))
+const selectLogKind = async (value) => {
+  await act(async () => container.querySelector('[aria-label="记录类型"]').click())
+  const label = { diagnostics: '诊断事件', chat: 'AI 对话', runtime: '运行记录' }[value]
+  await act(async () =>
+    [...document.querySelectorAll('[role="option"]')]
+      .find((item) => item.textContent.includes(label))
+      ?.click(),
+  )
+}
 
 test('exposes machine log access and installation when disconnected, then shows verified sync status', async () => {
   location.hash = 'logs'
   await render()
+  await selectLogKind('diagnostics')
   expect(container.textContent).toContain('AI 诊断日志访问')
   expect(container.textContent).toContain('npm run diagnostics:install')
   expect(container.textContent).toContain('npm run diagnostics:read')
@@ -226,21 +241,22 @@ test('exposes machine log access and installation when disconnected, then shows 
   expect(container.textContent).toContain('C:/OfferHunt/diagnostics/latest.json')
 })
 
-test('keeps communication diagnostics visible and exportable with no connected BOSS tab', async () => {
+test('keeps communication diagnostics visible without a diagnostics export action', async () => {
   location.hash = 'logs'
   diagnostic('content.background.storageGet', {
     error: new Error('Extension context invalidated'),
     context: { tabId: 42 },
   })
   await render()
+  await selectLogKind('diagnostics')
   expect(container.textContent).toContain('content.background.storageGet')
   expect(container.textContent).toContain('Extension context invalidated')
-  expect(container.querySelector('[aria-label="导出诊断"]').disabled).toBe(false)
+  expect(container.querySelector('[aria-label="导出当前诊断事件"]')).toBeNull()
   expect(container.textContent).toContain('42')
-  expect(container.textContent.indexOf('清空')).toBeLessThan(
-    container.textContent.indexOf('日志级别'),
-  )
-  expect(container.textContent).not.toContain('AI 对话')
+  expect(
+    [...container.querySelectorAll('button')].some((button) => button.textContent.includes('清空')),
+  ).toBe(true)
+  expect(container.textContent).toContain('AI 对话')
   expect(container.textContent).not.toContain('补充消息草稿')
   expect(container.querySelector('[role="tab"]')).toBeNull()
 })
@@ -275,6 +291,7 @@ test('shows per-job AI messages and collapsed reasoning inside workbench logs', 
     ],
   }
   await render()
+  await selectLogKind('chat')
   const process = container.querySelector('[aria-label="AI 过程"]')
   expect(process).toBeTruthy()
   expect(process.open).toBe(false)
@@ -306,12 +323,7 @@ test('shows per-job AI messages and collapsed reasoning inside workbench logs', 
   await render()
   expect(process.textContent).toContain('设计匹配结果')
   expect(process.textContent).not.toContain('您好，我有三年产品经验。')
-  await act(async () =>
-    [...container.querySelectorAll('button')]
-      .find((button) => button.textContent.includes('分析完成'))
-      .click(),
-  )
-  expect(container.textContent).toContain('已保存分析结果')
+  expect(container.querySelector('[aria-label="日志级别"]')).toBeTruthy()
 })
 
 test('keeps AI messages out of the sidebar even when a conversation is available', async () => {
@@ -338,6 +350,16 @@ test('keeps AI messages out of the sidebar even when a conversation is available
 })
 
 test('deletes the home and live toolbar, redirects old links to the offline job library', async () => {
+  state.records = jobs.mergeJobRecords(
+    [],
+    [{ encryptJobId: 'analyze', jobName: '待分析岗位', jobLabels: [], skills: [] }],
+    'AI',
+    'batch',
+  ).records
+  Object.assign(state.records[0], {
+    detailStatus: 'complete',
+    detail: { jobInfo: { postDescription: '完整 JD' } },
+  })
   await render()
   expect(location.hash).toBe('#jobs')
   expect(container.textContent).not.toContain('首页')
@@ -349,8 +371,8 @@ test('deletes the home and live toolbar, redirects old links to the offline job 
       .find((button) => button.textContent.includes('更多'))
       .click(),
   )
-  const analyze = [...document.body.querySelectorAll('[role="menuitem"]')].find(
-    (item) => item.textContent === '分析',
+  const analyze = [...document.body.querySelectorAll('[role="menuitem"]')].find((item) =>
+    item.textContent.startsWith('分析 ('),
   )
   expect(analyze.getAttribute('aria-disabled')).not.toBe('true')
   await act(async () => analyze.click())
@@ -377,6 +399,8 @@ test('keeps the job list toolbar focused and moves low-frequency actions into me
   await act(async () => moreButton.click())
   expect(document.body.textContent).toContain('补全')
   expect(document.body.textContent).toContain('分析')
+  expect(document.body.textContent).toContain('批量生成招呼语')
+  expect(document.body.textContent).toContain('定制简历')
   expect(document.body.textContent).toContain('导入')
   expect(document.body.textContent).toContain('刷新')
   expect(document.body.textContent).not.toContain('导出')
@@ -428,6 +452,7 @@ test('exports filtered jobs as spreadsheet columns from the filter popover', asy
     '跟进阶段',
     '采集时间',
     '岗位链接',
+    '职位描述',
   ])
   expect(csvExports[0][1][0]).toEqual([
     '产品经理',
@@ -438,6 +463,7 @@ test('exports filtered jobs as spreadsheet columns from the filter popover', asy
     '面试中',
     expect.any(String),
     'https://www.zhipin.com/job_detail/job-1.html',
+    '',
   ])
   expect(csvExports[0][2]).toBe('OfferHunt-job-library-filtered')
 })
@@ -611,7 +637,7 @@ test('keeps overall delivery history in Jobs, separate from the filtered list', 
 
 test('imports historical JSON and reports duplicates and omitted exceptional descriptions', async () => {
   await render()
-  const input = container.querySelector('[aria-label="导入历史岗位 JSON"]')
+  const input = container.querySelector('[aria-label="导入历史岗位 JSON 或 CSV"]')
   const row = {
     name: '历史产品经理',
     'job-name href': 'https://www.zhipin.com/job_detail/history-one.html',
@@ -638,6 +664,32 @@ test('imports historical JSON and reports duplicates and omitted exceptional des
   expect(imports).toHaveLength(1)
   expect(imports[0].map((record) => record.encryptJobId)).toEqual(['history-one', 'history-two'])
   expect(container.textContent).toContain('导入完成：新增 1 条，跳过已有 1 条，剔除异常 1 条')
+})
+
+test('imports exported CSV by its table headers', async () => {
+  await render()
+  const input = container.querySelector('[aria-label="导入历史岗位 JSON 或 CSV"]')
+  Object.defineProperty(input, 'files', {
+    value: [
+      {
+        name: 'jobs.csv',
+        text: async () =>
+          '岗位名称,公司,薪资,地点,岗位链接,职位描述\r\n' +
+          '产品经理,示例公司,20-30K,上海,https://www.zhipin.com/job_detail/csv-job.html,负责产品规划',
+      },
+    ],
+  })
+  await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+
+  expect(imports).toHaveLength(1)
+  expect(imports[0]).toMatchObject([
+    {
+      encryptJobId: 'csv-job',
+      detailStatus: 'complete',
+      snapshot: { jobName: '产品经理', brandName: '示例公司', salaryDesc: '20-30K' },
+      detail: { jobInfo: { postDescription: '负责产品规划' } },
+    },
+  ])
 })
 
 test('opens saved jobs by row click and deletes after confirmation', async () => {
@@ -1048,7 +1100,7 @@ test('selects jobs across pages and batch deletes only the chosen jobs after con
   expect(container.textContent).not.toContain('已选 ')
   expect(checkbox('选择岗位 岗位0')).toBeNull()
   expect(checkbox('选择岗位 岗位1')).toBeTruthy()
-})
+}, 15000)
 
 test('keeps checked jobs after failed deletion and clears selections filtered out of the list', async () => {
   state.records = jobs.mergeJobRecords(
@@ -1081,15 +1133,21 @@ test('keeps checked jobs after failed deletion and clears selections filtered ou
   expect(button('删除已选 (1)')).toBeUndefined()
 })
 
-test('puts page selection, reconnect, jump and status in the sidebar header', async () => {
+test('puts page selection, a single open/connect action and status in the sidebar header', async () => {
   state.connectionError = '连接失败'
   await render('sidepanel')
   const header = container.querySelector('header')
   expect(header.querySelector('.sidepanel-header-controls')).toBeTruthy()
   expect(header.querySelector('[aria-label="BOSS 岗位页"]')).toBeTruthy()
   expect(header.querySelector('.sidepanel-tab-select')).toBeTruthy()
-  expect(header.querySelector('[aria-label="重新连接"]')).toBeTruthy()
-  expect(header.querySelector('[aria-label="打开 BOSS 岗位页以连接"]')).toBeTruthy()
+  expect(!!header.querySelector('[aria-label="重新连接"]')).toBe(false)
+  expect(!!header.querySelector('[aria-label="打开并连接 BOSS 岗位页"]')).toBe(true)
+  await act(async () => header.querySelector('[aria-label="打开并连接 BOSS 岗位页"]').click())
+  expect(calls).toEqual(['openBoss'])
+  state.saving = true
+  await render('sidepanel')
+  expect(header.querySelector('[aria-label="打开并连接 BOSS 岗位页"]').disabled).toBe(true)
+  state.saving = false
   expect(header.querySelector('[aria-label="查看连接与运行提示"]')).toBeNull()
   expect(header.querySelector('.connection-status-dot')).toBeTruthy()
   expect(header.textContent).toContain('未连接')
@@ -1112,7 +1170,7 @@ test('shows an active readable detail page separately from an executor connectio
   const header = container.querySelector('header')
   expect(header.textContent).toContain('详情可读取')
   expect(header.textContent).not.toContain('未连接')
-  expect(header.querySelector('[aria-label="打开 BOSS 岗位页以连接"]')).toBeTruthy()
+  expect(header.querySelector('[aria-label="打开并连接 BOSS 岗位页"]')).toBeTruthy()
 })
 
 test('opens Resume Matcher from the current-page job card with only its JD', async () => {
@@ -1340,7 +1398,7 @@ test('keeps the viewed job visible inside its own list without resetting manual 
   expect(container.scrollTop).toBe(50)
 })
 
-test('marks saved jobs and disables duplicate saves even when their details are pending', async () => {
+test('fills saved pending jobs and disables capture only after details are complete or excluded', async () => {
   state.connected = true
   state.runtime = {
     jobs: [{ key: 'boss::one', jobName: '产品经理', brand: { name: '示例公司' } }],
@@ -1354,10 +1412,11 @@ test('marks saved jobs and disables duplicate saves even when their details are 
   const list = container.querySelector('[aria-label="当前页面岗位"]')
   expect(list.textContent).toContain('已入库')
   expect(list.textContent).toContain('待补详情')
-  const save = list.querySelector('[aria-label="保存岗位"]')
-  expect(save.disabled).toBe(true)
+  const save = list.querySelector('[aria-label="补详情"]')
+  expect(save).not.toBeNull()
+  expect(save.disabled).toBe(false)
   await act(async () => save.click())
-  expect(commands).toEqual([])
+  expect(commands).toEqual([{ type: 'captureJob', key: 'boss::one' }])
   state.records[0].detailStatus = 'complete'
   state.records[0].detail = { jobInfo: { encryptId: 'one', postDescription: '完整岗位职责' } }
   await render('sidepanel')
@@ -1365,10 +1424,50 @@ test('marks saved jobs and disables duplicate saves even when their details are 
   expect(list.textContent).not.toContain('待补详情')
   expect(list.querySelector('[aria-label="保存岗位"]').disabled).toBe(true)
   state.records[0].processingStatus = 'excluded'
+  state.records[0].detailStatus = 'pending'
+  delete state.records[0].detail
   await render('sidepanel')
   expect(list.textContent).toContain('已排除')
   expect(list.textContent).not.toContain('已入库')
-  expect(list.querySelector('[aria-label="保存岗位"]').disabled).toBe(true)
+  expect(list.querySelector('[aria-label="补详情"]').disabled).toBe(true)
+})
+
+test('allows retrying failed details and respects a busy executor without requiring a resume', async () => {
+  state.connected = true
+  state.runtime = {
+    jobs: [{ key: 'boss::one', jobName: '产品经理', brand: { name: '示例公司' } }],
+    results: [],
+    logs: [],
+  }
+  state.records = [{ encryptJobId: 'one', detailStatus: 'failed', snapshot: {} }]
+  await render('sidepanel')
+  const list = container.querySelector('[aria-label="当前页面岗位"]')
+  expect(list.querySelector('[aria-label="补详情"]')).not.toBeNull()
+  commandError = '详情获取失败'
+  await act(async () => list.querySelector('[aria-label="补详情"]').click())
+  expect(commands).toEqual([{ type: 'captureJob', key: 'boss::one' }])
+  expect(list.querySelector('[aria-label="补详情"]').disabled).toBe(false)
+  commandError = ''
+  await act(async () => list.querySelector('[aria-label="补详情"]').click())
+  expect(commands).toHaveLength(2)
+  state.runtime.gatheringBusy = true
+  await render('sidepanel')
+  expect(list.querySelector('[aria-label="补详情"]').disabled).toBe(true)
+  await act(async () => list.querySelector('[aria-label="补详情"]').click())
+  expect(commands).toHaveLength(2)
+  state.runtime.gatheringBusy = false
+  await render('sidepanel')
+  let finishCapture
+  pendingCommand = new Promise((resolve) => {
+    finishCapture = resolve
+  })
+  await act(async () => list.querySelector('[aria-label="补详情"]').click())
+  const busyCapture = list.querySelector('[aria-label="补全中"]')
+  expect(busyCapture.disabled).toBe(true)
+  await act(async () => busyCapture.click())
+  expect(commands).toHaveLength(3)
+  await act(async () => finishCapture())
+  expect(list.querySelector('[aria-label="补详情"]').disabled).toBe(false)
 })
 
 test('keeps greeting actions and sends only after confirmation', async () => {

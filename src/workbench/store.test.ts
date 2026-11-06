@@ -33,10 +33,15 @@ const calls = []
 const navigationCalls = []
 const panelCalls = []
 const createdTabs = []
+const reloadedTabs = []
+let reloadError = ''
 let panelError = ''
 mock.module('#imports', () => ({
   browser: {
-    runtime: { getURL: (path) => `chrome-extension://test${path}` },
+    runtime: {
+      getURL: (path) => `chrome-extension://test${path}`,
+      onMessage: event('message'),
+    },
     sidePanel: {
       open: async (options) => {
         if (panelError) throw new Error(panelError)
@@ -51,7 +56,14 @@ mock.module('#imports', () => ({
     tabs: {
       getCurrent: async () => ({ id: 21, windowId: 7 }),
       query: async () => tabs,
-      create: async (options) => createdTabs.push(options),
+      create: async (options) => {
+        createdTabs.push(options)
+        return { id: 3, windowId: 7 }
+      },
+      reload: async (id) => {
+        if (reloadError) throw new Error(reloadError)
+        reloadedTabs.push(id)
+      },
       update: async (id, options) => {
         navigationCalls.push(['tab', id, options])
         return { id, windowId: 7 }
@@ -236,6 +248,183 @@ beforeAll(async () => {
 afterAll(() => interval.mockRestore())
 
 describe('workbench synchronization and mutation boundary', () => {
+  test('accepts pushed executor updates only from the selected BOSS tab', () => {
+    const listener = events.message
+    const snapshot = { ready: true, error: '', logs: [{ title: '推送日志' }] }
+    listener({ type: 'boss-helper:executor-update', snapshot }, { tab: { id: 2 } })
+    expect(store.getWorkbenchState().runtime?.logs).not.toEqual(snapshot.logs)
+    listener({ type: 'boss-helper:executor-update', snapshot }, { tab: { id: 1 } })
+    expect(store.getWorkbenchState().runtime?.logs).toEqual(snapshot.logs)
+  })
+
+  test('opens a freshly checked connected BOSS page without interrupting its running task', async () => {
+    const originalSend = send
+    navigationCalls.length = 0
+    reloadedTabs.length = 0
+    calls.length = 0
+    try {
+      send = async () => ({ ok: true, data: { ready: true, error: '', gatheringBusy: true } })
+      await store.openBoss()
+      expect(navigationCalls).toEqual([
+        ['tab', 1, { active: true }],
+        ['window', 7, { focused: true }],
+      ])
+      expect(reloadedTabs).toEqual([])
+      expect(calls.every(([, command]) => command.type === 'snapshot')).toBe(true)
+      expect(store.getWorkbenchState().connected).toBe(true)
+    } finally {
+      send = originalSend
+      await store.refreshRuntime()
+    }
+  })
+
+  test('reloads a BOSS page whose content script is missing and waits for a real connection', async () => {
+    const originalSend = send
+    navigationCalls.length = 0
+    reloadedTabs.length = 0
+    try {
+      send = async () => {
+        throw new Error('Receiving end does not exist')
+      }
+      await store.openBoss()
+      expect(navigationCalls).toEqual([
+        ['tab', 1, { active: true }],
+        ['window', 7, { focused: true }],
+      ])
+      expect(reloadedTabs).toEqual([1])
+      expect(store.getWorkbenchState().connected).toBe(false)
+      send = originalSend
+      await events.updated(1, { status: 'complete' }, tabs[0])
+      await settle()
+      expect(store.getWorkbenchState().connected).toBe(true)
+    } finally {
+      send = originalSend
+      await store.refreshRuntime()
+    }
+  })
+
+  test.each([true, false])(
+    'tries to initialize a responding executor before reloading: recovery=%s',
+    async (recovers) => {
+      const originalSend = send
+      let ready = false
+      reloadedTabs.length = 0
+      calls.length = 0
+      try {
+        send = async (_id, request) => {
+          if (request.command.type === 'reloadSettings') {
+            if (!recovers) throw new Error('Executor initialization failed')
+            ready = true
+            return { ok: true }
+          }
+          return { ok: true, data: { ready, error: ready ? '' : 'not ready' } }
+        }
+        await store.openBoss()
+        expect(calls.filter(([, command]) => command.type === 'reloadSettings')).toHaveLength(1)
+        expect(reloadedTabs).toEqual(recovers ? [] : [1])
+        expect(store.getWorkbenchState().connected).toBe(recovers)
+      } finally {
+        send = originalSend
+        await store.refreshRuntime()
+      }
+    },
+  )
+
+  test('discovers closed BOSS tabs again and creates a page when none remain', async () => {
+    const originalTabs = [...tabs]
+    createdTabs.length = 0
+    reloadedTabs.length = 0
+    navigationCalls.length = 0
+    try {
+      tabs.length = 0
+      await store.openBoss()
+      expect(createdTabs).toEqual([{ url: 'https://www.zhipin.com/web/geek/jobs' }])
+      expect(navigationCalls).toEqual([['window', 7, { focused: true }]])
+      expect(reloadedTabs).toEqual([])
+      expect(store.getWorkbenchState().connected).toBe(false)
+    } finally {
+      tabs.push(...originalTabs)
+      await store.refreshTabs()
+    }
+  })
+
+  test('waits for an existing runtime poll before deciding whether to refresh the page', async () => {
+    const originalSend = send
+    let release
+    reloadedTabs.length = 0
+    try {
+      send = () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+      const polling = store.refreshRuntime()
+      send = originalSend
+      let opened = false
+      const opening = store.openBoss().then(() => {
+        opened = true
+      })
+      await settle()
+      expect(opened).toBe(false)
+      expect(reloadedTabs).toEqual([])
+      release({ ok: true, data: { ready: true, error: '' } })
+      await polling
+      await opening
+      expect(reloadedTabs).toEqual([])
+    } finally {
+      send = originalSend
+      release?.({ ok: true, data: { ready: true, error: '' } })
+      await store.refreshRuntime()
+    }
+  })
+
+  test('surfaces a failed page reload instead of claiming it is reconnecting', async () => {
+    const originalSend = send
+    try {
+      send = async () => {
+        throw new Error('Disconnected')
+      }
+      reloadError = 'Cannot reload tab'
+      await expect(store.openBoss()).rejects.toThrow('Cannot reload tab')
+      expect(store.getWorkbenchState().connected).toBe(false)
+      expect(store.getWorkbenchState().connectionError).toContain('Cannot reload tab')
+    } finally {
+      send = originalSend
+      reloadError = ''
+      await store.refreshRuntime()
+    }
+  })
+
+  test('falls back to a page reload when executor initialization stops responding', async () => {
+    const originalSend = send
+    let timeout
+    let release
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation((callback) => {
+      timeout = callback
+      return 0
+    })
+    reloadedTabs.length = 0
+    try {
+      send = async (_id, request) =>
+        request.command.type === 'reloadSettings'
+          ? new Promise((resolve) => {
+              release = resolve
+            })
+          : { ok: true, data: { ready: false, error: 'not ready' } }
+      const opening = store.openBoss()
+      await settle()
+      expect(typeof release).toBe('function')
+      timeout()
+      await opening
+      expect(reloadedTabs).toEqual([1])
+    } finally {
+      timer.mockRestore()
+      send = originalSend
+      release?.({ ok: true })
+      await settle()
+      await store.refreshRuntime()
+    }
+  })
+
   test.each([true, false])(
     'deletes a plan and its binding while preserving the active plan when possible: active=%s',
     async (active) => {
@@ -494,7 +683,11 @@ describe('workbench synchronization and mutation boundary', () => {
     const original = [...tabs]
     const savedModels = stored.get('conf-model')
     const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const savedConfig = stored.get('config')
+    const originalProfile = config.jobProfile
     try {
+      config.jobProfile = '5-10 years product management experience'
+      stored.set('config', { ...jsonClone(config), jobProfile: config.jobProfile })
       tabs.length = 0
       await store.refreshTabs()
       stored.set('conf-model', [
@@ -521,12 +714,12 @@ describe('workbench synchronization and mutation boundary', () => {
       await store.perform(() => store.startSavedAnalysis({ limit: 1 }))
       for (let i = 0; i < 100 && store.getWorkbenchState().analysisBusy; i++) await settle()
       expect(calls).toEqual([])
-      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings'])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering'])
       expect(modelCalls.every((call) => call.jd === '已采集的完整 JD')).toBe(true)
       expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0]).toMatchObject({
         analysisStatus: 'ready',
-        finalGreeting: '你好，期待沟通。',
       })
+      expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBeUndefined()
       expect(store.getWorkbenchState().analysisRun).toMatchObject({
         status: 'completed',
         completed: 1,
@@ -535,7 +728,10 @@ describe('workbench synchronization and mutation boundary', () => {
       tabs.splice(0, tabs.length, ...original)
       stored.set('conf-model', savedModels ?? [])
       stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+      if (savedConfig === undefined) stored.delete('config')
+      else stored.set('config', savedConfig)
       resumes.currentResume.value = null
+      config.jobProfile = originalProfile
       await store.refreshTabs()
     }
   })
@@ -699,7 +895,9 @@ describe('workbench synchronization and mutation boundary', () => {
     const originalTabs = [...tabs]
     const savedModels = stored.get('conf-model')
     const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const originalProfile = config.jobProfile
     try {
+      config.jobProfile = '5-10 years product management experience'
       tabs.splice(0, tabs.length, {
         id: 10,
         title: '详情岗位',
@@ -739,7 +937,7 @@ describe('workbench synchronization and mutation boundary', () => {
       await store.command({ type: 'generateGreeting', jobId: 'detail-job' })
 
       expect(calls).toEqual([])
-      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings', 'greetings'])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings'])
       expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0].finalGreeting).toBe('你好，期待沟通。')
       await expect(
         store.command({ type: 'sendGreeting', jobId: 'detail-job', greeting: '你好' }),
@@ -749,6 +947,7 @@ describe('workbench synchronization and mutation boundary', () => {
       stored.set('conf-model', savedModels ?? [])
       stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
       resumes.currentResume.value = null
+      config.jobProfile = originalProfile
       await store.refreshTabs()
     }
   })
@@ -805,6 +1004,75 @@ describe('workbench synchronization and mutation boundary', () => {
     }
   })
 
+  test.each(['pending', 'failed'])(
+    'keeps saving a stored %s detail on its own page while the list executor is connected',
+    async (detailStatus) => {
+      const originalTabs = [...tabs]
+      const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+      const originalRead = readDetail
+      const originalSend = send
+      const detail = {
+        jobInfo: {
+          encryptId: 'detail-pending',
+          postDescription: '负责产品规划和需求分析的完整岗位职责。',
+        },
+      }
+      try {
+        stored.set(
+          JOB_LIBRARY_STORAGE_KEY,
+          mergeJobRecords(
+            [],
+            [{ encryptJobId: 'detail-pending', jobName: '待补岗位' }],
+            '产品经理',
+            'test',
+          ).records.map((record) => ({ ...record, detailStatus })),
+        )
+        await store.refreshLibrary()
+        tabs.splice(
+          0,
+          tabs.length,
+          { id: 1, url: 'https://www.zhipin.com/web/geek/jobs', active: false },
+          {
+            id: 10,
+            url: 'https://www.zhipin.com/job_detail/detail-pending.html',
+            active: true,
+          },
+        )
+        readDetail = async () => ({ status: 'pending', error: '等待正文' })
+        send = async (_id, request) =>
+          request.command.type === 'captureJob'
+            ? { ok: false, error: '未找到当前岗位数据' }
+            : originalSend(_id, request)
+        await store.refreshTabs()
+        expect(store.getWorkbenchState().connected).toBe(true)
+        expect(store.getWorkbenchState().activeDetail).toBeNull()
+        calls.length = 0
+        await expect(
+          store.command({ type: 'captureJob', key: 'boss::detail-pending' }),
+        ).rejects.toThrow('岗位详情尚未完整加载，请稍后重试')
+        expect(calls).toEqual([])
+        expect(stored.get(JOB_LIBRARY_STORAGE_KEY)[0].detailStatus).toBe(detailStatus)
+
+        readDetail = async () => ({ status: 'ready', jobId: 'detail-pending', detail })
+        await store.command({ type: 'captureJob', key: 'boss::detail-pending' })
+        expect(calls).toEqual([])
+        expect(stored.get(JOB_LIBRARY_STORAGE_KEY)).toHaveLength(1)
+        expect(store.getWorkbenchState().records[0]).toMatchObject({
+          encryptJobId: 'detail-pending',
+          detailStatus: 'complete',
+          detail,
+        })
+      } finally {
+        send = originalSend
+        readDetail = originalRead
+        tabs.splice(0, tabs.length, ...originalTabs)
+        stored.set(JOB_LIBRARY_STORAGE_KEY, savedLibrary ?? [])
+        await store.refreshLibrary()
+        await store.refreshTabs()
+      }
+    },
+  )
+
   test('rejects mismatched previews and drops a late preview after the active tab changes', async () => {
     const originalTabs = [...tabs]
     const originalRead = readDetail
@@ -849,8 +1117,10 @@ describe('workbench synchronization and mutation boundary', () => {
     const originalTabs = [...tabs]
     const originalRead = readDetail
     const savedLibrary = stored.get(JOB_LIBRARY_STORAGE_KEY)
+    const originalProfile = config.jobProfile
     const jd = '负责产品规划、需求分析和项目交付的完整职责描述。'
     try {
+      config.jobProfile = '5-10 years product management experience'
       stored.set(JOB_LIBRARY_STORAGE_KEY, [])
       await store.refreshLibrary()
       tabs.splice(0, tabs.length, {
@@ -870,7 +1140,7 @@ describe('workbench synchronization and mutation boundary', () => {
       await store.command({ type: 'analyzeOne', jobId: 'preview' })
       await store.command({ type: 'generateGreeting', jobId: 'preview' })
       expect(calls).toEqual([])
-      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings', 'greetings'])
+      expect(modelCalls.map((call) => call.role)).toEqual(['filtering', 'greetings'])
       expect(modelCalls.every((call) => call.jd === jd)).toBe(true)
       expect(store.getWorkbenchState().records[0]).toMatchObject({
         encryptJobId: 'preview',
@@ -878,6 +1148,7 @@ describe('workbench synchronization and mutation boundary', () => {
         finalGreeting: '你好，期待沟通。',
       })
     } finally {
+      config.jobProfile = originalProfile
       resumes.currentResume.value = null
       readDetail = originalRead
       tabs.splice(0, tabs.length, ...originalTabs)
@@ -915,7 +1186,9 @@ describe('workbench synchronization and mutation boundary', () => {
         ['openJob', 2, 'boss::a'],
       ])
       navigationCalls.length = 0
-      await store.command({ type: 'captureJob', key: 'boss::a' })
+      await expect(store.command({ type: 'captureJob', key: 'boss::a' })).rejects.toThrow(
+        '岗位详情尚未完整加载，请稍后重试',
+      )
       expect(navigationCalls).toEqual([])
     } finally {
       send = originalSend

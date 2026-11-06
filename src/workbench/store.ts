@@ -45,6 +45,7 @@ import type { BossZpDetailData } from '../entrypoints/boss/types'
 import { jsonClone } from '../utils/deepmerge'
 import { diagnostic } from '../utils/diagnostics'
 import { requestExecutor } from './client'
+import { EXECUTOR_UPDATE_MESSAGE_TYPE } from './protocol'
 import type { ExecutorCommand, ExecutorSnapshot } from './protocol'
 import { validateConfig, validateModels } from './settingsValidation'
 import { isStatistics } from './statistics'
@@ -198,7 +199,7 @@ export async function stopSavedAnalysis() {
 }
 
 export async function updateSavedJob(
-  mutation: Extract<JobLibraryMutation, { type: 'funnel' | 'processing' }>,
+  mutation: Extract<JobLibraryMutation, { type: 'funnel' | 'processing' | 'review' }>,
 ) {
   await counter.updateJobLibrary(mutation)
   await refreshLibrary()
@@ -334,7 +335,7 @@ export async function saveKeywords(input: string) {
   await refreshKeywords()
 }
 
-let polling = false
+let polling: Promise<void> | undefined
 let chatJobKey: string | undefined
 let activeDetailTabId: number | null = null
 async function refreshActiveDetail() {
@@ -358,7 +359,13 @@ async function refreshActiveDetail() {
 
 export async function refreshRuntime() {
   if (polling) return
-  polling = true
+  polling = readRuntime().finally(() => {
+    polling = undefined
+  })
+  await polling
+}
+
+async function readRuntime() {
   const target = state.tabId
   const selectedChat = chatJobKey
   try {
@@ -400,8 +407,6 @@ export async function refreshRuntime() {
   } catch (error) {
     if (target === state.tabId)
       update({ runtime: null, connected: false, connectionError: message(error) })
-  } finally {
-    polling = false
   }
 }
 
@@ -433,11 +438,6 @@ export async function refreshTabs() {
   await refreshRuntime()
 }
 
-export async function reconnectExecutor() {
-  await refreshTabs()
-  if (!state.connected) await command({ type: 'reloadSettings' })
-}
-
 export function selectTab(tabId: number) {
   if (!state.tabs.some((tab) => tab.id === tabId)) return
   chatJobKey = undefined
@@ -454,11 +454,10 @@ async function saveActiveDetailJob(jobId: string) {
   assertJobLibrary(records)
   const record = records.find((item) => item.encryptJobId === jobId)
   if (record && (isJobExcluded(record) || hasCompleteJobDetail(record))) return
+  if (!state.activeDetail) await refreshActiveDetail()
   const detail = state.activeDetail
-  if (!detail || detail.jobInfo.encryptId !== jobId) {
-    if (!record) throw new Error('岗位详情尚未完整加载，请稍后重试')
-    return
-  }
+  if (!detail || detail.jobInfo.encryptId !== jobId)
+    throw new Error('岗位详情尚未完整加载，请稍后重试')
   assertCompleteJobDetail(detail, jobId)
   if (!record)
     await counter.updateJobLibrary({
@@ -479,12 +478,7 @@ async function saveActiveDetailJob(jobId: string) {
 export async function command(command: ExecutorCommand) {
   if (state.tabId === null) await refreshTabs()
   const detailJobId = state.activeDetailJobId
-  if (
-    detailJobId &&
-    state.activeDetail &&
-    command.type === 'captureJob' &&
-    command.key === `boss::${detailJobId}`
-  )
+  if (detailJobId && command.type === 'captureJob' && command.key === `boss::${detailJobId}`)
     return saveActiveDetailJob(detailJobId)
   if (
     detailJobId &&
@@ -673,10 +667,41 @@ export async function openTaskPanel() {
   }
 }
 export async function openBoss() {
-  const tab = state.tabs.find((tab) => tab.id === state.tabId)
-  if (tab) {
-    await browser.tabs.update(tab.id, { active: true })
-  } else await browser.tabs.create({ url: 'https://www.zhipin.com/web/geek/jobs' })
+  await refreshTabs()
+  const tabId = state.tabId
+  const tab =
+    tabId === null
+      ? await browser.tabs.create({ url: 'https://www.zhipin.com/web/geek/jobs' })
+      : await browser.tabs.update(tabId, { active: true })
+  if (tab) await browser.windows.update(tab.windowId, { focused: true })
+  if (tabId === null) return
+  // Wait for any older poll before checking the activated page again.
+  await polling
+  await refreshRuntime()
+  if (state.tabId !== tabId || state.connected) return
+  if (state.runtime) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        command({ type: 'reloadSettings' }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('执行器重连超时')), 5000)
+        }),
+      ])
+    } catch (error) {
+      diagnostic('executor.reconnect', { error, context: { tabId } })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (state.tabId !== tabId || state.connected) return
+  }
+  update({ runtime: null, connected: false, connectionError: '正在刷新 BOSS 岗位页，请稍候' })
+  try {
+    await browser.tabs.reload(tabId)
+  } catch (error) {
+    update({ connectionError: message(error) })
+    throw error
+  }
 }
 
 let settingsChanged = false
@@ -724,6 +749,17 @@ export async function initializeWorkbench() {
     update({ error: message(error) })
   }
   update({ loading: false })
+  browser.runtime.onMessage.addListener((message, sender) => {
+    if (
+      message?.type === EXECUTOR_UPDATE_MESSAGE_TYPE &&
+      sender.tab?.id === state.tabId &&
+      message.snapshot &&
+      typeof message.snapshot.ready === 'boolean'
+    ) {
+      const runtime = message.snapshot as ExecutorSnapshot
+      update({ runtime, connected: runtime.ready, connectionError: runtime.error })
+    }
+  })
   browser.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes[HISTORY_DETAIL_STORAGE_KEY.replace('local:', '')])
       void refreshHistoryDetails()
@@ -768,9 +804,6 @@ export async function initializeWorkbench() {
   browser.tabs.onActivated.addListener(() => {
     void refreshTabs()
   })
-  setInterval(() => {
-    void refreshRuntime()
-  }, 1500)
 }
 
 async function diagnoseSettingsStorage(legacyResumeText: unknown) {

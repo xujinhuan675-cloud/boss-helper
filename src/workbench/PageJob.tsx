@@ -42,6 +42,7 @@ export function PageJob({
   const state = useWorkbench()
   const jobId = job.key.slice('boss::'.length)
   const record = state.records.find((item) => item.encryptJobId === jobId)
+  const needsDetail = !!record && !hasCompleteJobDetail(record)
   const action = state.runtime?.jobActions?.[jobId]
   const viewed = viewedOverride ?? state.runtime?.viewedJobKey === job.key
   const rowRef = useRef<HTMLLIElement>(null)
@@ -57,11 +58,12 @@ export function PageJob({
   }, [viewed])
   const [expanded, setExpanded] = useState<'analysis' | 'greeting' | 'tailor' | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [capturing, setCapturing] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [sendConfirm, setSendConfirm] = useState(false)
   const running = submitting || action?.status === 'running'
-  const locked = disabled || running
+  const locked = disabled || running || capturing
   const protectedJob =
     record?.processingStatus === 'excluded' ||
     (!!record && (record.reviewStatus !== 'pending' || record.sendStatus !== 'pending'))
@@ -135,7 +137,7 @@ export function PageJob({
             className={`shrink-0 rounded px-1.5 py-0.5 text-right text-xs ${record.processingStatus === 'excluded' ? 'bg-default text-muted' : 'bg-success/10 text-success'}`}
           >
             {record.processingStatus === 'excluded' ? '已排除' : '已入库'}
-            {record.processingStatus !== 'excluded' && !hasCompleteJobDetail(record) && (
+            {record.processingStatus !== 'excluded' && needsDetail && (
               <span className="block">待补详情</span>
             )}
           </span>
@@ -166,13 +168,37 @@ export function PageJob({
             <Tooltip.Content>打开岗位详情页</Tooltip.Content>
           </Tooltip>
           <IconButton
-            label="保存岗位"
-            disabled={locked || !!record}
-            onPress={() => {
-              void act(() => command({ type: 'captureJob', key: job.key }), '已保存岗位')
+            label={
+              capturing
+                ? '采集中'
+                : state.config.paddleOcr.enabled && !detail
+                  ? 'OCR采集并保存'
+                  : needsDetail
+                    ? '补详情'
+                    : '保存岗位'
+            }
+            disabled={
+              locked || record?.processingStatus === 'excluded' || (!!record && !needsDetail)
+            }
+            onPress={async () => {
+              setCapturing(true)
+              try {
+                await act(
+                  () => command({ type: 'captureJob', key: job.key }),
+                  needsDetail ? '岗位详情已补全' : '已保存岗位',
+                )
+              } finally {
+                setCapturing(false)
+              }
             }}
           >
-            <Save size={16} />
+            {capturing ? (
+              <Spinner size="sm" />
+            ) : needsDetail ? (
+              <RefreshCw size={16} />
+            ) : (
+              <Save size={16} />
+            )}
           </IconButton>
           <IconButton
             label="分析岗位"

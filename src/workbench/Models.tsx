@@ -28,7 +28,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { defaultFormData } from '@/composables/conf/info'
 import { MATCH_SCORING_VERSION, validateMatchThreshold } from '@/composables/useApplying/scoring'
-import { isCompleteModel } from '@/composables/useModel'
+import { isCompleteModel, selectModel } from '@/composables/useModel'
 import type { ModelConf } from '@/composables/useModel'
 import { selectAvailableModel, testModelConnection } from '@/composables/useModel/connection'
 import type { ModelConnectionResult } from '@/composables/useModel/connection'
@@ -102,7 +102,8 @@ export function Models() {
       runtime?.keywordRotationSaving ||
       runtime?.workflow?.status === 'running'
     )
-  const defaultKey = state.models.find(isCompleteModel)?.key ?? state.models[0]?.key
+  const defaultKey = selectModel(state.models)?.key
+  const filteringKey = selectModel(state.models, 'filtering')?.key
   const selectedModel = editor?.data?.model
   const modelIds =
     selectedModel && !availableModels.includes(selectedModel)
@@ -330,6 +331,11 @@ export function Models() {
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="break-words">{model.name || '未命名模型'}</span>
                           {model.key === defaultKey && <Chip size="sm">默认</Chip>}
+                          {model.data?.decisions && (
+                            <Chip size="sm">
+                              岗位匹配{model.key === filteringKey ? '（当前）' : ''}
+                            </Chip>
+                          )}
                           {!isCompleteModel(model) && (
                             <Chip size="sm" color="warning">
                               待完善
@@ -370,7 +376,10 @@ export function Models() {
                           <IconButton
                             label={`将 ${model.name} 设为默认`}
                             disabled={
-                              busy || testing || model.key === defaultKey || !isCompleteModel(model)
+                              busy ||
+                              testing ||
+                              model.key === (model.data?.decisions ? filteringKey : defaultKey) ||
+                              !isCompleteModel(model)
                             }
                             onPress={() => {
                               void act(() => selectDefaultModel(model.key), '默认模型已更新')
@@ -425,26 +434,59 @@ export function Models() {
                     <Label>API Key</Label>
                     <Input type="password" autoComplete="off" />
                   </TextField>
-                  <SelectField
-                    label="已获取的模型"
-                    value={editor.data?.model ?? ''}
-                    disabled={busy || testing || !modelIds.length}
-                    options={modelIds.map((id) => ({ value: id, label: id }))}
-                    onChange={(model) => changeData({ model })}
-                  />
                   <Switch
                     className="switch-row"
-                    isSelected={editor.data?.responses ?? false}
+                    isSelected={editor.data?.decisions ?? false}
                     isDisabled={busy || testing}
-                    onChange={(responses) => changeData({ responses })}
+                    onChange={(decisions) =>
+                      changeData({
+                        decisions,
+                        ...(decisions && !editor.data?.base_url
+                          ? { base_url: 'https://openrouter.ai/api/v1' }
+                          : {}),
+                      })
+                    }
                   >
                     <Switch.Content>
                       <Switch.Control>
                         <Switch.Thumb />
                       </Switch.Control>
-                      <Label>使用 Responses API</Label>
+                      <Label>Jev Decisions API（岗位匹配专用）</Label>
                     </Switch.Content>
                   </Switch>
+                  {editor.data?.decisions ? (
+                    <TextField
+                      value={editor.data.model ?? ''}
+                      isDisabled={busy || testing}
+                      onChange={(model) => changeData({ model })}
+                    >
+                      <Label>Jev 模型 ID</Label>
+                      <Input placeholder="typesafe/jev-…" />
+                    </TextField>
+                  ) : (
+                    <SelectField
+                      label="已获取的模型"
+                      value={editor.data?.model ?? ''}
+                      disabled={busy || testing || !modelIds.length}
+                      options={modelIds.map((id) => ({ value: id, label: id }))}
+                      onChange={(model) => changeData({ model })}
+                    />
+                  )}
+                  {!editor.data?.decisions && (
+                    <Switch
+                      className="switch-row"
+                      isSelected={editor.data?.responses ?? false}
+                      isDisabled={busy || testing}
+                      onChange={(responses) => changeData({ responses })}
+                    >
+                      <Switch.Content>
+                        <Switch.Control>
+                          <Switch.Thumb />
+                        </Switch.Control>
+                        <Label>使用 Responses API</Label>
+                      </Switch.Content>
+                    </Switch>
+                  )}
                 </div>
                 {connection && (
                   <Alert status={connection.status === 'connected' ? 'success' : 'warning'}>
@@ -476,16 +518,18 @@ export function Models() {
                     <Plug size={16} />
                     连接测试
                   </Button>
-                  <Button
-                    variant="secondary"
-                    isDisabled={busy || testing}
-                    onPress={() => {
-                      void testConnection(true)
-                    }}
-                  >
-                    <ListRestart size={16} />
-                    获取模型
-                  </Button>
+                  {!editor.data?.decisions && (
+                    <Button
+                      variant="secondary"
+                      isDisabled={busy || testing}
+                      onPress={() => {
+                        void testConnection(true)
+                      }}
+                    >
+                      <ListRestart size={16} />
+                      获取模型
+                    </Button>
+                  )}
                   <Button
                     isDisabled={busy || testing}
                     onPress={() => {
@@ -538,21 +582,23 @@ export function Models() {
                     </Alert>
                   )}
                   <div className="prompt-settings">
-                    <Switch
-                      className="switch-row prompt-enable"
-                      isSelected={value.enable}
-                      isDisabled={disabled || key === 'aiReply'}
-                      onChange={(enable) => changePrompt(key, { enable })}
-                    >
-                      <Switch.Content>
-                        <Switch.Control>
-                          <Switch.Thumb />
-                        </Switch.Control>
-                        <Label>
-                          {key === 'aiReply' ? 'AI 回复（尚未启用）' : `启用${promptLabels[key]}`}
-                        </Label>
-                      </Switch.Content>
-                    </Switch>
+                    {key !== 'aiGreeting' && (
+                      <Switch
+                        className="switch-row prompt-enable"
+                        isSelected={value.enable}
+                        isDisabled={disabled || key === 'aiReply'}
+                        onChange={(enable) => changePrompt(key, { enable })}
+                      >
+                        <Switch.Content>
+                          <Switch.Control>
+                            <Switch.Thumb />
+                          </Switch.Control>
+                          <Label>
+                            {key === 'aiReply' ? 'AI 回复（尚未启用）' : `启用${promptLabels[key]}`}
+                          </Label>
+                        </Switch.Content>
+                      </Switch>
+                    )}
                     {key === 'aiFiltering' && (
                       <NumberField
                         className="prompt-score"
@@ -565,7 +611,7 @@ export function Models() {
                         maxValue={100}
                         step={1}
                       >
-                        <Label>通过分数 / 100</Label>
+                        <Label>历史评分阈值 / 100（快速判断不使用）</Label>
                         <NumberField.Group>
                           <NumberField.DecrementButton />
                           <NumberField.Input />

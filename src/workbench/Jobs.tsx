@@ -35,9 +35,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Key } from 'react'
 import type { SortDescriptor } from 'react-aria-components'
 
+import { MATCH_SCORING_VERSION } from '@/composables/useApplying/scoring'
 import {
   filterJobLibrary,
   FUNNEL_STAGES,
+  getJobReviewStatus,
   getJobFunnelStage,
   isFunnelStage,
   sortJobLibraryByMatch,
@@ -47,12 +49,13 @@ import type {
   DetailStatus,
   FunnelStage,
   ProcessingStatusFilter,
+  ReviewStatus,
 } from '@/entrypoints/boss/jobStore'
 import { exportCsv } from '@/utils/csvExport'
 
 import { getSavedJobData } from '../entrypoints/boss/jobData'
-import { parseHistoricalJobLibrary } from '../entrypoints/boss/jobImport'
-import { ConfirmDialog, IconButton, SelectField, act } from './components'
+import { parseHistoricalJobLibrary, parseJobLibraryCsv } from '../entrypoints/boss/jobImport'
+import { ConfirmDialog, IconButton, MultiSelectField, SelectField, act } from './components'
 import { DeliveryStatistics } from './DeliveryStatistics'
 import { JobAnalysisResult } from './JobAnalysisResult'
 import {
@@ -83,6 +86,10 @@ const stages: Record<FunnelStage, string> = {
   interview: '面试中',
   offer: '已获 Offer',
 }
+// Keep legacy stages readable, but do not offer them for new manual updates.
+const selectableFunnelStages = FUNNEL_STAGES.filter(
+  (value): value is FunnelStage => value !== 'interview' && value !== 'offer',
+)
 const all = { value: 'all', label: '全部' }
 const timestamp = (value: string) => {
   const parsed = Date.parse(value)
@@ -90,6 +97,14 @@ const timestamp = (value: string) => {
 }
 const time = (value: string) =>
   timestamp(value) === null ? '未记录' : new Date(value).toLocaleString('zh-CN', { hour12: false })
+function matchLabel(record: BossJobLibraryRecord) {
+  const analysis = record.analysis
+  if (analysis?.scoringVersion === MATCH_SCORING_VERSION)
+    return analysis.passed === true ? '匹配' : analysis.passed === false ? '不匹配' : '待确认'
+  return typeof analysis?.rating === 'number'
+    ? `${analysis.needsConfirmation ? '暂定 ' : ''}${analysis.rating}/100`
+    : statusNames[record.analysisStatus] || '待分析'
+}
 function monthlySalary(value: string | undefined) {
   // shortcut: 只比较可折算的月薪、年薪，日薪和时薪待有统一工时口径后再支持。
   const match = value
@@ -106,8 +121,7 @@ function monthlySalary(value: string | undefined) {
   return Number.isFinite(salary) && salary > 0 ? salary : null
 }
 function sortJobs(records: BossJobLibraryRecord[], descriptor: SortDescriptor) {
-  if (descriptor.column === 'match' && descriptor.direction === 'descending')
-    return sortJobLibraryByMatch(records)
+  if (descriptor.column === 'match') return sortJobLibraryByMatch(records, descriptor.direction)
   const getValue = (record: BossJobLibraryRecord) => {
     if (descriptor.column === 'job') return record.snapshot.jobName || ''
     if (descriptor.column === 'company')
@@ -140,14 +154,12 @@ export function Jobs() {
   const [company, setCompany] = useState('all')
   const [keyword, setKeyword] = useState('all')
   const [detail, setDetail] = useState('all')
-  const [stage, setStage] = useState(() => {
-    const value = new URLSearchParams(location.search).get('stage')
-    return isFunnelStage(value) ? value : 'all'
-  })
+  const [stage, setStage] = useState<string[]>([])
   const [matchedToday, setMatchedToday] = useState(
     () => new URLSearchParams(location.search).get('matched') === 'today',
   )
   const [processing, setProcessing] = useState('active')
+  const [matchStatus, setMatchStatus] = useState<ReviewStatus[]>([])
   const [page, setPage] = useState(1)
   const [selectedId, setSelectedId] = useState('')
   const [detailTab, setDetailTab] = useState('jd')
@@ -159,6 +171,8 @@ export function Jobs() {
   })
   const [deleting, setDeleting] = useState<BossJobLibraryRecord | null>(null)
   const [batchDeleting, setBatchDeleting] = useState(false)
+  const [batchGreetingConfirm, setBatchGreetingConfirm] = useState(false)
+  const [tailorBatchIndex, setTailorBatchIndex] = useState<number | null>(null)
   const [sendConfirm, setSendConfirm] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -171,11 +185,16 @@ export function Jobs() {
           company: company === 'all' ? '' : company,
           sourceKeyword: keyword === 'all' ? '' : keyword,
           detailStatus: detail === 'all' ? '' : (detail as DetailStatus),
-          funnelStage: stage === 'all' ? '' : (stage as FunnelStage),
+          funnelStage: '',
           processingStatus: processing as ProcessingStatusFilter,
+          matchStatus: 'all',
           matchedToday,
         }),
         sortDescriptor,
+      ).filter(
+        (record) =>
+          (!stage.length || stage.includes(getJobFunnelStage(record))) &&
+          (!matchStatus.length || matchStatus.includes(getJobReviewStatus(record))),
       ),
     [
       state.records,
@@ -185,11 +204,15 @@ export function Jobs() {
       detail,
       stage,
       processing,
+      matchStatus,
       matchedToday,
       sortDescriptor,
     ],
   )
-  useEffect(() => setPage(1), [search, company, keyword, detail, stage, processing, matchedToday])
+  useEffect(
+    () => setPage(1),
+    [search, company, keyword, detail, stage, processing, matchStatus, matchedToday],
+  )
   useEffect(() => {
     const ids = new Set(records.map((record) => record.encryptJobId))
     setSelectedIds((current) => {
@@ -204,6 +227,36 @@ export function Jobs() {
   const selectedOnPage = pageIds.filter((id) => selectedIds.has(id)).length
   const allPageSelected = pageIds.length > 0 && selectedOnPage === pageIds.length
   const selected = state.records.find((record) => record.encryptJobId === selectedId)
+  const greetingJobIds = records
+    .filter(
+      (record) =>
+        record.processingStatus !== 'excluded' &&
+        record.detailStatus === 'complete' &&
+        !!record.detail?.jobInfo?.postDescription?.trim() &&
+        !record.finalGreeting?.trim() &&
+        record.reviewStatus === 'pending' &&
+        record.sendStatus === 'pending',
+    )
+    .map((record) => record.encryptJobId)
+  const analysisJobIds = state.records
+    .filter(
+      (record) =>
+        record.processingStatus !== 'excluded' &&
+        record.detailStatus === 'complete' &&
+        !!record.detail?.jobInfo?.postDescription?.trim() &&
+        record.analysisStatus !== 'ready' &&
+        record.reviewStatus === 'pending' &&
+        record.sendStatus === 'pending',
+    )
+    .map((record) => record.encryptJobId)
+  const tailorJobIds = records
+    .filter(
+      (record) =>
+        record.processingStatus !== 'excluded' &&
+        record.detailStatus === 'complete' &&
+        !!record.detail?.jobInfo?.postDescription?.trim(),
+    )
+    .map((record) => record.encryptJobId)
   const selectedJob = selected ? getSavedJobData(selected).jobData : null
   useEffect(() => {
     setDetailTab('jd')
@@ -342,9 +395,9 @@ export function Jobs() {
               <input
                 ref={importInput}
                 type="file"
-                accept=".json,application/json"
+                accept=".json,.csv,application/json,text/csv"
                 className="sr-only"
-                aria-label="导入历史岗位 JSON"
+                aria-label="导入历史岗位 JSON 或 CSV"
                 onChange={(event) => {
                   const file = event.currentTarget.files?.[0]
                   event.currentTarget.value = ''
@@ -352,9 +405,16 @@ export function Jobs() {
                   setImporting(true)
                   setImportSummary('')
                   void act(async () => {
-                    const source = JSON.parse(await file.text())
-                    const records = parseHistoricalJobLibrary(source, file.name)
-                    const removedCount = source.length - records.length
+                    const content = await file.text()
+                    let records
+                    let removedCount = 0
+                    if (file.name.toLowerCase().endsWith('.json')) {
+                      const source = JSON.parse(content)
+                      records = parseHistoricalJobLibrary(source, file.name)
+                      removedCount = source.length - records.length
+                    } else {
+                      records = parseJobLibraryCsv(content, file.name)
+                    }
                     const result = await importSavedJobs(records)
                     setImportSummary(
                       `导入完成：新增 ${result.newCount} 条，跳过已有 ${result.duplicateCount} 条，剔除异常 ${removedCount} 条`,
@@ -430,16 +490,25 @@ export function Jobs() {
                           { value: 'failed', label: '失败待重试' },
                         ]}
                       />
-                      <SelectField
-                        label="漏斗阶段"
+                      <MultiSelectField
+                        label="跟进阶段"
                         value={stage}
                         onChange={setStage}
                         options={[
-                          all,
-                          ...FUNNEL_STAGES.map((value) => ({
+                          ...selectableFunnelStages.map((value) => ({
                             value,
                             label: `${stages[value]}及以上`,
                           })),
+                        ]}
+                      />
+                      <MultiSelectField
+                        label="匹配度"
+                        value={matchStatus}
+                        onChange={(value) => setMatchStatus(value as ReviewStatus[])}
+                        options={[
+                          { value: 'approved', label: '匹配' },
+                          { value: 'rejected', label: '不匹配' },
+                          { value: 'pending', label: '待分析/待确认' },
                         ]}
                       />
                       <SelectField
@@ -448,7 +517,7 @@ export function Jobs() {
                         onChange={setProcessing}
                         options={[
                           { value: 'active', label: '正常岗位' },
-                          { value: 'excluded', label: '本地排除' },
+                          { value: 'excluded', label: '已排除 / 已结束' },
                           all,
                         ]}
                       />
@@ -468,8 +537,9 @@ export function Jobs() {
                           setCompany('all')
                           setKeyword('all')
                           setDetail('all')
-                          setStage('all')
+                          setStage([])
                           setProcessing('active')
+                          setMatchStatus([])
                           setMatchedToday(false)
                         }}
                       >
@@ -490,6 +560,7 @@ export function Jobs() {
                             '跟进阶段',
                             '采集时间',
                             '岗位链接',
+                            '职位描述',
                           ]
                           const rows = records.map((record) => [
                             record.snapshot.jobName || '',
@@ -500,9 +571,7 @@ export function Jobs() {
                             [record.snapshot.cityName, record.snapshot.areaDistrict]
                               .filter(Boolean)
                               .join(' · '),
-                            typeof record.analysis?.rating === 'number'
-                              ? `${record.analysis.needsConfirmation ? '暂定 ' : ''}${record.analysis.rating}/100`
-                              : statusNames[record.analysisStatus] || '待分析',
+                            matchLabel(record),
                             record.processingStatus === 'excluded'
                               ? '本地排除'
                               : stages[getJobFunnelStage(record)],
@@ -512,6 +581,7 @@ export function Jobs() {
                                   hour12: false,
                                 }),
                             record.jobUrl || '',
+                            record.detail?.jobInfo?.postDescription || '',
                           ])
                           exportCsv(headers, rows, 'OfferHunt-job-library-filtered')
                         }}
@@ -573,13 +643,13 @@ export function Jobs() {
                     )}
                     {!state.analysisBusy ? (
                       <Dropdown.Item
-                        isDisabled={disabled}
+                        isDisabled={disabled || !analysisJobIds.length}
                         onAction={() =>
                           void act(() => startSavedAnalysis({ limit: Number.MAX_SAFE_INTEGER }))
                         }
                       >
                         <WandSparkles size={15} />
-                        分析
+                        分析 ({analysisJobIds.length})
                       </Dropdown.Item>
                     ) : (
                       <Dropdown.Item
@@ -590,6 +660,20 @@ export function Jobs() {
                         停止分析
                       </Dropdown.Item>
                     )}
+                    <Dropdown.Item
+                      isDisabled={disabled || !greetingJobIds.length}
+                      onAction={() => setBatchGreetingConfirm(true)}
+                    >
+                      <MessageSquareText size={15} />
+                      批量生成招呼语 ({greetingJobIds.length})
+                    </Dropdown.Item>
+                    <Dropdown.Item
+                      isDisabled={!tailorJobIds.length}
+                      onAction={() => setTailorBatchIndex(0)}
+                    >
+                      <WandSparkles size={15} />
+                      批量定制简历 ({tailorJobIds.length})
+                    </Dropdown.Item>
                     <Dropdown.Item
                       isDisabled={disabled || importing}
                       onAction={() => importInput.current?.click()}
@@ -700,11 +784,11 @@ export function Jobs() {
                     </p>
                   )}
                 >
-                  {pageRecords.map((record) => (
+                  {pageRecords.map((record, index) => (
                     <Table.Row
                       key={record.encryptJobId}
                       id={record.encryptJobId}
-                      className="cursor-pointer"
+                      className={`cursor-pointer ${index % 2 === 1 ? 'bg-default/30' : ''}`}
                       onAction={() => {
                         setSelectedId(record.encryptJobId)
                         setDetailTab('jd')
@@ -750,12 +834,18 @@ export function Jobs() {
                           .join(' · ') || '未记录'}
                       </Table.Cell>
                       <Table.Cell className="tabular-nums whitespace-nowrap">
-                        {typeof record.analysis?.rating === 'number'
-                          ? `${record.analysis.needsConfirmation ? '暂定 ' : ''}${record.analysis.rating}/100`
-                          : statusNames[record.analysisStatus] || '待分析'}
+                        {matchLabel(record)}
                       </Table.Cell>
                       <Table.Cell>
-                        <Chip size="sm">
+                        <Chip
+                          size="sm"
+                          color={
+                            record.processingStatus !== 'excluded' &&
+                            getJobFunnelStage(record) === 'applied'
+                              ? 'accent'
+                              : 'default'
+                          }
+                        >
                           {record.processingStatus === 'excluded'
                             ? '本地排除'
                             : stages[getJobFunnelStage(record)]}
@@ -856,16 +946,35 @@ export function Jobs() {
                       BOSS 岗位
                     </Button>
                   </div>
-                  <div className="field-grid">
+                  <div className="grid grid-cols-3 gap-3">
                     <SelectField
-                      label="漏斗阶段"
+                      label="匹配度"
+                      value={getJobReviewStatus(selected)}
+                      options={[
+                        { value: 'pending', label: '待确认' },
+                        { value: 'approved', label: '匹配' },
+                        { value: 'rejected', label: '不匹配' },
+                      ]}
+                      disabled={disabled}
+                      onChange={(value) => {
+                        void mutate(() =>
+                          updateSavedJob({
+                            type: 'review',
+                            jobId: selected.encryptJobId,
+                            status: value as ReviewStatus,
+                          }),
+                        )
+                      }}
+                    />
+                    <SelectField
+                      label="跟进阶段"
                       value={selected.manualFunnelStage || 'auto'}
                       options={[
                         {
                           value: 'auto',
                           label: `自动判断 · ${stages[getJobFunnelStage({ ...selected, manualFunnelStage: undefined })]}`,
                         },
-                        ...FUNNEL_STAGES.map((value) => ({ value, label: stages[value] })),
+                        ...selectableFunnelStages.map((value) => ({ value, label: stages[value] })),
                       ]}
                       disabled={disabled}
                       onChange={(value) => {
@@ -883,7 +992,7 @@ export function Jobs() {
                       value={selected.processingStatus || 'active'}
                       options={[
                         { value: 'active', label: '正常岗位' },
-                        { value: 'excluded', label: '本地排除' },
+                        { value: 'excluded', label: '已排除 / 已结束' },
                       ]}
                       disabled={disabled}
                       onChange={(value) => {
@@ -999,8 +1108,6 @@ export function Jobs() {
                           selected.detailStatus !== 'complete' ||
                           !selected.detail?.jobInfo?.postDescription?.trim() ||
                           selected.processingStatus === 'excluded' ||
-                          selected.analysisStatus === 'ready' ||
-                          selected.reviewStatus !== 'pending' ||
                           selected.sendStatus !== 'pending'
                         }
                         onPress={() => {
@@ -1008,7 +1115,7 @@ export function Jobs() {
                         }}
                       >
                         <WandSparkles size={16} />
-                        分析此岗位
+                        {selected.analysisStatus === 'ready' ? '重新分析' : '分析此岗位'}
                       </Button>
                     ) : (
                       <>
@@ -1067,6 +1174,70 @@ export function Jobs() {
           </Modal.Dialog>
         </Modal.Container>
       </Modal.Backdrop>
+      <ConfirmDialog
+        open={tailorBatchIndex !== null}
+        onClose={() => setTailorBatchIndex(null)}
+        title="批量定制简历"
+        confirmLabel={
+          tailorBatchIndex !== null && tailorBatchIndex < tailorJobIds.length - 1
+            ? '打开并继续下一条'
+            : '打开岗位'
+        }
+        onConfirm={() => {
+          if (tailorBatchIndex === null) return
+          const record = state.records.find(
+            (item) => item.encryptJobId === tailorJobIds[tailorBatchIndex],
+          )
+          if (!record) {
+            setTailorBatchIndex(null)
+            return
+          }
+          const job = getSavedJobData(record).jobData
+          const inputError = getResumeTailoringInputError(job)
+          if (inputError) {
+            window.alert(inputError)
+            return
+          }
+          if (!openResumeMatcher(job)) {
+            window.alert('浏览器阻止了新标签页，请允许弹窗后重试')
+            return
+          }
+          if (tailorBatchIndex + 1 >= tailorJobIds.length) setTailorBatchIndex(null)
+          else setTailorBatchIndex(tailorBatchIndex + 1)
+        }}
+      >
+        {tailorBatchIndex !== null && (
+          <p>
+            {tailorBatchIndex + 1} / {tailorJobIds.length}：
+            {state.records.find((item) => item.encryptJobId === tailorJobIds[tailorBatchIndex])
+              ?.snapshot.jobName || '未命名岗位'}
+            。打开当前岗位的定制页面后，返回此处继续下一条。
+          </p>
+        )}
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={batchGreetingConfirm}
+        onClose={() => setBatchGreetingConfirm(false)}
+        title="确认批量生成招呼语"
+        confirmLabel="开始生成"
+        disabled={disabled}
+        onConfirm={async () => {
+          const jobIds = [...greetingJobIds]
+          setBatchGreetingConfirm(false)
+          let completed = 0
+          let failed = 0
+          for (const jobId of jobIds) {
+            if (await act(() => generateSavedGreeting(jobId))) completed++
+            else failed++
+          }
+          await act(async () => {
+            await refreshLibrary()
+            window.alert(`批量生成完成：成功 ${completed} 条，失败 ${failed} 条`)
+          })
+        }}
+      >
+        <p>将为当前筛选结果中符合条件的 {greetingJobIds.length} 个岗位生成招呼语，不会自动发送。</p>
+      </ConfirmDialog>
       <ConfirmDialog
         open={!!deleting || batchDeleting}
         onClose={() => {

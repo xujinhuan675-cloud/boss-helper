@@ -7,6 +7,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import { defaultFormData } from '../composables/conf/info'
+import * as scoring from '../composables/useApplying/scoring'
 import { getJobFunnel } from '../entrypoints/boss/jobStore'
 
 const require = createRequire(new URL('../../packages/devlog-ui/package.json', import.meta.url))
@@ -52,6 +53,7 @@ await mock.module('@/message', () => ({
   },
 }))
 await mock.module('@/composables/useApplying/scoring', () => ({
+  ...scoring,
   formatFilteringMessage: (message) => message,
 }))
 const { Tasks } = await import('./Tasks')
@@ -343,7 +345,7 @@ describe('task panel responsibilities', () => {
     }
   })
 
-  test('marks stored page jobs even when details are pending and disables duplicate saves', () => {
+  test('allows filling stored page jobs while preventing complete jobs from being captured again', () => {
     Object.assign(state, { connected: true, runtime: snapshot() })
     state.runtime.jobs = ['pending', 'complete', 'new'].map((id) => ({
       key: `boss::${id}`,
@@ -368,7 +370,8 @@ describe('task panel responsibilities', () => {
     expect(rows[1].textContent).not.toContain('待补详情')
     expect(rows[2].textContent).not.toContain('已入库')
     expect([...rows].every((row) => !row.textContent.includes('待处理'))).toBe(true)
-    expect(rows[0].querySelector('button[aria-label="保存岗位"]')?.disabled).toBe(true)
+    expect(rows[0].querySelector('button[aria-label="补详情"]')?.disabled).toBe(false)
+    expect(rows[1].querySelector('button[aria-label="保存岗位"]')?.disabled).toBe(true)
     expect(rows[2].querySelector('button[aria-label="保存岗位"]')?.disabled).toBe(false)
     state.runtime.results = [
       ['boss::pending', { status: 'ai', msg: '正在分析' }],

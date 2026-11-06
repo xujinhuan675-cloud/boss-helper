@@ -54,6 +54,7 @@ describe('workbench settings import boundaries', () => {
     [{ key: '', name: 'Invalid' }],
     [{ key: 'bad', name: 3 }],
     [{ key: 'bad', name: 'Invalid', data: { api_key: 2 } }],
+    [{ key: 'bad', name: 'Invalid', data: { decisions: 'true' } }],
     [{ key: 'bad', name: 'Invalid', data: { advanced: [] } }],
     [
       { key: 'duplicate', name: 'One' },
@@ -68,7 +69,7 @@ describe('workbench settings import boundaries', () => {
     config.nativeSearch = nativeSearchFromUrl('https://www.zhipin.com/web/geek/jobs?salary=invalid')
     expect(() => validateConfig(config)).toThrow('原生筛选')
     config.nativeSearch = nativeSearchFromUrl('https://www.zhipin.com/web/geek/jobs?salary=405')
-    config.delayCollectionDetailMin = 10
+    config.delayCollectionDetailMin = config.delayCollectionDetailMax + 1
     expect(() => validateConfig(config)).toThrow('间隔')
     config.delayCollectionDetailMin = 1
     config.aiFiltering.score = 101

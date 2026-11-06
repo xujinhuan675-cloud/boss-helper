@@ -29,7 +29,8 @@ export function validateModels(value: unknown): asserts value is ModelConf[] {
         ['advanced', 'other'].some(
           (field) => data[field] !== undefined && !isPlainObject(data[field]),
         ) ||
-        (data.responses !== undefined && typeof data.responses !== 'boolean')
+        (data.responses !== undefined && typeof data.responses !== 'boolean') ||
+        (data.decisions !== undefined && typeof data.decisions !== 'boolean')
       )
     })
   )
@@ -169,6 +170,16 @@ export function validateConfig(config: FormData) {
         !config.record.model.every((item) => typeof item === 'string')))
   )
     throw new Error('内容记录配置格式无效')
+  if (
+    !isPlainObject(config.paddleOcr) ||
+    typeof config.paddleOcr.enabled !== 'boolean' ||
+    typeof config.paddleOcr.baseUrl !== 'string' ||
+    typeof config.paddleOcr.token !== 'string' ||
+    typeof config.paddleOcr.model !== 'string' ||
+    !config.paddleOcr.baseUrl.trim() ||
+    !config.paddleOcr.model.trim()
+  )
+    throw new Error('PaddleOCR config is invalid')
   if (
     typeof config.resumeText !== 'string' ||
     typeof config.version !== 'string' ||

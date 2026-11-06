@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import {
   MATCH_DIMENSIONS,
+  MATCH_DECISIONS,
   formatFilteringMessage,
   parseFiltering,
 } from '@/composables/useApplying/scoring'
@@ -17,7 +18,25 @@ export function JobAnalysisResult({ record }: { record?: BossJobLibraryRecord })
     }
   }
 
-  const status = result?.res.hardRequirements.some((item) => item.status === 'unmet')
+  if (result && 'decision' in result.res) {
+    return (
+      <div className="space-y-2 text-sm">
+        <p
+          className={`font-medium ${result.res.decision === 'no_match' ? 'text-danger' : result.res.decision === 'uncertain' ? 'text-warning' : 'text-success'}`}
+        >
+          {MATCH_DECISIONS[result.res.decision]}
+        </p>
+        {result.res.reason && <p className="break-words text-muted">{result.res.reason}</p>}
+        {record?.analysisFailureReason && (
+          <p role="alert" className="text-danger">
+            {record.analysisFailureReason}
+          </p>
+        )}
+      </div>
+    )
+  }
+  const legacy = result && 'dimensions' in result.res ? result.res : undefined
+  const status = legacy?.hardRequirements.some((item) => item.status === 'unmet')
     ? '硬性条件不符'
     : analysis?.passed === true
       ? '达到筛选线'
@@ -31,7 +50,7 @@ export function JobAnalysisResult({ record }: { record?: BossJobLibraryRecord })
 
   return (
     <div className="space-y-4 text-sm">
-      {result ? (
+      {result && legacy ? (
         <>
           <div className="flex items-end justify-between gap-4 border-b border-default pb-3">
             <div>
@@ -50,7 +69,7 @@ export function JobAnalysisResult({ record }: { record?: BossJobLibraryRecord })
 
           <section aria-label="匹配维度" className="space-y-1">
             <h3 className="font-medium">匹配维度</h3>
-            {result.res.dimensions.map((dimension) => {
+            {legacy.dimensions.map((dimension) => {
               const definition = MATCH_DIMENSIONS.find((item) => item.key === dimension.key)!
               return (
                 <details key={dimension.key} className="border-b border-default py-2">
@@ -73,16 +92,16 @@ export function JobAnalysisResult({ record }: { record?: BossJobLibraryRecord })
           </section>
 
           {[
-            { title: '优势', items: result.res.strengths },
-            { title: '短板', items: result.res.gaps },
+            { title: '优势', items: legacy.strengths },
+            { title: '短板', items: legacy.gaps },
             {
               title: '硬性条件',
-              items: result.res.hardRequirements.map(
+              items: legacy.hardRequirements.map(
                 (item) =>
                   `${{ met: '满足', unmet: '不满足', unknown: '待确认' }[item.status]}：${item.requirement}。${item.reason}`,
               ),
             },
-            { title: '待确认', items: result.res.uncertainties },
+            { title: '待确认', items: legacy.uncertainties },
           ]
             .filter(({ items }) => items.length > 0)
             .map(({ title, items }) => (

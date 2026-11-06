@@ -4,6 +4,12 @@ import { expect, mock, test } from 'bun:test'
 let reloads = 0
 let mounts = 0
 let permissions = ['storage']
+globalThis.location = { hash: '', pathname: '/workbench.html' }
+globalThis.history = {
+  replaceState: () => {
+    location.hash = ''
+  },
+}
 mock.module('#imports', () => ({
   browser: {
     runtime: {
@@ -42,4 +48,18 @@ test('reloads an unpacked Chrome upgrade once to activate the new native permiss
     if (previous === undefined) delete import.meta.env.CHROME
     else import.meta.env.CHROME = previous
   }
+})
+
+test('bootstrap link reloads once, clears its marker and skips mounting', async () => {
+  permissions = ['storage', 'nativeMessaging']
+  location.hash = '#reload-extension'
+  const beforeReloads = reloads
+  const beforeMounts = mounts
+  await startWorkbench('workbench')
+  expect(reloads).toBe(beforeReloads + 1)
+  expect(mounts).toBe(beforeMounts)
+  expect(location.hash).toBe('')
+  await startWorkbench('workbench')
+  expect(reloads).toBe(beforeReloads + 1)
+  expect(mounts).toBe(beforeMounts + 1)
 })

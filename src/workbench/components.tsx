@@ -51,6 +51,56 @@ export function SelectField({
   )
 }
 
+export function MultiSelectField({
+  label,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  label: string
+  value: string[]
+  options: { value: string; label: string }[]
+  onChange: (value: string[]) => void
+  disabled?: boolean
+}) {
+  const items = [{ value: 'all', label: '全部' }, ...options]
+  return (
+    <Select
+      aria-label={label}
+      selectionMode="multiple"
+      value={value.length ? value : ['all']}
+      onChange={(keys) => {
+        const values = keys.map(String)
+        onChange(
+          values.includes('all') && value.length ? [] : values.filter((key) => key !== 'all'),
+        )
+      }}
+      isDisabled={disabled}
+      fullWidth
+      className="min-w-0"
+    >
+      <Label>{label}</Label>
+      <Select.Trigger>
+        <Select.Value className="truncate">
+          {({ selectedText }) => selectedText.replace(/\s*(?:and|和)\s*/g, '、')}
+        </Select.Value>
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          {items.map((item) => (
+            <ListBox.Item key={item.value} id={item.value} textValue={item.label}>
+              <span className="min-w-0 break-words">{item.label}</span>
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
+  )
+}
+
 export function IconButton({
   label,
   children,

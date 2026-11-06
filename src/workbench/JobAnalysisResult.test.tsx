@@ -10,6 +10,21 @@ import type { BossJobLibraryRecord } from '../entrypoints/boss/jobStore'
 await mock.module('@/composables/useApplying/scoring', () => scoring)
 const { JobAnalysisResult } = await import('./JobAnalysisResult')
 
+test('shows a quick decision and its one short reason without score panels', () => {
+  const markup = renderToStaticMarkup(
+    <JobAnalysisResult
+      record={{
+        analysis: { passed: null, res: { decision: 'uncertain', reason: '岗位未披露工作地点' } },
+      }}
+    />,
+  )
+  expect(markup).toContain('待确认')
+  expect(markup).toContain('岗位未披露工作地点')
+  expect(markup).not.toContain('<progress')
+  expect(markup).not.toContain('<details')
+  expect(markup).not.toContain('/100')
+})
+
 test('shows a compact match overview with expandable scoring evidence', () => {
   const record = {
     analysis: {

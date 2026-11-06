@@ -11,6 +11,11 @@ import { DIAGNOSTICS_KEY, loadDiagnostics, startExtensionDiagnostics } from '../
 import { clearDiagnostics, diagnostic } from '../utils/diagnostics'
 
 export async function startWorkbench(mode: 'sidepanel' | 'workbench') {
+  if (location.hash === '#reload-extension') {
+    history.replaceState(null, '', location.pathname)
+    browser.runtime.reload()
+    return
+  }
   // Activate the new manifest when an already-open unpacked extension loads this bundle.
   if (
     import.meta.env.CHROME &&
