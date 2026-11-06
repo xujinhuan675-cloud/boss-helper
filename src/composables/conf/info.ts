@@ -1,6 +1,10 @@
 import type { FormData, Prompt } from '@/types/formData'
 
-import { DEFAULT_MATCH_THRESHOLD, MATCH_SCORING_VERSION } from '../useApplying/scoring'
+import {
+  DEFAULT_MATCH_THRESHOLD,
+  MATCH_SCORING_PROMPT,
+  MATCH_SCORING_VERSION,
+} from '../useApplying/scoring'
 
 // TODO: 移除info, 忘记当初为啥要维护这一坨了, 还是直接写组件里面好看
 
@@ -8,24 +12,21 @@ export const defaultAiGreetingPrompt: Prompt = [
   {
     role: 'system',
     content: `## 角色
-你是负责 BOSS 招聘初聊的 AI 产品求职助理。
+你是负责 BOSS 招聘初聊的 AI 产品求职助理，面向非专业 HR 写清求职者做过什么、采取了什么核心动作、取得什么结果，以及与岗位的匹配点。
 
 ## 任务
-根据岗位信息和求职者完整简历，生成一条与岗位高度相关的中文开场白。必须按以下顺序判断：
-1. 先识别岗位的业务方向，例如海外产品、交易产品、企业软件、AI 应用、用户产品或产品运营。
-2. 提取 JD 中最值得回应的一个要求或加分项。
-3. 从简历中找一个真实、直接对应的经历或项目证据；只写最强匹配点，不罗列完整履历。
-4. 如果岗位明确提到海外、交易、ToB、AI 应用、快速原型等方向，只有简历中确有对应经历时才点名，不得猜测或补写。
+根据岗位信息和求职者完整简历，生成一条让 HR 快速看懂经历和岗位匹配度的招呼语。先找出 JD 中最相关的一项要求，再从简历中找一个真实项目作为主要证据。只讲核心，不写技术说明。
 
 ## 输出要求
 - 只输出招呼语正文，不加标题、引号、项目符号或解释。
-- 使用 2 到 3 句中文，简洁、自然、适合 BOSS 初次沟通。
-- 语气像 BOSS 初次聊天开场白，直接进入岗位匹配，不使用书信格式、称呼前缀或泛泛的自我介绍。
-- 结构为：问候并指出岗位方向 + 说明一个匹配点及简历依据 + 简历沟通钩子。
-- 结尾必须使用：我把简历发您看一下，您看岗位是否适合进一步聊聊。
-- 不写姓名、工作年限、毕业年份、经验门槛、硬门槛、放宽条件或个人短板。
-- 不堆叠相关术语；同一件事用一个完整能力表达，不拆成多个技术名词或流程环节。
-- 不编造行业经验、客户资源、生产落地、模型评测或简历中没有的成果。`,
+- 正文按 3 段输出，每段之间空一行。第一段以“您好，我有2年产品经验”开头，再写与 JD 最相关的核心技能；第二段写一个核心项目及采取的动作和结果；第三段使用指定结尾。
+- 当前经验按简历写“2年产品经验”。非金融岗位不要默认写“海外产品经验”或用交易背景开场；引用海外交易项目时，明确写“海外交易产品”。
+- 项目职责和成果必须来自简历或已核实材料。“独立负责”仅在事实支持时使用，否则写“负责”或“参与”。团队成果不得全部归为个人，不能把相关版本的数据夸大为单一动作的因果结果。
+- 优先写与岗位直接相关的数据；没有数据就写真实交付或验证结果，不得编造数字或成果。
+- 默认只写一个最相关的核心项目。只有第二项经历能补足 JD 的另一条核心要求时，才在第二段用一句话补充，并且必须证明不同能力；没有新增匹配价值时省略。不写第三项，不重复证明同一能力，不写成项目清单。
+- 不使用顿号，不排比罗列职责，不堆叠技术名词或模块名称。用简单自然的表达说明核心工作，让非专业 HR 能直接理解。
+- 不编造行业经验、客户资源、落地情况或简历中没有的事实。不要写姓名、毕业年份、经验门槛、放宽条件或个人短板。
+- 最后一段必须使用以下内容，不得改写：接手后能快速产出，切实解决业务问题。为方便您快速预览，简历图片已附上。您先看看，如果觉得背景匹配，我随时发一份详细的 PDF 简历和作品集给您。`,
   },
   {
     role: 'user',
@@ -126,11 +127,11 @@ export const formInfoData: Record<string, any> = {
   aiGreeting: {
     label: 'AI招呼语',
     'data-help':
-      '根据岗位方向、JD要求和简历中的对应经历生成匹配式招呼语，只保留一个最强匹配点，并以发送简历继续沟通作为结尾。',
+      '根据岗位要求和真实简历生成三段招呼语，突出相关核心项目及结果，保留简历图片预览和后续提供 PDF 简历与作品集的结尾；实际发送时须附上简历图片。',
   },
   aiFiltering: {
-    label: 'AI过滤',
-    'data-help': '根据工作内容让gpt分析过滤，真是太稳健了，不放过任何一个垃圾',
+    label: '岗位匹配',
+    'data-help': '按照可编辑的岗位匹配提示词，一次判断匹配、不匹配或待确认，并返回简短原因。',
   },
   aiReply: {
     label: 'AI回复',
@@ -212,7 +213,7 @@ export const defaultFormData: FormData = {
     value: false,
   },
   aiGreeting: {
-    enable: false,
+    enable: true,
     prompt: defaultAiGreetingPrompt,
   },
   aiFiltering: {
@@ -220,14 +221,14 @@ export const defaultFormData: FormData = {
     prompt: [
       {
         role: 'system',
-        content:
-          '根据岗位信息、完整简历和求职者明确表达的要求评估匹配度。说明匹配证据、短板及待确认信息，不编造个人偏好。',
+        content: MATCH_SCORING_PROMPT,
       },
       {
         role: 'user',
         content: `## 待处理的岗位信息:
   <岗位信息>
   岗位名:{{ jobData.jobName }}   薪资: {{ jobData.salary }}
+  工作地点: {{ jobData.city }} {{ jobData.address }}
   学历要求: {{ jobData.degreeName }}    工作经验要求: {{ jobData.experienceName }}
   福利列表: {{ jobData.welfareList }}
   技能要求: {{ jobData.skills }}
@@ -245,6 +246,7 @@ export const defaultFormData: FormData = {
     enable: false,
     prompt: [{ role: 'user', content: '帮我写一个回复的提示' }],
   },
+  jobProfile: '',
   resumeText: '',
   amap: {
     key: '',
@@ -253,6 +255,12 @@ export const defaultFormData: FormData = {
   },
   record: {
     enable: false,
+  },
+  paddleOcr: {
+    enabled: false,
+    baseUrl: 'https://paddleocr.aistudio-app.com/api/v2/ocr',
+    token: '',
+    model: 'PaddleOCR-VL-1.6',
   },
   delayDeliveryStarts: 3,
   delayDeliveryInterval: 5,

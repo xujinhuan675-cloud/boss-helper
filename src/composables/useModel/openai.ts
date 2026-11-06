@@ -11,6 +11,7 @@ export type OpenaiLLMConf = LLMConf<
     api_key: string
     model: string
     responses?: boolean
+    decisions?: boolean
     other?: other['other']
     advanced?: {
       json?: boolean | true

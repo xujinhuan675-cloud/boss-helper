@@ -20,6 +20,105 @@ function fixture(body: unknown, status = 200) {
   })
 }
 
+describe('Jev Decisions connectivity', () => {
+  const jev = { ...config, decisions: true, base_url: 'https://openrouter.ai/api/v1/' }
+  const answer = { answers: { connection: { type: 'choice', choice: 'connection_ok' } } }
+
+  it('tests the current model with one synthetic decision and no personal data or model lookup', async () => {
+    const requests = []
+    const snapshot = structuredClone(jev)
+    const result = await testModelConnection(jev, async (url, options) => {
+      requests.push({ url: urlText(url), options })
+      return fixture(answer)
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url).toBe('https://openrouter.ai/api/alpha/decisions')
+    expect(requests[0].options.method).toBe('POST')
+    expect(requests[0].options.credentials).toBe('omit')
+    expect(requests[0].options.redirect).toBe('error')
+    const headers = new Headers(requests[0].options.headers)
+    expect(headers.get('Authorization')).toBe(`Bearer ${config.api_key}`)
+    expect(headers.get('Content-Type')).toBe('application/json')
+    const body = JSON.parse(requests[0].options.body)
+    expect(body.model).toBe(config.model)
+    expect(body.state).toContain('connection_ok')
+    expect(body.questions.connection.type).toBe('choice')
+    expect(Object.keys(body.questions)).toEqual(['connection'])
+    expect(body.prompt).toBeUndefined()
+    expect(result.status).toBe('connected')
+    expect(result.title).toContain('Jev')
+    expect(result.models).toBeUndefined()
+    expect(jev).toEqual(snapshot)
+  })
+
+  it.each([
+    null,
+    {},
+    { data: [] },
+    { answers: { connection: { type: 'choice', choice: 'other' } } },
+    { answers: { connection: { type: 'text', choice: 'connection_ok' } } },
+  ])('rejects malformed or incorrect decision responses: %j', async (body) => {
+    expect((await testModelConnection(jev, async () => fixture(body))).status).toBe(
+      'invalid_response',
+    )
+  })
+
+  it.each([
+    [401, 'auth_error'],
+    [404, 'unsupported'],
+    [429, 'http_error'],
+    [503, 'http_error'],
+  ])('reports decision HTTP %s without leaking upstream text', async (status, expected) => {
+    const result = await testModelConnection(jev, async () =>
+      fixture({ error: config.api_key }, status),
+    )
+    expect(result.status).toBe(expected)
+    expect(result.httpStatus).toBe(status)
+    expect(result.description).toContain('Jev')
+    expect(JSON.stringify(result)).not.toContain(config.api_key)
+  })
+
+  it.each([{ model: '' }, { base_url: 'https://openrouter.ai/api' }])(
+    'rejects incomplete Decisions configuration before sending: %j',
+    async (patch) => {
+      let calls = 0
+      const result = await testModelConnection({ ...jev, ...patch }, async () => {
+        calls++
+        return fixture(answer)
+      })
+      expect(result.status).toBe('invalid_config')
+      expect(calls).toBe(0)
+    },
+  )
+
+  it('reports invalid JSON as a Jev response error without exposing content', async () => {
+    const result = await testModelConnection(jev, async () => new Response(config.api_key))
+    expect(result.status).toBe('invalid_response')
+    expect(result.title).toContain('Jev')
+    expect(JSON.stringify(result)).not.toContain(config.api_key)
+  })
+
+  it('aborts a hanging Decisions request without retrying', async () => {
+    let requests = 0
+    const result = await testModelConnection(
+      jev,
+      async (_url, options) => {
+        requests++
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+            once: true,
+          })
+        })
+      },
+      5,
+    )
+    expect(result.status).toBe('network_error')
+    expect(result.description).toContain('Jev')
+    expect(result.description).toContain('超时')
+    expect(requests).toBe(1)
+  })
+})
+
 describe('non-inference model connectivity', () => {
   it('only fetches the configured model list with credentials and no inference payload', async () => {
     const requests: Array<{ url: string; options: RequestInit }> = []

@@ -8,6 +8,37 @@ mock.module('@/utils/ai', () => ({ parseGptJson }))
 const { parseFiltering } = await import('./utils')
 const { getFilteringDecision, formatFilteringMessage } = await import('./scoring')
 
+describe('quick job matching', () => {
+  it.each([
+    ['match', true],
+    ['no_match', false],
+    ['uncertain', null],
+  ])('uses the %s decision directly without inventing a score', (decision, expected) => {
+    const parsed = parseFiltering(JSON.stringify({ decision, reason: '核心经历匹配' }))
+    expect(getFilteringDecision(parsed, 100)).toBe(expected)
+    expect(parsed.rating).toBeNull()
+    expect(parsed.scoringVersion).toBe('quick-v1')
+    expect(parsed.message).toContain('核心经历匹配')
+  })
+
+  it('accepts a decision without a reason and caps a long reason without another request', () => {
+    expect(parseFiltering('{"decision":"uncertain"}').message).toBe('待确认')
+    const parsed = parseFiltering(JSON.stringify({ decision: 'match', reason: '证'.repeat(200) }))
+    expect(parsed.res.reason).toHaveLength(60)
+  })
+
+  it.each([
+    'null',
+    '[]',
+    '{"decision":true}',
+    '{"decision":["match"]}',
+    '{"decision":"yes"}',
+    '{"decision":"match","reason":[]}',
+  ])('rejects malformed decisions: %s', (value) => {
+    expect(() => parseFiltering(value)).toThrow()
+  })
+})
+
 function result() {
   return {
     dimensions: [

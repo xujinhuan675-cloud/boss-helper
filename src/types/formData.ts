@@ -35,7 +35,9 @@ export interface FormData {
   aiGreeting: FormDataAi
   aiFiltering: FormDataAi & { score: number; scoringVersion?: string }
   aiReply: FormDataAi
-  /** Full resume text shared by AI filtering and greeting prompts. */
+  /** Personal targeting strategy used for job search and matching. */
+  jobProfile: string
+  /** Legacy resume text retained for existing configurations and greeting prompts. */
   resumeText: string
   amap: {
     key: string
@@ -43,6 +45,12 @@ export interface FormData {
     straightDistance: number
   }
   record: { model?: string[]; enable: boolean }
+  paddleOcr: {
+    enabled: boolean
+    baseUrl: string
+    token: string
+    model: string
+  }
   // animation?: "frame" | "card" | "together";
   delayDeliveryStarts: number
   delayDeliveryInterval: number

@@ -50,7 +50,10 @@ describe('workflow matching gate', () => {
     const ctx = {
       helper: {
         conf: {
-          formData: { aiFiltering: { enable: true, score: kind === 'below threshold' ? 80 : 0 } },
+          formData: {
+            jobProfile: '5-10 years product management experience',
+            aiFiltering: { enable: true, score: kind === 'below threshold' ? 80 : 0 },
+          },
         },
         chatModel: { createAgent: () => true, chat: async () => ({ text: JSON.stringify(value) }) },
       },
@@ -67,7 +70,12 @@ describe('workflow matching gate', () => {
     }
     const ctx = {
       helper: {
-        conf: { formData: { aiFiltering: { enable: true, score: -1 } } },
+        conf: {
+          formData: {
+            jobProfile: '5-10 years product management experience',
+            aiFiltering: { enable: true, score: -1 },
+          },
+        },
         chatModel: { createAgent: forbidden, chat: forbidden },
       },
     }

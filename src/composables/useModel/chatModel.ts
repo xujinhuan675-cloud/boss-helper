@@ -19,9 +19,10 @@ import { jsonClone } from '@/utils/deepmerge'
 
 import type { ModelConf } from '.'
 import { diagnostic, traceDiagnostic } from '../../utils/diagnostics'
-import { MATCH_SCORING_PROMPT } from '../useApplying/scoring'
 import type { WorkflowData } from '../useApplying/type'
 import type { HelperContext } from '../useHelper'
+import { requestJobDecision } from './decisions'
+import { selectModel } from './selection'
 
 const role = [
   'system',
@@ -98,12 +99,12 @@ export class ChatModel {
   jobs = ref<string[]>([])
 
   providers: Map<string, OpenAIProvider> = new Map()
-  agents: Map<MessageRole, [ToolLoopAgent, ModelConf, FormDataAi]> = new Map()
+  agents: Map<MessageRole, [ToolLoopAgent | null, ModelConf, FormDataAi]> = new Map()
   generateId: { [key in MessageRole]: () => string }
 
   constructor(
-    public ctx: Pick<HelperContext<any, any, any>, 'models' | 'resumes'>,
-    private readonly resumeSnapshot?: string,
+    public ctx: Pick<HelperContext<any, any, any>, 'models' | 'resumes' | 'conf'>,
+    private readonly inputSnapshot?: { profile?: string; resume?: string },
   ) {
     this.generateId = role.reduce(
       (acc, agentName) => {
@@ -125,19 +126,16 @@ export class ChatModel {
     },
   ): boolean {
     const modelKey =
-      this.ctx.models.getDefaultModelKey?.() ??
-      this.ctx.models.modelData.value.find(
-        (item) =>
-          typeof item.data?.api_key === 'string' &&
-          !!item.data.api_key.trim() &&
-          typeof item.data?.base_url === 'string' &&
-          !!item.data.base_url.trim() &&
-          typeof item.data?.model === 'string' &&
-          !!item.data.model.trim(),
-      )?.key
+      this.ctx.models.getDefaultModelKey?.(name) ??
+      selectModel(this.ctx.models.modelData.value, name)?.key
     const conf = this.ctx.models.modelData.value.find((m) => m.key === modelKey)
     if (!conf || !modelKey) {
       return false
+    }
+    if (conf.data?.decisions) {
+      if (name !== 'filtering') return false
+      this.agents.set(name, [null, jsonClone(conf), jsonClone(model)])
+      return true
     }
     let provider = this.providers.get(modelKey)
     if (!provider) {
@@ -169,6 +167,7 @@ export class ChatModel {
       model: provider.chat(conf.data?.model || 'gpt-4o'),
       output: opt?.json ? Output.json() : Output.text(),
       allowSystemInMessages: true,
+      ...(name === 'filtering' ? { maxOutputTokens: 200, maxRetries: 0 } : {}),
     })
     this.agents.set(name, [agent, jsonClone(conf), jsonClone(model)])
     return true
@@ -178,6 +177,7 @@ export class ChatModel {
     const entry = this.agents.get(agentName)
     if (!entry) throw new Error(`Agent ${agentName} not found`)
     const [agent, modelConf, model] = entry
+    if (!agent) throw new Error('Jev 仅支持岗位匹配，请另配普通模型生成文字')
     const result = await traceDiagnostic(
       `model.generate.${agentName}`,
       () =>
@@ -219,19 +219,18 @@ export class ChatModel {
         message.content = renderTemplate(message.content, data)
       }
     }
-    if (agentName === 'filtering') {
-      messages.push({ role: 'system', content: MATCH_SCORING_PROMPT })
-    }
-    const resumeText =
-      this.resumeSnapshot !== undefined
-        ? this.resumeSnapshot.trim()
-        : this.ctx.resumes.currentResume.value?.content.trim()
-    if ((agentName === 'filtering' || agentName === 'greetings') && resumeText) {
+    const profileText =
+      this.inputSnapshot?.profile?.trim() ?? this.ctx.conf?.formData.jobProfile?.trim()
+    if (agentName === 'filtering' && profileText) {
       messages.push({
         role: 'user',
-        content: `## 求职者完整简历\n${resumeText}`,
+        content: `## 求职者个人画像\n${profileText}`,
       })
     }
+    const resumeText =
+      this.inputSnapshot?.resume?.trim() ?? this.ctx.resumes.currentResume.value?.content.trim()
+    if (agentName === 'greetings' && resumeText)
+      messages.push({ role: 'user', content: `## 求职者完整简历\n${resumeText}` })
     let state: VueChatState<Message>
     if (!this.states.has(data.jobData.key)) {
       state = new VueChatState<Message>()
@@ -306,6 +305,18 @@ ${data.jobData.jobDescription}`,
     }
     let index = -1
     try {
+      if (!agent) {
+        phase = 'decisions'
+        const text = await requestJobDecision(modelConf.data!, messages)
+        msg.parts = [{ type: 'text', text, state: 'done' }]
+        state.pushMessage(msg)
+        state.status = 'ready'
+        diagnostic(`model.chat.${agentName}`, {
+          durationMs: performance.now() - started,
+          context: { endpoint: modelConf.data?.base_url },
+        })
+        return { text }
+      }
       const stream = await agent.stream({
         timeout,
         messages,

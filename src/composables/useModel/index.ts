@@ -5,8 +5,10 @@ import { jsonClone } from '@/utils/deepmerge'
 
 import type { OpenaiLLMConf } from './openai'
 import { openai } from './openai'
+import { selectModel } from './selection'
 
 export * from './chatModel'
+export { isCompleteModel, selectModel } from './selection'
 
 const toast = useToast()
 export const confModelKey = 'conf-model'
@@ -26,17 +28,6 @@ export interface ModelConf {
   //     output: string
   //   }
   // }
-}
-
-export function isCompleteModel(
-  model: ModelConf | undefined,
-): model is ModelConf & { data: ModelConfData } {
-  return (
-    !!model?.data &&
-    [model.data.api_key, model.data.base_url, model.data.model].every(
-      (field) => typeof field === 'string' && !!field.trim(),
-    )
-  )
 }
 
 const modelData = ref<ModelConf[]>([])
@@ -60,8 +51,8 @@ export const useModel = () => {
     })
   }
 
-  function getDefaultModelKey() {
-    return modelData.value.find(isCompleteModel)?.key ?? modelData.value[0]?.key
+  function getDefaultModelKey(task?: string) {
+    return selectModel(modelData.value, task)?.key
   }
 
   return {

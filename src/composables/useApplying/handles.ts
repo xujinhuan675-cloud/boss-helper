@@ -1,4 +1,3 @@
-import { renderTemplate } from '@/utils/ai'
 import type { HelperContext } from '~/composables/useHelper'
 
 import { sameCompanyKey, sameHrKey } from '../../entrypoints/boss/requests'
@@ -215,6 +214,9 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
       if (!ctx.helper.conf.formData.aiFiltering.enable) {
         return
       }
+      if (!ctx.helper.conf.formData.jobProfile?.trim()) {
+        throw new HelperConfigError('aiFiltering', '请先填写个人求职画像，再开始岗位匹配')
+      }
       const threshold = ctx.helper.conf.formData.aiFiltering.score ?? DEFAULT_MATCH_THRESHOLD
       validateMatchThreshold(threshold)
       if (
@@ -263,70 +265,6 @@ export class TaskRegistry<C extends HelperContext<C, T, S>, T, S = {}> {
       }
     }
   })
-
-  customGreeting = defineTaskHandler<C, T, S>(
-    '打招呼',
-    (ctx) => {
-      if (!ctx.helper.conf.formData.customGreeting.enable) {
-        return
-      }
-      return async (ctx, data) => {
-        // if (ctx.bossData == null) {
-        //   const bossData = await requestBossData(ctx.jobData.card!)
-        //   ctx.bossData = bossData
-        // }
-        let msg = ctx.helper.conf.formData.customGreeting.value
-        if (ctx.helper.conf.formData.greetingVariable.value) {
-          if (Array.isArray(msg)) {
-            msg = msg.map((item) => {
-              if (item.type === 'text') {
-                return {
-                  ...item,
-                  content: renderTemplate(item.content, data),
-                }
-              } else {
-                return item
-              }
-            })
-          } else {
-            msg = renderTemplate(msg, data)
-          }
-        }
-
-        // ctx.message = msg
-
-        // const buf = new Message({
-        //   form_uid: uid.toString(),
-        //   to_uid: ctx.bossData.data.bossId.toString(),
-        //   to_name: ctx.bossData.data.encryptBossId, // encryptUserId
-        //   friend_source: ctx.bossData.data.bossSource,
-        //   content: msg,
-        // })
-
-        // await buf.send()
-
-        await ctx.helper.sendMessage?.(data, msg)
-      }
-    },
-    { label: '自定义招呼语' },
-  )
-
-  aiGreeting = defineTaskHandler<C, T, S>(
-    '打招呼',
-    (ctx) => {
-      if (!ctx.helper.conf.formData.aiGreeting.enable) {
-        return
-      }
-      if (!ctx.helper.chatModel.createAgent(ctx.helper.conf.formData.aiGreeting, 'greetings')) {
-        throw new HelperConfigError('aiGreeting', 'AI招呼模型未配置')
-      }
-      return async (ctx, data) => {
-        const msg = await ctx.helper.chatModel.chat('greetings', data).then((r) => r.text)
-        await ctx.helper.sendMessage?.(data, msg)
-      }
-    },
-    { label: 'AI招呼语', state: 'ai', stateMsg: '生成招呼语中' },
-  )
 
   amap = defineTaskHandler<C, T, S>('高德地图', (ctx) => {
     const maxDistance = ctx.helper.conf.formData.amap.straightDistance

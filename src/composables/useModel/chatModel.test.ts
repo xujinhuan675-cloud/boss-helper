@@ -31,7 +31,7 @@ const built = await Bun.build({
             path === 'ai'
               ? 'export class ToolLoopAgent { constructor(options) { this.options = options } stream(options) { if (globalThis.__chatStartError) throw globalThis.__chatStartError; globalThis.__chatMessages = options.messages; return { toUIMessageStream: async function* () { yield* globalThis.__chatChunks ?? [] } } } }; export const Output = {json:()=>({}),text:()=>({})}; export const createIdGenerator = () => () => "test-id"; export const APICallError={}; export const isReasoningUIPart=part=>part.type==="reasoning"; export const isTextUIPart=part=>part.type==="text"'
               : path === 'message'
-                ? 'export const counter = { fetchText: async args => { globalThis.__backgroundFetch = args; return { status: 200, text: "data: [DONE]\\n\\n", contentType: "text/event-stream" } } }'
+                ? 'export const counter = { fetchText: async args => { globalThis.__backgroundFetch = args; return globalThis.__decisionResponse ?? { status: 200, text: "data: [DONE]\\n\\n", contentType: "text/event-stream" } } }'
                 : 'export const createOpenAI = options => { globalThis.__openaiOptions = options; return {chat: model => ({model})} }',
           loader: 'js',
         }))
@@ -62,6 +62,65 @@ new Function(
 const { ChatModel } = compiled.exports
 
 describe('model configuration snapshot', () => {
+  it('routes quick filtering through Jev with the same job and profile snapshot', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          {
+            key: 'chat',
+            data: { model: 'chat', api_key: 'key', base_url: 'https://model.example/v1' },
+          },
+          {
+            key: 'jev',
+            data: {
+              model: 'typesafe/jev-test',
+              api_key: 'key',
+              base_url: 'https://openrouter.ai/api/v1',
+              decisions: true,
+            },
+          },
+        ]),
+      },
+      resumes: { currentResume: ref(null) },
+      conf: { formData: { jobProfile: '完整画像快照' } },
+    })
+    expect(
+      chat.createAgent(
+        {
+          prompt: [
+            { role: 'system', content: '允许跨行业，只接受上海岗位' },
+            { role: 'user', content: 'JD: {{ jobData.jobDescription }}' },
+          ],
+          enable: true,
+        },
+        'filtering',
+      ),
+    ).toBe(true)
+    expect(chat.agents.get('filtering')[0]).toBeNull()
+    expect(chat.createAgent({ prompt: [], enable: true }, 'greetings')).toBe(true)
+    expect(chat.agents.get('greetings')[1].key).toBe('chat')
+    globalThis.__decisionResponse = {
+      status: 200,
+      text: JSON.stringify({ answers: { match: { type: 'choice', choice: 'match' } } }),
+    }
+    const data = { jobData: { key: 'quick-job', jobDescription: '岗位正文', brand: {}, boss: {} } }
+    try {
+      expect(await chat.chat('filtering', data)).toEqual({ text: '{"decision":"match"}' })
+      const body = JSON.parse(globalThis.__backgroundFetch.data.body)
+      expect(body.state).toContainEqual({ role: 'user', content: 'JD: 岗位正文' })
+      expect(body.state.filter((message) => message.role === 'system')).toEqual([
+        { role: 'system', content: '允许跨行业，只接受上海岗位' },
+      ])
+      expect(body.state.at(-1).content).toContain('完整画像快照')
+      expect(chat.states.get('quick-job').status).toBe('ready')
+      globalThis.__decisionResponse = { status: 401, text: 'private response' }
+      await expect(chat.chat('filtering', data)).rejects.toMatchObject({ statusCode: 401 })
+      expect(chat.states.get('quick-job').status).toBe('error')
+    } finally {
+      delete globalThis.__decisionResponse
+    }
+  })
+
   it('marks stream initialization failure and allows a successful retry on the same job', async () => {
     const chat = new ChatModel({
       models: {
@@ -245,7 +304,7 @@ describe('model configuration snapshot', () => {
     }
   })
 
-  it('appends the saved full resume to filtering and greeting requests', async () => {
+  it('appends the saved profile to filtering without appending the resume', async () => {
     const model = {
       key: 'active',
       name: 'active',
@@ -256,7 +315,7 @@ describe('model configuration snapshot', () => {
       resumes: {
         currentResume: ref({ id: 'resume-a', name: '主简历', content: '刘博华\nAI 产品经理' }),
       },
-      conf: { formData: { resumeText: '旧配置简历，不应优先使用' } },
+      conf: { formData: { jobProfile: '画像中的主投方向', resumeText: '旧配置简历' } },
     })
     const data = {
       jobData: {
@@ -273,7 +332,10 @@ describe('model configuration snapshot', () => {
       chat.createAgent(
         {
           model: 'legacy',
-          prompt: [{ role: 'user', content: '匹配 {{ jobData.jobName }}' }],
+          prompt: [
+            { role: 'system', content: '允许跨行业，只接受上海岗位' },
+            { role: 'user', content: '匹配 {{ jobData.jobName }}' },
+          ],
           enable: true,
         },
         'filtering',
@@ -282,13 +344,13 @@ describe('model configuration snapshot', () => {
     await chat.chat('filtering', data, { disableMessages: true })
 
     expect(globalThis.__chatMessages).toEqual([
+      { role: 'system', content: '允许跨行业，只接受上海岗位' },
       { role: 'user', content: '匹配 AI 产品经理' },
-      { role: 'system', content: expect.stringContaining('固定五维百分制') },
-      { role: 'user', content: '## 求职者完整简历\n刘博华\nAI 产品经理' },
+      { role: 'user', content: '## 求职者个人画像\n画像中的主投方向' },
     ])
   })
 
-  it('uses a fixed resume snapshot when provided by a batch', async () => {
+  it('uses a fixed resume snapshot for greeting generation', async () => {
     const model = {
       key: 'active',
       name: 'active',
@@ -300,7 +362,7 @@ describe('model configuration snapshot', () => {
         resumes: { currentResume: ref({ id: 'resume-a', name: '主简历', content: '当前简历' }) },
         conf: { formData: { resumeText: '' } },
       },
-      '批次快照简历',
+      { resume: '批次快照简历' },
     )
     const data = {
       jobData: {
@@ -320,8 +382,9 @@ describe('model configuration snapshot', () => {
     })
   })
 
-  it('injects only the current selection into filtering and greetings, ignoring retained legacy text', async () => {
+  it('uses the saved profile for matching and the selected resume for greetings', async () => {
     const currentResume = ref({ id: 'a', name: '主简历', content: '正文 A' })
+    const formData = { jobProfile: '画像 A', resumeText: '遗留简历' }
     const chat = new ChatModel({
       models: {
         modelData: ref([
@@ -330,26 +393,80 @@ describe('model configuration snapshot', () => {
         getDefaultModelKey: () => 'active',
       },
       resumes: { currentResume },
-      conf: { formData: { resumeText: '遗留简历' } },
+      conf: { formData },
     })
     const data = { jobData: { key: 'job', brand: { name: '公司' }, boss: { name: 'HR' } } }
     for (const role of ['filtering', 'greetings']) {
       chat.createAgent({ prompt: [{ role: 'user', content: '原提示词' }], enable: true }, role)
       currentResume.value = { id: 'a', name: '主简历', content: '正文 A' }
+      formData.jobProfile = '画像 A'
       await chat.chat(role, data, { disableMessages: true })
-      expect(globalThis.__chatMessages.at(-1).content).toBe('## 求职者完整简历\n正文 A')
+      expect(globalThis.__chatMessages.at(-1).content).toBe(
+        role === 'filtering' ? '## 求职者个人画像\n画像 A' : '## 求职者完整简历\n正文 A',
+      )
       currentResume.value = { id: 'b', name: '备用简历', content: '正文 B' }
+      formData.jobProfile = '画像 B'
       await chat.chat(role, data, { disableMessages: true })
-      expect(globalThis.__chatMessages.at(-1).content).toBe('## 求职者完整简历\n正文 B')
+      expect(globalThis.__chatMessages.at(-1).content).toBe(
+        role === 'filtering' ? '## 求职者个人画像\n画像 B' : '## 求职者完整简历\n正文 B',
+      )
       currentResume.value = null
       await chat.chat(role, data, { disableMessages: true })
-      expect(globalThis.__chatMessages.filter((message) => message.role === 'user')).toEqual([
-        { role: 'user', content: '原提示词' },
-      ])
+      expect(globalThis.__chatMessages.at(-1)?.content).toBe(
+        role === 'filtering' ? '## 求职者个人画像\n画像 B' : '原提示词',
+      )
     }
   })
 
-  it('enforces the scoring contract while preserving custom preferences and greeting prompts', async () => {
+  it('uses the saved job profile for matching and keeps the resume only for greeting generation', async () => {
+    const chat = new ChatModel({
+      models: {
+        modelData: ref([
+          { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+        ]),
+        getDefaultModelKey: () => 'active',
+      },
+      resumes: { currentResume: ref({ id: 'a', name: '简历', content: '简历证据' }) },
+      conf: { formData: { jobProfile: '主投 AI 应用产品，金融产品为承接方向' } },
+    })
+    const data = { jobData: { key: 'job', brand: {}, boss: {} } }
+    chat.createAgent({ prompt: [{ role: 'user', content: '匹配' }], enable: true }, 'filtering')
+    await chat.chat('filtering', data, { disableMessages: true })
+    expect(globalThis.__chatMessages).toContainEqual({
+      role: 'user',
+      content: '## 求职者个人画像\n主投 AI 应用产品，金融产品为承接方向',
+    })
+    expect(globalThis.__chatMessages.some((message) => message.content.includes('简历证据'))).toBe(
+      false,
+    )
+    chat.createAgent({ prompt: [{ role: 'user', content: '写招呼语' }], enable: true }, 'greetings')
+    await chat.chat('greetings', data, { disableMessages: true })
+    expect(globalThis.__chatMessages.at(-1).content).toBe('## 求职者完整简历\n简历证据')
+  })
+
+  it('uses a fixed profile snapshot when provided by a batch', async () => {
+    const chat = new ChatModel(
+      {
+        models: {
+          modelData: ref([
+            { key: 'active', data: { model: 'active', api_key: 'key', base_url: 'url' } },
+          ]),
+        },
+        resumes: { currentResume: ref(null) },
+        conf: { formData: { jobProfile: '当前画像' } },
+      },
+      { profile: '启动时画像' },
+    )
+    chat.createAgent({ prompt: [{ role: 'user', content: '匹配' }], enable: true }, 'filtering')
+    await chat.chat(
+      'filtering',
+      { jobData: { key: 'job', brand: {}, boss: {} } },
+      { disableMessages: true },
+    )
+    expect(globalThis.__chatMessages.at(-1).content).toBe('## 求职者个人画像\n启动时画像')
+  })
+
+  it('uses only the editable prompt without injecting hidden matching or output rules', async () => {
     const chat = new ChatModel({
       models: {
         modelData: ref([
@@ -362,11 +479,7 @@ describe('model configuration snapshot', () => {
     const data = { jobData: { key: 'job', brand: {}, boss: {} } }
     chat.createAgent({ prompt, enable: true }, 'filtering')
     await chat.chat('filtering', data, { disableMessages: true })
-    expect(globalThis.__chatMessages[0]).toEqual(prompt[0])
-    const contract = globalThis.__chatMessages.at(-1)
-    expect(contract.role).toBe('system')
-    expect(contract.content).toContain('hardRequirements')
-    expect(contract.content).toContain('严格使用以下评分规则和 JSON 格式')
+    expect(globalThis.__chatMessages).toEqual(prompt)
     chat.createAgent({ prompt, enable: true }, 'greetings')
     await chat.chat('greetings', data, { disableMessages: true })
     expect(globalThis.__chatMessages).toEqual(prompt)

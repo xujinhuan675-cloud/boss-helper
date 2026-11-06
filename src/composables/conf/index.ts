@@ -9,8 +9,9 @@ import { exportJson, importJson } from '@/utils/jsonImportExport'
 import { logger } from '@/utils/logger'
 
 import { diagnostic } from '../../utils/diagnostics'
-import { MATCH_SCORING_VERSION } from '../useApplying/scoring'
+import { LEGACY_MATCH_SCORING_VERSION, MATCH_SCORING_VERSION } from '../useApplying/scoring'
 import { defaultFormData } from './info'
+import { PREVIOUS_QUICK_MATCH_PROMPT } from './previousQuickMatchPrompt'
 
 export * from './info'
 
@@ -177,6 +178,8 @@ export const useConf = () => {
 
   async function formDataHandler(from: Partial<FormData>) {
     if (!isPlainObject(from)) throw new Error('配置格式异常；已保留原数据')
+    if (from.aiFiltering?.scoringVersion === LEGACY_MATCH_SCORING_VERSION)
+      from.aiFiltering.scoringVersion = MATCH_SCORING_VERSION
     if (
       from.aiFiltering &&
       (from.aiFiltering.scoringVersion !== MATCH_SCORING_VERSION ||
@@ -186,6 +189,15 @@ export const useConf = () => {
         ...jsonClone(defaultFormData.aiFiltering),
         enable: from.aiFiltering.enable ?? defaultFormData.aiFiltering.enable,
       }
+    }
+    for (const message of Array.isArray(from.aiFiltering?.prompt) ? from.aiFiltering.prompt : []) {
+      if (
+        message?.role === 'system' &&
+        (message.content === PREVIOUS_QUICK_MATCH_PROMPT ||
+          message.content ===
+            '根据岗位信息、完整简历和求职者明确表达的要求，一次判断匹配、不匹配或待确认，可附一句关键依据。不编造个人偏好，不输出长篇分析。')
+      )
+        message.content = defaultFormData.aiFiltering.prompt[0]!.content
     }
     try {
       for (const [version, fn] of FROM_VERSION) {
@@ -206,6 +218,7 @@ export const useConf = () => {
       const prompt = from[key]
       if (isPlainObject(prompt)) Reflect.deleteProperty(prompt, 'model')
     }
+    if (isPlainObject(from.aiGreeting)) from.aiGreeting.enable = true
     removeRetiredRanges(from)
     removeRetiredFilters(from)
     return from
@@ -258,6 +271,7 @@ export const useConf = () => {
       let from = rawConfig as Partial<FormData>
       const previousVersion = from.version
       const previousFiltering = JSON.stringify(from.aiFiltering)
+      const previousGreetingEnable = from.aiGreeting?.enable
       const hasRetiredRanges =
         'salaryRange' in from ||
         'companySizeRange' in from ||
@@ -278,6 +292,7 @@ export const useConf = () => {
       if (
         from.version !== previousVersion ||
         JSON.stringify(from.aiFiltering) !== previousFiltering ||
+        previousGreetingEnable === false ||
         hasRetiredRanges
       )
         await counter.storageSet(storageKey, jsonClone(data))
@@ -301,6 +316,7 @@ export const useConf = () => {
 
   async function confSaving() {
     try {
+      formData.aiGreeting.enable = true
       removeRetiredRanges(formData)
       removeRetiredFilters(formData)
       await counter.storageSet(formDataKey(), jsonClone(formData))

@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { jsonClone } from '../../utils/deepmerge'
 import deepmerge, { isPlainObject } from '../../utils/deepmerge'
 import { defaultFormData } from './info'
+import { PREVIOUS_QUICK_MATCH_PROMPT } from './previousQuickMatchPrompt'
 
 const saved = new Map()
 let imported
@@ -63,6 +64,42 @@ beforeEach(() => {
 })
 
 describe('preset persistence', () => {
+  it('persists a separate job profile through initialization and reload', async () => {
+    expect(defaults.jobProfile).toBe('')
+    const conf = useConf()
+    await conf.confInit()
+    conf.formData.jobProfile = '以 AI 应用产品为主投方向'
+    await conf.confSaving()
+    await conf.confInit()
+    expect(conf.formData.jobProfile).toBe('以 AI 应用产品为主投方向')
+  })
+
+  it.each(['init', 'reload', 'import', 'save'])(
+    'normalizes the retired greeting switch on %s without replacing prompts or images',
+    async (entry) => {
+      const conf = useConf()
+      const legacy = jsonClone(defaults)
+      legacy.aiGreeting = { enable: false, prompt: [{ role: 'user', content: '自己的模板' }] }
+      legacy.customGreeting = { enable: true, value: [{ type: 'image', image: 'resume-image' }] }
+      saved.set(conf.formDataKey(), legacy)
+      if (entry === 'init') await conf.confInit()
+      if (entry === 'reload') await conf.confReload()
+      if (entry === 'import') {
+        imported = legacy
+        await conf.confImport()
+      }
+      if (entry === 'save') {
+        Object.assign(conf.formData, jsonClone(legacy))
+        await conf.confSaving()
+      }
+      expect(conf.formData.aiGreeting).toEqual({ ...legacy.aiGreeting, enable: true })
+      expect(conf.formData.customGreeting).toEqual(legacy.customGreeting)
+      expect(conf.formData.aiFiltering.enable).toBe(legacy.aiFiltering.enable)
+      if (entry === 'init' || entry === 'save')
+        expect(saved.get(conf.formDataKey()).aiGreeting.enable).toBe(true)
+    },
+  )
+
   it('keeps newly created plans when an older page saves rules with a stale plan list', async () => {
     const conf = useConf()
     await conf.createPreset('AI 产品经理')
@@ -472,7 +509,7 @@ describe('percentage scoring configuration', () => {
       await conf[method]()
       expect(jsonClone(conf.formData.aiFiltering)).toMatchObject({
         score: 70,
-        scoringVersion: 'weighted-v1',
+        scoringVersion: 'quick-v1',
         enable: true,
         prompt: defaults.aiFiltering.prompt,
       })
@@ -523,6 +560,82 @@ describe('percentage scoring configuration', () => {
     await conf.confSaving()
     await conf.confInit()
     expect(conf.formData.aiFiltering.score).toBe(85)
-    expect(conf.formData.aiFiltering.scoringVersion).toBe('weighted-v1')
+    expect(conf.formData.aiFiltering.scoringVersion).toBe('quick-v1')
   })
+
+  it('upgrades weighted configuration without losing custom preferences or the historical threshold', async () => {
+    const config = jsonClone(defaults)
+    config.aiFiltering = {
+      ...config.aiFiltering,
+      scoringVersion: 'weighted-v1',
+      score: 85,
+      prompt: [{ role: 'system', content: '只看金融岗位，必须双休' }],
+    }
+    saved.set('local:web-geek-job-FormData', config)
+    const conf = useConf()
+    await conf.confInit()
+    expect(conf.formData.aiFiltering.score).toBe(85)
+    expect(conf.formData.aiFiltering.scoringVersion).toBe('quick-v1')
+    expect(jsonClone(conf.formData.aiFiltering.prompt)).toEqual(config.aiFiltering.prompt)
+  })
+
+  it.each(['confInit', 'confReload', 'confImport'])(
+    'exposes the complete matching prompt through %s while preserving added preferences',
+    async (method) => {
+      const config = jsonClone(defaults)
+      config.aiFiltering.prompt[0].content =
+        '根据岗位信息、完整简历和求职者明确表达的要求，一次判断匹配、不匹配或待确认，可附一句关键依据。不编造个人偏好，不输出长篇分析。'
+      config.aiFiltering.prompt.push({ role: 'user', content: '仅接受上海岗位' })
+      imported = config
+      saved.set('local:web-geek-job-FormData', config)
+      const conf = useConf()
+      await conf[method]()
+      const prompt = jsonClone(conf.formData.aiFiltering.prompt)
+      expect(prompt[0].content).toBe(defaults.aiFiltering.prompt[0].content)
+      expect(prompt[0].content).toContain('match：')
+      expect(prompt[0].content).toContain('60字以内')
+      expect(prompt.at(-1)).toEqual({ role: 'user', content: '仅接受上海岗位' })
+    },
+  )
+
+  it('keeps a customized quick matching prompt intact', async () => {
+    const config = jsonClone(defaults)
+    config.aiFiltering.prompt[0].content = '根据岗位信息判断，只要求方向相关，不设学历门槛'
+    saved.set('local:web-geek-job-FormData', config)
+    const conf = useConf()
+    await conf.confInit()
+    expect(jsonClone(conf.formData.aiFiltering.prompt)).toEqual(config.aiFiltering.prompt)
+  })
+
+  it.each(['confInit', 'confReload', 'confImport'])(
+    'relaxes the untouched previous full default through %s and keeps added preferences',
+    async (method) => {
+      const config = jsonClone(defaults)
+      config.aiFiltering.prompt[0].content = PREVIOUS_QUICK_MATCH_PROMPT
+      config.aiFiltering.prompt.push({ role: 'user', content: '仅接受上海岗位' })
+      imported = config
+      saved.set('local:web-geek-job-FormData', config)
+      const conf = useConf()
+      await conf[method]()
+      const prompt = jsonClone(conf.formData.aiFiltering.prompt)
+      expect(prompt[0].content).toBe(defaults.aiFiltering.prompt[0].content)
+      expect(prompt[0].content).toContain('5～10年')
+      expect(prompt[0].content).toContain('应届')
+      expect(prompt[0].content).toContain('其余经验要求均可尝试')
+      expect(prompt.at(-1)).toEqual({ role: 'user', content: '仅接受上海岗位' })
+    },
+  )
+
+  it.each(['confInit', 'confReload', 'confImport'])(
+    'preserves an edited full matching prompt through %s',
+    async (method) => {
+      const config = jsonClone(defaults)
+      config.aiFiltering.prompt[0].content = `${PREVIOUS_QUICK_MATCH_PROMPT}\n我修改过这份规则`
+      imported = config
+      saved.set('local:web-geek-job-FormData', config)
+      const conf = useConf()
+      await conf[method]()
+      expect(jsonClone(conf.formData.aiFiltering.prompt)).toEqual(config.aiFiltering.prompt)
+    },
+  )
 })

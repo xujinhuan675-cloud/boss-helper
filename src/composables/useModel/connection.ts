@@ -20,16 +20,17 @@ export interface ModelConnectionResult {
 }
 
 type ConnectionConfig = Partial<
-  Pick<OpenaiLLMConf, 'mode' | 'base_url' | 'api_key' | 'model' | 'advanced'>
+  Pick<OpenaiLLMConf, 'mode' | 'base_url' | 'api_key' | 'model' | 'advanced' | 'decisions'>
 >
 
 export async function testModelConnection(
   conf: ConnectionConfig,
-  fetchModels: typeof fetch = globalThis.fetch,
+  fetchEndpoint: typeof fetch = globalThis.fetch,
   timeoutMs = 10000,
 ): Promise<ModelConnectionResult> {
   let url: URL
   let headers: Headers
+  const endpoint = conf.decisions ? 'Jev Decisions 接口' : '模型列表接口'
   try {
     url = new URL(conf.base_url || '')
     if (
@@ -41,7 +42,13 @@ export async function testModelConnection(
       url.hash
     )
       throw new Error('Invalid configuration')
-    url.pathname = `${url.pathname.replace(/\/+$/, '')}/models`
+    if (conf.decisions) {
+      if (!conf.model?.trim() || !/\/v1\/?$/.test(url.pathname))
+        throw new Error('Invalid Decisions configuration')
+      url.pathname = url.pathname.replace(/\/v1\/?$/, '/alpha/decisions')
+    } else {
+      url.pathname = `${url.pathname.replace(/\/+$/, '')}/models`
+    }
     headers = new Headers({ Accept: 'application/json' })
     if (conf.api_key) headers.set('Authorization', `Bearer ${conf.api_key}`)
     const extraHeaders = conf.advanced?.extra_headers
@@ -54,20 +61,40 @@ export async function testModelConnection(
         headers.set(key, value)
       }
     }
+    if (conf.decisions) headers.set('Content-Type', 'application/json')
   } catch {
     return {
       status: 'invalid_config',
       title: '连接配置无效',
-      description:
-        '请检查 API 基础地址和额外请求头；地址应为不含账号、查询参数或片段的 HTTP(S) 地址。',
+      description: conf.decisions
+        ? '请填写 Jev 模型 ID，基础地址应为 https://openrouter.ai/api/v1 或兼容代理的 /v1 地址；检查额外请求头，地址不能含账号、查询参数或片段。'
+        : '请检查 API 基础地址和额外请求头；地址应为不含账号、查询参数或片段的 HTTP(S) 地址。',
     }
   }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetchModels(url.toString(), {
-      method: 'GET',
+    const response = await fetchEndpoint(url.toString(), {
+      method: conf.decisions ? 'POST' : 'GET',
+      ...(conf.decisions
+        ? {
+            body: JSON.stringify({
+              model: conf.model!.trim(),
+              state: '连接测试，输入为 connection_ok。',
+              questions: {
+                connection: {
+                  type: 'choice',
+                  instructions: '选择 state 中出现的标签。',
+                  criteria: {
+                    connection_ok: '输入包含 connection_ok',
+                    other: '输入不包含 connection_ok',
+                  },
+                },
+              },
+            }),
+          }
+        : {}),
       headers,
       signal: controller.signal,
       credentials: 'omit',
@@ -80,15 +107,15 @@ export async function testModelConnection(
       return {
         status: 'auth_error',
         title: '认证失败',
-        description: `模型列表接口返回 HTTP ${httpStatus}，请检查 API Key 和访问权限。`,
+        description: `${endpoint}返回 HTTP ${httpStatus}，请检查 API Key 和访问权限。`,
         httpStatus,
       }
     }
     if ([404, 405, 501].includes(httpStatus)) {
       return {
         status: 'unsupported',
-        title: '模型列表接口不支持',
-        description: `模型列表接口返回 HTTP ${httpStatus}，无法确认连接；请检查基础地址或服务商是否支持模型列表。`,
+        title: `${endpoint}不支持`,
+        description: `${endpoint}返回 HTTP ${httpStatus}，无法确认连接；请检查基础地址、模型 ID 和接口访问权限。`,
         httpStatus,
       }
     }
@@ -96,16 +123,34 @@ export async function testModelConnection(
       return {
         status: 'http_error',
         title: '连接检测未通过',
-        description: `模型列表接口返回 HTTP ${httpStatus}，请检查服务状态、限额和基础地址。`,
+        description: `${endpoint}返回 HTTP ${httpStatus}，请检查服务状态、限额、模型 ID 和基础地址。`,
         httpStatus,
       }
     }
     const body: unknown = await response.json()
+    if (conf.decisions) {
+      const answer = (
+        body as { answers?: { connection?: { type?: unknown; choice?: unknown } } } | null
+      )?.answers?.connection
+      if (answer?.type !== 'choice' || answer.choice !== 'connection_ok')
+        return {
+          status: 'invalid_response',
+          title: 'Jev 响应无效',
+          description: 'Jev 未返回预期的测试结论，无法确认 Decisions 模型可用。',
+          httpStatus,
+        }
+      return {
+        status: 'connected',
+        title: 'Jev 连接成功',
+        description: '当前模型已完成一次最小 Decisions 判断请求。',
+        httpStatus,
+      }
+    }
     const data = body && typeof body === 'object' && 'data' in body ? body.data : undefined
     if (!Array.isArray(data)) {
       return {
         status: 'invalid_response',
-        title: '模型列表响应无效',
+        title: `${endpoint}响应无效`,
         description: '接口未返回符合 OpenAI 格式的模型列表，无法确认连接。',
         httpStatus,
       }
@@ -150,7 +195,7 @@ export async function testModelConnection(
     if (error instanceof SyntaxError && !controller.signal.aborted) {
       return {
         status: 'invalid_response',
-        title: '模型列表响应无效',
+        title: `${endpoint}响应无效`,
         description: '接口未返回有效 JSON，无法确认连接。',
       }
     }
@@ -158,8 +203,8 @@ export async function testModelConnection(
       status: 'network_error',
       title: controller.signal.aborted ? '连接检测超时' : '网络连接失败',
       description: controller.signal.aborted
-        ? '模型列表请求超时，无法确认连接。'
-        : '无法读取模型列表，请检查网络、跨域限制和 API 基础地址。',
+        ? `${endpoint}请求超时，无法确认连接。`
+        : `${endpoint}请求失败，请检查网络、跨域限制和 API 基础地址。`,
     }
   } finally {
     clearTimeout(timer)
