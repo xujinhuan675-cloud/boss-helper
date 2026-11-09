@@ -16,43 +16,61 @@ if (!process.env.LOCALAPPDATA) throw new Error('Windows LOCALAPPDATA is required
 if (command === '--install') {
   if (process.platform !== 'win32') throw new Error('Installation supports Windows Chrome only')
   await mkdir(root, { recursive: true })
-  const launcher = path.join(root, 'run-host.cmd')
-  const manifest = path.join(root, 'native-host.json')
   const quote = (value) => `"${value.replaceAll('%', '%%')}"`
-  await writeFile(
-    launcher,
-    `@echo off\r\nchcp 65001 >nul\r\n${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} %*\r\n`,
-    'utf8',
-  )
-  await writeFile(
-    manifest,
-    JSON.stringify(
-      {
-        name: hostName,
-        description: 'OfferHunt redacted diagnostics mirror',
-        path: launcher,
-        type: 'stdio',
-        allowed_origins: [origin],
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  )
-  execFileSync(
-    'reg.exe',
-    [
-      'add',
-      `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${hostName}`,
-      '/ve',
-      '/t',
-      'REG_SZ',
-      '/d',
+  const hosts = [
+    {
+      name: hostName,
+      file: 'native-host',
+      launcher: 'run-host',
+      script: fileURLToPath(import.meta.url),
+      description: 'OfferHunt redacted diagnostics mirror',
+    },
+    {
+      name: 'cc.offerhunt.resume_matcher',
+      file: 'resume-matcher-host',
+      launcher: 'run-resume-matcher',
+      script: fileURLToPath(new URL('./resume-matcher-host.mjs', import.meta.url)),
+      description: 'OfferHunt Resume Matcher launcher',
+    },
+  ]
+  for (const host of hosts) {
+    const launcher = path.join(root, `${host.launcher}.cmd`)
+    const manifest = path.join(root, `${host.file}.json`)
+    await writeFile(
+      launcher,
+      `@echo off\r\nchcp 65001 >nul\r\n${quote(process.execPath)} ${quote(host.script)} %*\r\n`,
+      'utf8',
+    )
+    await writeFile(
       manifest,
-      '/f',
-    ],
-    { windowsHide: true, stdio: 'pipe' },
-  )
+      JSON.stringify(
+        {
+          name: host.name,
+          description: host.description,
+          path: launcher,
+          type: 'stdio',
+          allowed_origins: [origin],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+    execFileSync(
+      'reg.exe',
+      [
+        'add',
+        `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${host.name}`,
+        '/ve',
+        '/t',
+        'REG_SZ',
+        '/d',
+        manifest,
+        '/f',
+      ],
+      { windowsHide: true, stdio: 'pipe' },
+    )
+  }
   console.log(JSON.stringify({ ok: true, host: hostName, path: target, node: process.execPath }))
 } else if (command === '--reload') {
   try {

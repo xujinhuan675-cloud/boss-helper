@@ -1,11 +1,13 @@
 /** @jsxImportSource react */
-import { Chip, Link, Spinner, Toast } from '@heroui/react'
+import { Chip, Link, Spinner, Toast, toast } from '@heroui/react'
 import {
   Bot,
   BriefcaseBusiness,
   ClipboardList,
   FileUser,
+  FilePenLine,
   LayoutDashboard,
+  LoaderCircle,
   Moon,
   Sun,
   Target,
@@ -16,6 +18,7 @@ import { IconButton, SelectField, act } from './components'
 import { Jobs } from './Jobs'
 import { Logs } from './Logs'
 import { Models } from './Models'
+import { canStartResumeMatcher, startAndOpenResumeMatcher } from './resumeMatcherLauncher'
 import { Resumes } from './Resumes'
 import { Settings } from './Settings'
 import { openBoss, openWorkbench, selectTab } from './store'
@@ -41,6 +44,7 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
   const compact = mode === 'sidepanel'
   const [view, setView] = useState(() => resolveView(location.hash.slice(1)))
   const [dark, setDark] = useState(() => localStorage.getItem('boss-helper-theme') === 'dark')
+  const [startingMatcher, setStartingMatcher] = useState(false)
   useEffect(() => {
     const route = () => {
       const requested = location.hash.slice(1)
@@ -62,6 +66,24 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
   const themeButton = (
     <IconButton label={dark ? '浅色模式' : '深色模式'} onPress={() => setDark(!dark)}>
       {dark ? <Sun size={17} /> : <Moon size={17} />}
+    </IconButton>
+  )
+  const matcherButton = canStartResumeMatcher() && (
+    <IconButton
+      label={startingMatcher ? '正在启动定制简历' : '启动定制简历'}
+      disabled={startingMatcher}
+      onPress={() => {
+        setStartingMatcher(true)
+        void startAndOpenResumeMatcher()
+          .catch((error) => toast.danger(error instanceof Error ? error.message : String(error)))
+          .finally(() => setStartingMatcher(false))
+      }}
+    >
+      {startingMatcher ? (
+        <LoaderCircle size={17} className="animate-spin" />
+      ) : (
+        <FilePenLine size={17} />
+      )}
     </IconButton>
   )
 
@@ -113,6 +135,7 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
               </Chip>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-1">
+              {matcherButton}
               <IconButton
                 label="运行诊断"
                 onPress={() => {
@@ -133,7 +156,12 @@ export function App({ mode }: { mode: 'sidepanel' | 'workbench' }) {
             </div>
           </div>
         )}
-        {!compact && <div className="flex shrink-0 items-center gap-1">{themeButton}</div>}
+        {!compact && (
+          <div className="flex shrink-0 items-center gap-1">
+            {matcherButton}
+            {themeButton}
+          </div>
+        )}
       </header>
       {state.loading ? (
         <output className="flex min-h-48 items-center justify-center gap-3 text-muted">

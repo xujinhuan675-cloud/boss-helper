@@ -287,7 +287,7 @@ Jev 复用模型编辑器已有“连接测试”入口，使用当前未保存�
 
 后台启动、诊断持久化及清空时自动同步最近 200 条脱敏事件到 `%LOCALAPPDATA%\OfferHunt\diagnostics\latest.json`。`scripts/diagnostics-host.mjs` 与扩展共用 `normalizeDiagnostic`，只接受固定 OfferHunt 扩展来源，校验帧长度和事件，原子替换固定文件；不输出原始模型请求、简历、配置或岗位全文。原任务日志仍来自页面内存，这条通道只覆盖“运行诊断”。
 
-本机 AI 首选直接读取该 JSON，或在仓库根执行 `node scripts/diagnostics-host.mjs --read`；也提供 `npm run diagnostics:read`。首次在 Windows Chrome、Node.js 22.18+ 环境执行 `npm run diagnostics:install`，仅注册当前用户的 `cc.offerhunt.diagnostics` Native Messaging Host，不安装依赖或常驻服务。安装器固定使用当前 Node 路径及仓库脚本；移动仓库或 Node 后需重新安装。本机目录与清单位于 `%LOCALAPPDATA%\OfferHunt\diagnostics`，Chrome 注册项位于 `HKCU\Software\Google\Chrome\NativeMessagingHosts\cc.offerhunt.diagnostics`。
+本机 AI 首选直接读取该 JSON，或在仓库根执行 `node scripts/diagnostics-host.mjs --read`；也提供 `npm run diagnostics:read`。首次在 Windows Chrome、Node.js 22.18+ 环境执行 `npm run diagnostics:install`，注册当前用户的 `cc.offerhunt.diagnostics`（诊断与重载）和独立的 `cc.offerhunt.resume_matcher`（定制简历启动）两个 Native Messaging Host，不安装依赖或常驻服务。安装器固定使用当前 Node 路径及仓库脚本；移动仓库或 Node 后需重新安装。本机目录与清单位于 `%LOCALAPPDATA%\OfferHunt\diagnostics`，Chrome 注册项位于 `HKCU\Software\Google\Chrome\NativeMessagingHosts` 下对应主机名。
 
 日志页增加“AI 诊断日志访问”，显示同步成功时间、实际文件路径、失败原因、读取命令及复制、重试同步按钮，展开后提供安装方式。镜像不可用时仍保存扩展内诊断；清空时若主机不可用，旧镜像会保留，恢复连接后用当前存储覆盖。Chrome 的已打开工作台加载新包但仍使用旧权限清单时，会重载扩展以激活 `nativeMessaging`；不刷新 BOSS。
 

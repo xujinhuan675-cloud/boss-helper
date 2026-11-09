@@ -11,9 +11,18 @@ import * as resumeMatcher from './resumeMatcher'
 
 let mirrorStatus
 const mirrorCalls = []
+let nativePermissions = ['nativeMessaging']
+let nativeResult
+const nativeStarts = []
+const matcherTabs = []
 void mock.module('#imports', () => ({
   browser: {
     runtime: {
+      getManifest: () => ({ permissions: nativePermissions }),
+      sendNativeMessage: async (host, message) => {
+        nativeStarts.push({ host, message })
+        return nativeResult
+      },
       sendMessage: async (message) => {
         mirrorCalls.push(message)
         return {
@@ -23,6 +32,7 @@ void mock.module('#imports', () => ({
         }
       },
     },
+    tabs: { create: async (options) => matcherTabs.push(options) },
     storage: {
       local: { remove: async () => {}, get: async (key) => ({ [key]: mirrorStatus }) },
       onChanged: { addListener() {}, removeListener() {} },
@@ -170,10 +180,15 @@ void mock.module('./store', () => ({
 }))
 const { act, createElement } = await import('react')
 const { createRoot } = await import('react-dom/client')
+const { toast } = await import('@heroui/react')
 const { App } = await import('./App')
 let root
 let container
 beforeEach(() => {
+  nativePermissions = ['nativeMessaging']
+  nativeResult = { ok: true }
+  nativeStarts.length = 0
+  matcherTabs.length = 0
   commandError = ''
   pendingCommand = undefined
   clearDiagnostics()
@@ -207,6 +222,9 @@ beforeEach(() => {
 const originalWindowOpen = window.open
 afterEach(async () => {
   await act(async () => {
+    const hadToasts = toast.getQueue().visibleToasts.length > 0
+    toast.clear()
+    if (hadToasts) await new Promise((resolve) => setTimeout(resolve, 350))
     await new Promise((resolve) => requestAnimationFrame(resolve))
     root.unmount()
   })
@@ -225,6 +243,45 @@ const selectLogKind = async (value) => {
       ?.click(),
   )
 }
+
+test('starts Resume Matcher only on click, prevents duplicate starts and opens it after readiness', async () => {
+  let ready
+  nativeResult = new Promise((resolve) => (ready = resolve))
+  await render('sidepanel')
+  expect(nativeStarts).toHaveLength(0)
+  const button = container.querySelector('[aria-label="启动定制简历"]')
+  expect(button).toBeTruthy()
+  await act(async () => button.click())
+  expect(nativeStarts).toEqual([
+    { host: 'cc.offerhunt.resume_matcher', message: { type: 'start' } },
+  ])
+  expect(button.disabled).toBe(true)
+  await act(async () => button.click())
+  expect(nativeStarts).toHaveLength(1)
+  expect(matcherTabs).toHaveLength(0)
+  await act(async () => ready({ ok: true }))
+  expect(matcherTabs).toEqual([{ url: 'http://localhost:3000/tailor' }])
+  expect(button.disabled).toBe(false)
+})
+
+test('workbench startup failures allow retry without opening a broken page', async () => {
+  nativeResult = { ok: false }
+  await render()
+  const button = container.querySelector('[aria-label="启动定制简历"]')
+  expect(button).toBeTruthy()
+  await act(async () => button.click())
+  expect(matcherTabs).toHaveLength(0)
+  expect(button.disabled).toBe(false)
+  nativeResult = { ok: true }
+  await act(async () => button.click())
+  expect(matcherTabs).toHaveLength(1)
+})
+
+test('store builds without nativeMessaging keep the native launcher hidden', async () => {
+  nativePermissions = []
+  await render()
+  expect(container.querySelector('[aria-label="启动定制简历"]')).toBeNull()
+})
 
 test('exposes machine log access and installation when disconnected, then shows verified sync status', async () => {
   location.hash = 'logs'
@@ -1351,7 +1408,10 @@ test('groups workbench navigation and exposes the job-plan workspace', async () 
 
 test('keeps legacy filter and task-settings links working by routing them to job plans', async () => {
   for (const legacyRoute of ['filters', 'settings']) {
-    location.hash = legacyRoute
+    await act(async () => {
+      location.hash = legacyRoute
+      window.dispatchEvent(new dom.window.HashChangeEvent('hashchange'))
+    })
     await render()
     expect(location.hash).toBe('#plans')
   }
@@ -1462,7 +1522,7 @@ test('allows retrying failed details and respects a busy executor without requir
     finishCapture = resolve
   })
   await act(async () => list.querySelector('[aria-label="补详情"]').click())
-  const busyCapture = list.querySelector('[aria-label="补全中"]')
+  const busyCapture = list.querySelector('[aria-label="采集中"]')
   expect(busyCapture.disabled).toBe(true)
   await act(async () => busyCapture.click())
   expect(commands).toHaveLength(3)

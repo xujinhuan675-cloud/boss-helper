@@ -50,6 +50,16 @@ npm run reload:extension
 
 本项目的 BOSS 页面、OfferHunt 工作台和 Chrome 标签页操作统一通过 FlowGuide Chrome 控制桥完成。每次操作先枚举窗口和标签页，再使用返回的 `browserDeviceId`、`tabId`；CUA、Chrome DevTools/CDP 和调试端口直连不作为执行方式。FlowGuide 不可用时停止浏览器实测并报告桥接状态；Native Messaging 只用于扩展诊断镜像，不用于控制 Chrome 或读取页面 DOM。
 
+## 启动定制简历
+
+侧边栏和工作台顶部的文件编辑图标为“启动定制简历”。点击后在后台启动 Resume Matcher，服务就绪后自动打开 `http://localhost:3000/tailor`；启动期间按钮禁用，重复使用会复用健康服务。仅本机 Windows Chrome 包显示此入口。
+
+首次使用或移动仓库、Node 后运行 `npm run diagnostics:install`，注册独立的 `cc.offerhunt.resume_matcher` 本机启动入口。它只允许本扩展调用固定启动脚本，和诊断、重载通道分开。
+
+启动器复用已配置的 `ResumeMatcher-Backend`、`ResumeMatcher-Frontend` 计划任务，使用同级 `../Resume-Matcher/apps/backend/data/resume_matcher.db` 中的原数据；缺少数据库或任务时会报错，不创建空库。此按钮依赖这套本机环境，不会自动在新电脑安装服务。也可双击仓库根目录的 `start-resume-matcher.cmd` 启动并查看详细错误。
+
+`resume-matcher` 子模块保存可追溯的源码版本，远程为账号下的私有仓库，克隆时需要相应 GitHub 权限。日常服务仍使用上述同级目录；不要直接覆盖其个人数据或未提交改动。
+
 ## 快速岗位匹配与 Jev
 
 “分析岗位”现在每岗只发一次匹配请求，保存“匹配 / 不匹配 / 待确认”，可附同一次请求返回的一句依据。不会自动展开五维分析或生成招呼语；已完成分析的岗位跳过，历史评分与已有草稿保留。信息不足时标记待确认，不把简历未提及直接视为不具备。
