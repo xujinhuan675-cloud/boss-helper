@@ -1,11 +1,12 @@
 /** @jsxImportSource react */
 import { Button, Chip, Input, Label, Separator, Table, TextArea, TextField } from '@heroui/react'
-import { Copy, FilePlus2, FileUp, Pencil, Save, Sparkles, Trash2 } from 'lucide-react'
+import { Copy, FilePlus2, FileUp, Library, Pencil, Save, Sparkles, Trash2 } from 'lucide-react'
 import { useRef, useState } from 'react'
 
 import type { ResumeRecord } from '@/composables/useResume'
 
 import { act, ConfirmDialog, IconButton, SelectField } from './components'
+import { canStartResumeMatcher, startAndOpenResumeMatcher } from './resumeMatcherLauncher'
 import {
   command,
   copyResume,
@@ -29,6 +30,7 @@ export function Resumes() {
   const [replacement, setReplacement] = useState('__none__')
   const [keywordDraft, setKeywordDraft] = useState<string | null>(null)
   const [profileDraft, setProfileDraft] = useState<string | null>(null)
+  const [openingMaterials, setOpeningMaterials] = useState(false)
   const profileFile = useRef<HTMLInputElement>(null)
   const busy =
     state.loading ||
@@ -75,10 +77,28 @@ export function Resumes() {
             {current ? `当前使用：${current.name}` : '当前未使用简历'}
           </p>
         </div>
-        <Button onPress={() => setEditing({ id: null, name: '', content: '' })} isDisabled={busy}>
-          <FilePlus2 size={16} />
-          新建简历
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {canStartResumeMatcher() && (
+            <Button
+              variant="secondary"
+              isDisabled={busy || openingMaterials}
+              isPending={openingMaterials}
+              onPress={() => {
+                setOpeningMaterials(true)
+                void act(() => startAndOpenResumeMatcher('/materials')).finally(() =>
+                  setOpeningMaterials(false),
+                )
+              }}
+            >
+              <Library size={16} />
+              经历素材库
+            </Button>
+          )}
+          <Button onPress={() => setEditing({ id: null, name: '', content: '' })} isDisabled={busy}>
+            <FilePlus2 size={16} />
+            新建简历
+          </Button>
+        </div>
       </div>
       <Separator />
       <section className="flex flex-col gap-4" aria-label="个人求职画像">

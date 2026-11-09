@@ -54,6 +54,8 @@ npm run reload:extension
 
 侧边栏和工作台顶部的文件编辑图标为“启动定制简历”。点击后在后台启动 Resume Matcher，服务就绪后自动打开 `http://localhost:3000/tailor`；启动期间按钮禁用，重复使用会复用健康服务。仅本机 Windows Chrome 包显示此入口。
 
+工作台“简历”页的“经历素材库”按钮复用同一启动器，打开 `/materials`。导入现有 Markdown 后按项目分组，每条只维护一份可编辑文案；未核实的 `-R` 示例不自动采用。在定制页启用“使用素材库”，程序按 JD 选材，预览显示来源和匹配理由。原文件更新后需重新导入，来源未变化的条目保留页面编辑。原始文件不改动，素材保存在本机服务数据库，不写入代码仓库。
+
 首次使用或移动仓库、Node 后运行 `npm run diagnostics:install`，注册独立的 `cc.offerhunt.resume_matcher` 本机启动入口。它只允许本扩展调用固定启动脚本，和诊断、重载通道分开。
 
 启动器复用已配置的 `ResumeMatcher-Backend`、`ResumeMatcher-Frontend` 计划任务，使用同级 `../Resume-Matcher/apps/backend/data/resume_matcher.db` 中的原数据；缺少数据库或任务时会报错，不创建空库。此按钮依赖这套本机环境，不会自动在新电脑安装服务。也可双击仓库根目录的 `start-resume-matcher.cmd` 启动并查看详细错误。

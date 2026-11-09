@@ -182,6 +182,7 @@ const { act, createElement } = await import('react')
 const { createRoot } = await import('react-dom/client')
 const { toast } = await import('@heroui/react')
 const { App } = await import('./App')
+const { startAndOpenResumeMatcher } = await import('./resumeMatcherLauncher')
 let root
 let container
 beforeEach(() => {
@@ -262,6 +263,19 @@ test('starts Resume Matcher only on click, prevents duplicate starts and opens i
   await act(async () => ready({ ok: true }))
   expect(matcherTabs).toEqual([{ url: 'http://localhost:3000/tailor' }])
   expect(button.disabled).toBe(false)
+})
+
+test('opens experience materials through the same native startup after readiness', async () => {
+  let ready
+  nativeResult = new Promise((resolve) => (ready = resolve))
+  const opening = startAndOpenResumeMatcher('/materials')
+  expect(nativeStarts).toEqual([
+    { host: 'cc.offerhunt.resume_matcher', message: { type: 'start' } },
+  ])
+  expect(matcherTabs).toHaveLength(0)
+  ready({ ok: true })
+  await opening
+  expect(matcherTabs).toEqual([{ url: 'http://localhost:3000/materials' }])
 })
 
 test('workbench startup failures allow retry without opening a broken page', async () => {
